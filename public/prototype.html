@@ -1,0 +1,1706 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ТРЁШКА склад</title>
+<style>
+  :root{
+    --bg:#05070a; --panel:#1b1f27; --panel2:#12151b; --ink:#e8ebf0; --muted:#8a92a3;
+    --accent:#4f8cff; --accent-soft:rgba(79,140,255,.16); --green:#34d399; --green-soft:rgba(52,211,153,.14);
+    --red:#f87171; --red-soft:rgba(248,113,113,.14); --amber:#fbbf24; --amber-soft:rgba(251,191,36,.14);
+    --line:#2a2f3a; --chip:#232733;
+  }
+  *{box-sizing:border-box; margin:0; padding:0; font-family:'Segoe UI',system-ui,-apple-system,sans-serif;}
+  body{background:#000; min-height:100vh; display:flex; align-items:flex-start; justify-content:center; padding:24px 12px;}
+  .phone{width:400px; max-width:100%; height:840px; background:var(--bg); border-radius:34px; box-shadow:0 30px 80px rgba(0,0,0,.7), 0 0 0 10px #000; overflow:hidden; display:flex; flex-direction:column; position:relative; color:var(--ink);}
+  /* masthead */
+  .mast{background:var(--panel2); padding:8px 16px 6px; display:flex; align-items:baseline; gap:6px; border-bottom:1px solid var(--line);}
+  .mast b{font-size:13px; font-weight:800; letter-spacing:.04em; color:var(--accent);}
+  .mast span{font-size:11px; color:var(--muted);}
+  /* header */
+  .hdr{background:var(--panel2); padding:12px 16px 12px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:10px; z-index:5;}
+  .hdr .back{width:34px;height:34px;border-radius:10px;background:var(--chip);border:none;font-size:17px;color:var(--ink);cursor:pointer;flex:none;display:none;}
+  .hdr .back.show{display:block;}
+  .hdr h1{font-size:17px; font-weight:700; color:var(--ink); flex:1; line-height:1.2;}
+  .hdr .sub{font-size:11px;color:var(--muted);font-weight:400;margin-top:1px;}
+  .hdr .plus{width:34px;height:34px;border-radius:10px;background:var(--accent);border:none;font-size:19px;color:#fff;cursor:pointer;flex:none;}
+  /* content */
+  .content{flex:1; overflow-y:auto; padding:14px 14px 90px; background:var(--bg);}
+  .content::-webkit-scrollbar{width:0;}
+  /* bottom nav */
+  .nav{position:absolute; bottom:0; left:0; right:0; background:var(--panel2); border-top:1px solid var(--line); display:flex; padding:8px 4px 14px; z-index:10;}
+  .nav button{flex:1; background:none; border:none; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:3px; color:var(--muted); font-size:10px; padding:4px 0;}
+  .nav button .ic{font-size:19px; line-height:1;}
+  .nav button.on{color:var(--accent); font-weight:600;}
+  /* FAB */
+  .fab{position:absolute; bottom:86px; right:16px; width:54px; height:54px; border-radius:17px; background:var(--accent); color:#fff; border:none; font-size:23px; cursor:pointer; box-shadow:0 8px 24px rgba(79,140,255,.4); z-index:9;}
+  /* cards */
+  .card{background:var(--panel); border-radius:15px; padding:13px; margin-bottom:9px; border:1px solid var(--line); cursor:pointer; transition:transform .08s;}
+  .card:active{transform:scale(.985);}
+  .card.static{cursor:default;}
+  .row{display:flex; align-items:center; gap:10px;}
+  .grow{flex:1; min-width:0;}
+  .t{font-size:14px; font-weight:600; color:var(--ink);}
+  .s{font-size:11.5px; color:var(--muted); margin-top:2px;}
+  .qty{font-size:15px; font-weight:700; color:var(--ink); text-align:right; white-space:nowrap;}
+  .qty small{font-size:10.5px; color:var(--muted); font-weight:500;}
+  .qty.low{color:var(--red);}
+  .chip{display:inline-block; padding:3px 9px; border-radius:20px; font-size:10px; font-weight:600; background:var(--chip); color:var(--muted);}
+  .chip.green{background:var(--green-soft); color:var(--green);}
+  .chip.red{background:var(--red-soft); color:var(--red);}
+  .chip.amber{background:var(--amber-soft); color:var(--amber);}
+  .chip.blue{background:var(--accent-soft); color:var(--accent);}
+  .icbox{width:40px;height:40px;border-radius:11px;background:var(--chip);display:flex;align-items:center;justify-content:center;font-size:19px;flex:none;}
+  /* toolbar */
+  .toolbar{display:flex; gap:8px; margin-bottom:12px;}
+  .search{flex:1; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:10px 12px; font-size:13px; color:var(--ink); outline:none;}
+  .search::placeholder{color:var(--muted);}
+  select.sort{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:0 8px; font-size:12px; color:var(--ink); outline:none; max-width:130px;}
+  .filters{display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap;}
+  .fbtn{border:1px solid var(--line); background:var(--panel); border-radius:20px; padding:6px 12px; font-size:11px; color:var(--muted); cursor:pointer; font-weight:600;}
+  .fbtn.on{background:var(--ink); color:#111; border-color:var(--ink);}
+  /* section title */
+  .sec{font-size:11.5px; font-weight:700; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; margin:16px 2px 8px;}
+  .sec:first-child{margin-top:2px;}
+  /* item detail */
+  .detail-top{background:var(--panel); border-radius:16px; border:1px solid var(--line); padding:16px; margin-bottom:10px; display:flex; gap:14px;}
+  .qr-wrap{text-align:center; flex:none;}
+  .qr-wrap img{border-radius:8px; border:1px solid var(--line); padding:5px; background:#fff;}
+  .qr-wrap .s{margin-top:4px; font-size:10px;}
+  .kv{display:flex; justify-content:space-between; padding:9px 0; border-bottom:1px solid var(--line); font-size:13px;}
+  .kv:last-child{border-bottom:none;}
+  .kv .k{color:var(--muted);}
+  .kv .v{color:var(--ink); font-weight:600; text-align:right;}
+  /* timeline */
+  .tl{position:relative; padding-left:18px;}
+  .tl::before{content:''; position:absolute; left:5px; top:6px; bottom:6px; width:2px; background:var(--line);}
+  .tl-item{position:relative; padding:0 0 14px;}
+  .tl-item::before{content:''; position:absolute; left:-17px; top:4px; width:8px; height:8px; border-radius:50%; background:var(--accent); border:2px solid var(--panel); box-shadow:0 0 0 1px var(--line);}
+  .tl-item.in::before{background:var(--green);}
+  .tl-item.out::before{background:var(--amber);}
+  .tl-item.off::before{background:var(--red);}
+  .tl-item .t{font-size:13px;}
+  /* buttons */
+  .btn{display:block; width:100%; padding:13px; border-radius:13px; border:none; font-size:14px; font-weight:700; cursor:pointer; text-align:center; margin-top:10px;}
+  .btn.primary{background:var(--accent); color:#fff;}
+  .btn.primary:disabled{background:#334; color:#889; cursor:not-allowed;}
+  .btn.ghost{background:var(--panel); color:var(--accent); border:1.5px solid var(--accent);}
+  .btn.green{background:var(--green); color:#06231a;}
+  .btn.red{background:var(--red); color:#2a0a0a;}
+  .btn.red:disabled{background:#3a2a2a; color:#775; cursor:not-allowed;}
+  .btn-row{display:flex; gap:8px;}
+  .btn-row .btn{margin-top:10px;}
+  /* forms */
+  .fld{margin-bottom:11px;}
+  .fld label{display:block; font-size:11.5px; font-weight:700; color:var(--muted); margin-bottom:5px;}
+  .fld label .req{color:var(--red);}
+  .fld input,.fld select,.fld textarea{width:100%; background:var(--panel); border:1px solid var(--line); border-radius:11px; padding:11px 12px; font-size:13.5px; color:var(--ink); outline:none;}
+  .fld input::placeholder,.fld textarea::placeholder{color:#5b6270;}
+  .fld input:focus,.fld textarea:focus{border-color:var(--accent);}
+  .fld textarea{resize:none; height:64px;}
+  .fld .hint{font-size:10.5px; color:var(--muted); margin-top:3px;}
+  .fld.err input,.fld.err select,.fld.err textarea{border-color:var(--red);}
+  .progress-note{background:var(--amber-soft); border-radius:11px; padding:10px 12px; font-size:12px; color:var(--amber); margin-bottom:12px; font-weight:600;}
+  .progress-note.ok{background:var(--green-soft); color:var(--green);}
+  .progress-note.bad{background:var(--red-soft); color:var(--red);}
+  .notice-danger{display:flex; align-items:center; gap:10px; background:rgba(248,113,113,.1); border:1px solid rgba(248,113,113,.35); border-radius:13px; padding:12px; margin-bottom:12px; cursor:pointer;}
+  .notice-danger .icbox{width:30px;height:30px;font-weight:800;font-size:16px;flex:none;}
+  .scan-screen{position:absolute; inset:0; background:#000; z-index:45; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:24px; gap:18px;}
+  .scan-screen .x{position:absolute; top:18px; right:18px; background:none; border:none; color:#fff; font-size:26px; cursor:pointer;}
+  .scan-frame{width:220px; height:220px; position:relative;}
+  .scan-frame i{position:absolute; width:38px; height:38px; border-color:var(--accent); display:block;}
+  .scan-frame i:nth-child(1){left:0;top:0;border-left:3px solid;border-top:3px solid;border-radius:8px 0 0 0;}
+  .scan-frame i:nth-child(2){right:0;top:0;border-right:3px solid;border-top:3px solid;border-radius:0 8px 0 0;}
+  .scan-frame i:nth-child(3){left:0;bottom:0;border-left:3px solid;border-bottom:3px solid;border-radius:0 0 0 8px;}
+  .scan-frame i:nth-child(4){right:0;bottom:0;border-right:3px solid;border-bottom:3px solid;border-radius:0 0 8px 0;}
+  .scan-screen h2{color:#fff;font-size:15px;}
+  .scan-screen p{color:var(--muted);font-size:12px;}
+  .qty-picker{display:flex;align-items:center;gap:8px;margin-top:8px;}
+  .qty-picker select{flex:1;}
+  .qty-picker input{width:80px;}
+  .sel-check{width:22px;height:22px;border-radius:7px;border:1.5px solid var(--line);flex:none;display:flex;align-items:center;justify-content:center;font-size:13px;color:transparent;}
+  .sel-check.on{background:var(--accent);border-color:var(--accent);color:#fff;}
+  .issue-bar{position:sticky; bottom:0; background:var(--panel2); border:1px solid var(--accent); border-radius:14px; margin-top:12px; padding:12px; display:flex; justify-content:space-between; align-items:center;}
+  .issue-bar b{font-size:16px;color:var(--accent);margin-right:4px;}
+  /* materials table */
+  .mat{display:flex; align-items:center; gap:8px; padding:9px 0; border-bottom:1px solid var(--line); font-size:13px;}
+  .mat:last-child{border-bottom:none;}
+  .mat .grow .t{font-size:13px;}
+  .mat .q{font-weight:700; color:var(--ink); white-space:nowrap;}
+  .mat .del{background:var(--red-soft); color:var(--red); border:none; width:26px; height:26px; border-radius:8px; cursor:pointer; font-size:13px;}
+  .addmat{display:flex; gap:6px; margin-top:10px;}
+  .addmat select{flex:1;}
+  .addmat input{width:70px;}
+  .addmat button{background:var(--accent-soft); color:var(--accent); border:none; border-radius:11px; padding:0 14px; font-weight:700; cursor:pointer; font-size:18px;}
+  /* toast */
+  .toast{position:absolute; bottom:150px; left:50%; transform:translateX(-50%) translateY(20px); background:#fff; color:#111; padding:11px 18px; border-radius:12px; font-size:12.5px; opacity:0; transition:all .25s; z-index:50; white-space:nowrap; pointer-events:none; max-width:90%; font-weight:600;}
+  .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
+  /* stats strip */
+  .stats{display:flex; gap:8px; margin-bottom:12px;}
+  .stat{flex:1; background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:10px 12px;}
+  .stat .n{font-size:18px; font-weight:800; color:var(--ink);}
+  .stat .n.red{color:var(--red);}
+  .stat .l{font-size:9.5px; color:var(--muted); font-weight:600; margin-top:1px;}
+  .doc-link{color:var(--accent); font-weight:600; text-decoration:underline; cursor:pointer;}
+  .steps{display:flex; align-items:center; gap:4px; margin-bottom:12px;}
+  .step{flex:1; text-align:center; font-size:9.5px; font-weight:700; color:var(--muted); padding:7px 2px; background:var(--panel); border:1px solid var(--line); border-radius:9px;}
+  .step.done{background:var(--green-soft); color:var(--green); border-color:transparent;}
+  .step.now{background:var(--accent); color:#fff; border-color:transparent;}
+  .arrow{color:var(--muted); font-size:10px;}
+  /* menu sheet */
+  .sheet-backdrop{position:absolute; inset:0; background:rgba(0,0,0,.55); z-index:40; display:flex; align-items:flex-end;}
+  .sheet{background:var(--panel2); width:100%; border-radius:20px 20px 0 0; padding:10px 16px 22px; border-top:1px solid var(--line);}
+  .sheet .handle{width:36px;height:4px;background:var(--line);border-radius:3px;margin:4px auto 14px;}
+  .sheet-item{display:flex; align-items:center; gap:12px; padding:13px 4px; cursor:pointer; border-bottom:1px solid var(--line);}
+  .sheet-item:last-child{border-bottom:none;}
+  .sheet-item .icbox{background:var(--chip);}
+  .badge-role{display:inline-block; padding:2px 8px; border-radius:20px; font-size:9.5px; font-weight:700; background:var(--accent-soft); color:var(--accent); margin-left:6px; vertical-align:middle;}
+</style>
+</head>
+<body>
+<div class="phone">
+  <div class="mast"><b>ТРЁШКА</b><span>склад</span></div>
+  <div class="hdr">
+    <button class="back" id="backBtn" onclick="goBack()">←</button>
+    <h1 id="hdrTitle">Склад<div class="sub" id="hdrSub"></div></h1>
+    <button class="plus" id="plusBtn" style="display:none" onclick="openPlusMenu()">＋</button>
+  </div>
+  <div class="content" id="content"></div>
+  <button class="fab" onclick="scanDemo()" title="Сканировать QR">▣</button>
+  <div class="nav" id="nav">
+    <button data-tab="sklad" class="on" onclick="go('sklad')"><span class="ic">📦</span>Склад</button>
+    <button data-tab="posts" onclick="go('posts')"><span class="ic">🛠</span>Посты</button>
+    <button data-tab="docs" onclick="go('docs')"><span class="ic">📄</span>Документы</button>
+    <button data-tab="ext" onclick="go('ext')"><span class="ic">🚚</span>Выдачи</button>
+    <button data-tab="more" onclick="go('more')"><span class="ic">⋯</span>Ещё</button>
+  </div>
+  <div class="toast" id="toast"></div>
+  <div id="sheetLayer"></div>
+</div>
+
+<script>
+/* ================= QR-КОДЫ (плейсхолдер, заменяется скриптом сборки на реальные PNG) ================= */
+const QR_IMAGES = {
+  "АКБ-0610": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACcklEQVR4nO3dQU7DQAxGYUCcoPc/Y69Qtl5gyZb9Mmn1viU0If1lmdFkMvl+vV5fYvycvoBPZrggwwUZLshwQYYLMlzQb/aLx+Ox/seez+e/5z/18y3x/JGVCzJckOGC0p4bZT2lIutxlXMS/bF7DZnKtVm5IMMFGS6o1HOjSq/Z6qfZ+JQYw259r8jKBRkuyHBB7Z67JetflXHx5DNXsnJBhgsyXNCxnttV6aF36LORlQsyXJDhgto9dzIHGk16aOUaute59b0iKxdkuCDDBZV67pX3srpztd11C9mxBCsXZLggwwV93+2ZiEqvfBdWLshwQYYLSnvuZPyYnSfqHju557Z1/m4OVi7IcEGGC0rnFiZrAOhemZn8b4i21o1ZuSDDBRkuaLRuYes+WPc88ViiR1c4zj3McEGGC2o/h0aPTyfu9tywlQsyXJDhgkb30Lq9qdu/6DnfCecWDjNckOGCRnMLk/nTuz0z5vrcN2O4IMMFtfcVm9yPyo4l9lXojrW35h8iKxdkuCDDBSHrc7fmHLbmFrLPd6+h+3/IygUZLshwQaX1uZmtfWqI/W6uZM89wHBBhgsqrc/t2tqXdqu30uPfjJULMlyQ4YKOvSdi8re29smdzF04n3uY4YIMF3S790Rk97W6x2aIPckyVi7IcEGGCzr2nojsnMQ8APGMWYWVCzJckOGC3mbP8kx3/VnlPJOxdmTlggwXZLigYz13sqcXsV5ia9/eyMoFGS7IcEHH3hPR7bPdz3THv1t7kkVWLshwQYYLOvaeiCvfb0asc3Cce5jhggwXdLv3RHwSKxdkuCDDBRkuyHBBhgsyXNAfRqGBpvSHFcMAAAAASUVORK5CYII=",
+  "АН-0009": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACdUlEQVR4nO2dW2rEMAwAu6UnyP3PuFfY/vpHICFNFJaZz9Zx3EEI1fHj9fl8foThd3sA34xyQZQLolwQ5YIoF0S5IH/RL67rGn/Z+/0u9Z9pf7Y5OdtX31slGoORC6JcEOWChDn3JMopGTK5MsqPnfFMtYnI5G4jF0S5IMoFSeXck2p9mumnWodWa9XqeDr9nBi5IMoFUS5IOedO0alzM+2JOYQqRi6IckGUC7KWc08687ZPxsgFUS6IckHKOXcq90W1apR/q7VwFaJPIxdEuSDKBUnl3Dv/T6/O83ZyMf13GbkgygVRLsjrCXsiiBqWroszGLkgygVRLkhqfe7U966TzHxCRGc80dg663xdn7uAckGUC9L6hkasG4uejeZ2o37otbeZ/o1cEOWCKBek9Q2ts5aWXsObodOnde4yygVRLkhrT8TWGtvMe6ee7eRlIxdEuSDKBQm/oU3t2b2zJr1zf4RzC8soF0S5IGGdWz2vgMjR9JkJRD8nRi6IckGUC1KuczMQtfDU2lt6/uHEyAVRLohyQcbW53ZyXNQ+8y46F3fmNIxcEOWCKBdkbT53ah0CfTZudQwnRi6IckGUC7K2D23qDPJOn9Vnq/W1kQuiXBDlgqzdE5H5eURnbFNr2pzPXUa5IMoFecQ9EZn20bPE+eVTbYxcEOWCKBdk7Z6IqM879wp3xmOdu4xyQZQL8rgzy4k+O7VzZ47YyAVRLohyQdZybmc9Fr1XeOrcXiMXRLkgygVZuyei8z0tk+8yP586OyLCyAVRLohyQdbuidi6e6LzrOsWHoRyQZQL8oh7Ir4VIxdEuSDKBVEuiHJBlAuiXJB/sb2UhJHQRIYAAAAASUVORK5CYII=",
+  "АН-0021": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACZElEQVR4nO2dQW4DIRAE4ygv2P+/0V+wr1xGmRaUYa2qo2MDLo06mGXZx+v1+hGG390D+GaUC6JcEOWCKBdEuSDKBfmr/nBd1/LOns/nv32tek/V7ye/l5ULolwQ5YKUmTtSZUqHKuPS16vcrMbWGTPxvUasXBDlgigXpJW5I52sSfOuk6HpZ9M2V32vESsXRLkgygWJM5eg89u/M58l1g1msHJBlAuiXJBtmZtm6x2xckGUC6JckDhzV2Vi+nufzmKifSsXRLkgygVpZS7xmz1dh515vTMGAisXRLkgygV5nHxPRHpd67T1CisXRLkgygUpM5eeh3b6qkjnp6vWMdJxWrkgygVRLkgrc0dm8mtVVqZjm1kXnvFg5YIoF0S5IOV6bppfq3K2gmif+L8yYuWCKBdEuSCt9dyZddU0H4kcJ9ZzzdzNKBdEuSDxNTRiPbfTfuf9I8Q83fvQDkK5IMoFmZrn0mujRF7PvMdraAehXBDlgsT7FipWrSd0SPsi9kJ02rdyQZQLolyQeJ5L7Iddlcv0ODt9jVi5IMoFUS7I1P7cFOJ6WgUxznQ8Vi6IckGUC7LtPrSZM8hHPrkWnGLlgigXRLkg254TsSpnd+2LqMYzYuWCKBdEuSDbnhOR9ju2Q1zvGnHfwg1QLohyQbY9JyI996szL06f91PhfWg3QLkgygXZdmY5fd/wCeu8Vi6IckGUC3LEcyKIc8jo83Od525GuSDKBVl2T0QFvT9h1RiIdqxcEOWCKBckPstxBvoc3g7uW/gSlAuiXJCjnxNxd6xcEOWCKBdEuSDKBVEuiHJB3jDMsRDff8KAAAAAAElFTkSuQmCC",
+  "ДР-0501": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACcElEQVR4nO2dW27DQAgAm6onyP3PmCukv/uDBIUxbjTzmTobZ4Qowft4vN/vL2H43r6BT0a5IMoFUS6IckGUC6JckJ/oD8/nc/zDXq/Xn8eP3nu+fhJdQ3+vEyMXRLkgygUJc+5JlFMyRDkuk0M7783cM/G9ToxcEOWCKBcklXNPMrkmk8sytepUDVu9n4hqjjZyQZQLolyQcs6dolPnVsfcwsgFUS6IckHWcu5Jp59wZ4xcEOWCKBeknHM7PdCTTB+20yuoQoxp5IIoF0S5IKmce2VdmekzVOcwZD6LwMgFUS6IckEen7omopOLpzByQZQLolyQ1PzcTl1Z7Q90xu/UuZ05Es7PXUC5IMoFafUWOvmo+ru+kx+rTM0bM3JBlAuiXJDymohM/o1eJ56/Za7JzP8l/gcYuSDKBVEuSKvOnao3o9zXWYeWuZ/O6xmMXBDlgigXJPUMjVibm/mszJhb2FtYRrkgygVp9RbovmqnRq7maOfn/jOUC6JckLDO7ay7zYwzdX1Ep16emhds5IIoF0S5IOX5ucQ+MlfW0fQ+ZydGLohyQZQLguyfW/0tP/XMirjnzphGLohyQZQLsrYOjZgLcYca/MTIBVEuiHJB1s6J6DBVz3bWudnPXUa5IMoFud05EVPvjZg6P8I6dxnlgigXZO2ciOj6qR5CZm1FxNRzPCMXRLkgygW5xZ7lBJ35udW1cBFGLohyQZQLspZzO3smEH3Y6twJ69xllAuiXJC1cyKm5idU+xL0PugnRi6IckGUC7J2TsSV+yoQ8xysc5dRLohyQT72nIg7YOSCKBdEuSDKBVEuiHJBlAvyC6r5k9zfG8K1AAAAAElFTkSuQmCC",
+  "ДР-0512": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACe0lEQVR4nO2dQW4DMQgAm6ovyP/fmC8kV19QQTDLqp05pol3M0KEerH9eL/fX8LwvX0DfxnlgigXRLkgygVRLohyQX6iPzyfz/GLvV6vX8eP3nO+fpJ5T/T+KaLrGrkgygVRLkiYc08yuSyCyHEnnXujv5eRC6JcEOWCpHLuSSbXZHJZVM9mxp+qkTNjRuNnMHJBlAuiXJByzp1iqv7NzFdsYeSCKBdEuSBrObdTe1br6C2MXBDlgigXpJxzt3JZJv9uze1GGLkgygVRLkgq5xL/s0fzrfTr0T0QGLkgygVRLkiYc7fq2er8bPU+r/xeRi6IckGUC5Lqz+301UYQc7LVnodqz291ftnIBVEuiHJBWvO5nWdcU1R7wjKfrc5dRBi5IMoFUS7II9pvoTPXOVUXE7UzMV8RYeSCKBdEuSDlnFvNa0TN23k+RqwPdm5hAeWCKBekVedO9dgS1+rszzD1m2HkgigXRLkgqb6FKCdmchOxToweZyoXG7kgygVRLsjYOrROrTrVhxvdT2f/hw5GLohyQZQLgveKTa1fqN5bp+6eWkNh5IIoF0S5IOF8bsTUfl30s7ipvovO/Ri5IMoFUS5IOedOMVVjTvULT/UqnBi5IMoFUS7I2jkR0et0/+zUPG9mHCMXRLkgygW5xTkRV+5HM7Xm2Dp3GeWCKBfkFudEVMe/wxloGYxcEOWCKBfk1udEVHvCMp+d2u/RuYVllAuiXJC1nHvSORuNfobW6WkzckGUC6JckNTa3yufWXWY2udsahwjF0S5IMoFucU5ERFTeypG1yX2PzsxckGUC6JckLX+3P+AkQuiXBDlgigXRLkgygVRLsgHJ6aDXNGIH9UAAAAASUVORK5CYII=",
+  "ДР-0520": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACaElEQVR4nO3dQW7rMAxF0aboCrL/NWYL6VQTAiTIazrtPcN+x4kfCEJfluzH+/3+EuN7+wf8ZYYLMlyQ4YIMF2S4IMMF/UT/8Hw+x7/s9XqVzn8efzo/G50z89kp0XdZuSDDBRkuKOy5p6inZEQ9rtp/M6q/k7iuk5ULMlyQ4YJSPffUGZ9mZMatU+PlE3FdVi7IcEGGCyr33ClbcwtXsnJBhgsyXNBaz60i5mFpVi7IcEGGCyr3XGL8WB2rZo6vjnmJ67JyQYYLMlxQqud+4hgzg74uKxdkuCDDBT229kR0+l11nneLlQsyXJDhglLrc6v3/TvrCqq9OHP8Vn+3ckGGCzJcEH4PLdOzOn050687n+2Mna1ckOGCDBfUWp8brZnNHH+q9uXOuDtzzNRaXSsXZLggwwW1xrn0fgR6r1rne51bWGa4IMMFpe6hTT3HoNNDq70yQu+jO1m5IMMFGS6ofA9tav9YRnUe9spn3zjOXWa4IMMFtdaKdf5vvjVvEB0f8R7aTRkuyHBBrfncqd469VwFYqza+ayVCzJckOGCwnEuMT7trG3o9OuqqfGvlQsyXJDhgm69D42YF67+ns443coFGS7IcEFr74kgzlPdk+Z87gczXJDhgm7xnojqeab2pFVV+6+VCzJckOGC1t4TQe/Tzfw94p6ID2C4IMMFrT2zvPpMW3qNQfX5DxlWLshwQYYLusV7IqbGs519EFPrJU5WLshwQYYLusV7Ik5T/TQ655XP1bVyQYYLMlzQ2nsittbbTs3tOp+7zHBBhgtaW5/7H1i5IMMFGS7IcEGGCzJckOGCfgFofnYSRJcZUAAAAABJRU5ErkJggg==",
+  "ДР-0530": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACeUlEQVR4nO2dQW7EIAwAu1VfkP+/MV9Ir1ws2bInoHbmuJtAGFle5IXweZ7nSxi+dz/AX0a5IMoFUS6IckGUC6JckJ/oi+u6xju777vU13r9ek3m84g3x2XkgigXRLkgYc5dyeSyiEyOy7RfzadTbWb6ijByQZQLolyQVM5dmcqhU/PWKabGtWLkgigXRLkg5ZxLUM2/mc935e4VIxdEuSDKBTki565E883T5sUZjFwQ5YIoF6Scc+m8NlWXqLZJjMvIBVEuiHJBUjmX+K9/ZaqekMm/K/S4jFwQ5YIoFyTMuaf9fzXVzpvjMnJBlAuiXJBPtA+tM3+M6KzPzTxbBuL5I4xcEOWCKBckNc/t1ElXiLW6U/+hVX8PMv0auSDKBVEuSHkf2lQttZrjonuJmu/UHN/IBVEuiHJBxvahdfbgvrmu4M19cUYuiHJBlAtSri1M1ROm5ssZqmOJrrGeexDKBVEuSKq2EOWaas6q5tBqTbnzPJ3fEuu5G1AuiHJBWusWpmqynXULmeunqPZr5IIoF0S5IGN7f6dycab9lan3OlbztfXczSgXRLkgrZxb3etFrHnIrD3IUK1dWFvYjHJBlAsS1hZo6HfTEHNeawsHoVwQ5YJsOyeic6ZDp3bRWbdQxcgFUS6IckG2nRPRWcMQtUPsnYvu9ZyIzSgXRLkg286JyNxLnElRpXOvkQuiXBDlghz9znJibS+x7i3CyAVRLohyQY7IudWaQKduQNQ0IoxcEOWCKBdk2zkRxB7iTF/0e8pXjFwQ5YIoF2TbORFT77Ht1Hyn5tcRRi6IckGUC7Jtfe5/wMgFUS6IckGUC6JcEOWCKBfkF+zvgsx67+DLAAAAAElFTkSuQmCC",
+  "ДР-0540": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACe0lEQVR4nO2dQU7EMAwAWcQL9v9v3C8s11wsbNlTF5i50m3DyLJS10ke7/f7Qxg+twfwl1EuiHJBlAuiXBDlgigX5Cv6w/P5HH/Y6/X68f7nNdF4ovtEv43uM0X0XCMXRLkgygUJc+5JJpdFVHNc9frO2Oj/y8gFUS6IckFSOfckk2syuaw6n82MgZ7/VnO0kQuiXBDlgpRz7hSd2kJ0PVE36GDkgigXRLkgazm3OveszjE7dYMpjFwQ5YIoF6Scc+lclvlWFrFV240wckGUC6JckFTOJd7Zp+aw0dg6deEpjFwQ5YIoFyTMuVe+m3fyZpUr/y8jF0S5IMoFSfXnVvtqO3WAap6tPrc6/+30FBu5IMoFUS4IUs+98l2+MxeOfpvpObM/dxnlgigXZK2eG7HVb5DJvyeZcRq5IMoFUS4Ivg7tpPruH41hat1EdQwR1hYWUC6IckEemX3FOu/XGaZqu51abee5EUYuiHJBlAty6drfqRxN32cqFxu5IMoFUS5I6xsa8Y5f3T9sqs+MmL8buSDKBVEuSFhbmNojhq4FT+1rQ1xv5IIoF0S5IOU1EZm8c2U/b+eeJ8T6CyMXRLkgygVJfUMjIObRd+hVODFyQZQLolyQtXMiOs+d2mu8M3fO3MfIBVEuiHJBbndOBN3z0FlHV73GyAVRLohyQW59TkRmDFtnoGUwckGUC6JckFucE5FZa5vpCTup9pl1nmttYQHlgigXZC3nRnRqEcQ3tE4vmpELolwQ5YKsnRMxVTONqPa0Rb/t9JAZuSDKBVEuyK85J2JqzwdiX2BrCwsoF0S5IGv9uf8BIxdEuSDKBVEuiHJBlAuiXJBv/RBzYMhlsd8AAAAASUVORK5CYII=",
+  "КБ-0207": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACeklEQVR4nO2dSW7EQAgAM1FeMP9/43xhcu1DkEBQxkmqjlnadgkhRG+P9/v9IQyf2y/wl1EuiHJBlAuiXBDlgigX5Cv6xfP5HH/Y6/X6cfzo51NjntDfdWLkgigXRLkgYc49iXJKhijHdcas5tnMOFUyudvIBVEuiHJBUjn3JJNrqrksk5en/qb6DtVxToxcEOWCKBeknHOnyPQWojyYqW07NewURi6IckGUC7KWc0+IHusdMHJBlAuiXJByzr2yfszMg2Xq5cw7E99l5IIoF0S5IKmcS9ehmZ7s1DqHaEwCIxdEuSDKBQlz7lY/tLP24G59XiMXRLkgygVJrc+tzvtP1aEZMuN33iHT33B97gLKBVEuSGsO7cq6srOfovO/nfW/Ri6IckGUC1Lu5555p1rPTu03i96tSqc2z+RfIxdEuSDKBXlEZ9x01gNMrSWojhnR6Q90vsXIBVEuiHJBwpx7QvRqO/vHiB5C5rlVjFwQ5YIoF6R1xk2nlzrVV+3k32j8DNa5yygXRLkgqTr35A7nHkQQ9axzaDdFuSDKBRnbh0afo0icA0n0l0+MXBDlgigXJDWHdnLl2lui51t9boQ5dxnlgigXpNxbmGKqxszQ6Wl08r6RC6JcEOWCrN0TkXludZ9FdU+a/dxfjHJBlAtyu3siptbJEvdTVPOvkQuiXBDlgqzdEzF171lmTPpZ9hYWUC6IckHWziyf2tsW0Zlzm+qrGLkgygVRLsgt7ok4mTonbKpX2+lRGLkgygVRLsit74mInkvnyimMXBDlgigXZO2eiK31tlO9Xfu5yygXRLkga+tz/wNGLohyQZQLolwQ5YIoF0S5IN9UAX7crOegrgAAAABJRU5ErkJggg==",
+  "КБ-0230": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACY0lEQVR4nO2dQW7DMAwEm6IvyP/fmC+kV12ELkGOZaQzx9SW7AHBErRsPd7v95cwfJ++gE9GuSDKBVEuiHJBlAuiXJCf3R+ez+f4ZK/X68/xk2OS49ffV+j7WjFyQZQLolyQbc5d2eWUhGpuJfJsMk6V5DqNXBDlgigXJMq5K9WcmFCtbavnJtdD3JeRC6JcEOWClHPuFJ36NDm3U8NOYeSCKBdEuSDKBVEuiHJBlAtSrnOvrB+Tvm3192SuKYxcEOWCKBckyrnEs/47QN+XkQuiXBDlgmxz7pX17FTuu1uf18gFUS6IckGi9bnV5/7EOgR6XVdyPbsxXZ97AOWCKBfkkbz7S+SsZK5qvps6d0d1LiMXRLkgygVprRWbepbVqYU7TOXfHUYuiHJBlAsS1blVqrmMyKHJ+HRNbeSCKBdEuSB4b2GFfmesWncn19nByAVRLohyQcrfuJmqGZN5OzmU7m9Y5x5GuSDKBSn3Fuh3E6ae103Vs521E0YuiHJBlAvSeg+NzmtTNW913qlzjVwQ5YIoF2Rb596h39rp/9Lr28y5h1EuiHJBkHULCVM1ZgLxfyIZ38gFUS6IckGO7ROxm6vzPZrOM7qp41eMXBDlgigX5Hb7RCTjEL2IhGr+NXJBlAuiXJBj+0Tsxunk6OrvO6pz2Vs4gHJBlAtybJ8IYp3A7vhk3uqebAlGLohyQZQLciznrnTWeO2Y6tV2ehRGLohyQZQLcrt9Iujv5vj93A9BuSDKBTm2T0S1T3rl+2nJufZzD6NcEOWCHFuf+x8wckGUC6JcEOWCKBdEuSDKBfkFboJ71BbfWAEAAAAASUVORK5CYII=",
+  "НСУ-0011": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACcklEQVR4nO2dUW6DQAwFm6onyP3PmCskv/tRS7bswaid+UwILCPrabMYeLzf7y9h+N4ewF9GuSDKBVEuiHJBlAuiXJCf6Ivn8zl+sNfr9ev+M59HROOMfkuf14mVC6JcEOWChJl7ksm+iEwmVvM3k8uZbYjzOrFyQZQLolyQVOaeZLKmk2XRfqbmxRHEeVm5IMoFUS5IOXOnyGToSTV/74CVC6JcEOWCrGVuxFSGTs21O1i5IMoFUS5IOXOJLOtk69TcljgvKxdEuSDKBUllLv2fnbieVr3ORmDlgigXRLkgYeZe+d98ag3hyut7GaxcEOWCKBck1Z9b7ZOdysHMbzPHJdaFM36sXBDlgigXpNUrdmYN0b9VHUNEp+ehcy5WLohyQZQL8ph63gLdvzWV3dVetM4YrFwQ5YIoF6ScucR9ZZn9R8eqji3avrqNawvLKBdEuSCteW51Dtv5j9/JzWj7zDg7WLkgygVRLsjYNbSTrTnslX1jznOXUS6IckHG5rlEz1ZnXZUYg+u5N0K5IMoFGetbOCHylLivoZOnznOXUS6IckHGnp9L9C1U1wc6x830wFWxckGUC6JckLFesSpTa7tTPV5ED5mVC6JcEOWCrL0ngt4mYur+ugxWLohyQZQLcov3RFT3Q/ScVceQ2aeVC6JcEOWCrL0ngng2efXziKn1aCsXRLkgygVZe2Y5/ZyETn/u1LqKlQuiXBDlgtziPRFT89lOn9nU/cQnVi6IckGUC3KL90RUj0tn5RRWLohyQZQLsvaeiOqzE698rnnmt94TsYxyQZQLstaf+x+wckGUC6JcEOWCKBdEuSDKBfkAwM+Jzih8x1YAAAAASUVORK5CYII=",
+  "НСУ-0022": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACdklEQVR4nO2dTU7FMAwGeYgT9P5n7BXKNgss2bLnJcDM8pH+jaxPwU3b1/M8H8LwufsE/jLKBVEuiHJBlAuiXBDlgnxFf7iua/xg933/uP/o9+q2GejrWrFyQZQLolyQMHNXqrm2ksm4TP5WczYznr4uKxdEuSDKBUll7komazJZVs3WaMwUU9e1YuWCKBdEuSDlzJ2C6C10eg4EVi6IckGUC7ItczM5m9n2ZKxcEOWCKBeknLnvzLvOfLY65yWuy8oFUS6IckFSmUv3Tzt9g2qPIjoHAisXRLkgygUJM3fXfHYKYq1CFSsXRLkgygV5Rc+hTd3jith176vTl8hc+4qVC6JcEOWChJkbMdVjXenkWiffq/uvXq+VC6JcEOWCpDJ36n9/4nmzqcyNxnewckGUC6JckLFnf4meQGdNwtQzbBmc525AuSDKBUndQ6N7oJ18zJxDdUx0nlWsXBDlgigXZOyZCGL9bDRmak491duNsHJBlAuiXJBW5mYysfOOm87ahs58dqp/beWCKBdEuSCpfm4n++jnxzLHzZxPZttqFlu5IMoFUS5Iea1YROe+E7HeqzNXtbfwC1AuiHJBxjK3Cj3HzOyzs38zdzPKBVEuyLbvRES/0/Plqd6Iz0RsRrkgygU54jsRmeN23mUT7bMzJoOVC6JcEOWCHPediMyxqvn7zjn7ipULolwQ5YIc952IzPgI4p0J1dxfsXJBlAuiXJBtmbsy1Teo3perbuu6hYNQLohyQbZ9J6KzTnYK4l0NK1YuiHJBlAtyxHciot+Je2jEe4HtLWxAuSDKBdm2Pvc/YOWCKBdEuSDKBVEuiHJBlAvyDcB6mJjcUw26AAAAAElFTkSuQmCC",
+  "ОП-0210": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACa0lEQVR4nO2dQW7DQAgA26ovyP/fmC+k1z0UCQRjnHbmmNgbe4QQ2cXrz9fr9SEMX9sX8JdRLohyQZQLolwQ5YIoF+Q7+uLxeIz/2PP5/HX88/Pq9UTnRuPT93Vi5IIoF0S5IGHOPcnkxIhqrozOrebNzPjEfZ0YuSDKBVEuSCrnnkzlu0w+7dS/nevpjHNi5IIoF0S5IOWcO0W1bu3MLWxh5IIoF0S5IGs5N8Md8mYHIxdEuSDKBSnn3M4c6Ek1n0797pXjG7kgygVRLkgq59L1ZmY+d2r+94S+LyMXRLkgygUJc+4d6sor+7oIjFwQ5YIoFyTVn0v31Xb6yTpk7qXjwcgFUS6IckHG5haiHNTpk516DqLKVN+YkQuiXBDlgnxG+y1Ua8Aq1ZqRXnOr5lnr3GWUC6JckDDnnnT+g0fHRFxZn3bW66IxT4xcEOWCKBekXOd2cuvW/O/WWpyRC6JcEOWCpPoWpuo+os6dWmezP/fNUC6IckFSdW6GqT6EqR6GqXrZvoWbolwQ5YKU+3OncvFUP0N0TGfeY2ofSCMXRLkgygUp759bzZWdPrNqjuvM20bndsY0ckGUC6JckFTfAgHRm3Xl2p1raMsoF0S5IGvvich8HjFVz9L7/Bq5IMoFUS7I27wnIjqXeFZi6hgjF0S5IMoFWXtPRGbMqXWwzrxwZx3PyAVRLohyQW69Z/mVVPO1de4yygVRLshazr3Dvjmd/jDr3GWUC6JckLX3REw9z1Zd16L3QT8xckGUC6JckLX3RND7lk2NY9/CTVEuiHJB1vpz/wNGLohyQZQLolwQ5YIoF0S5ID/nIYX2fisbZQAAAABJRU5ErkJggg==",
+  "ОП-0215": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACdklEQVR4nO2dQW7DMAwEm6Iv8P/f6C8kVx1KgAQ5ltDOHNNAjgfEQqVp+/V+v7+E4Xv3D/jLKBdEuSDKBVEuiHJBlAvyE/3huq7xg933/ev6xOcR9HmtWLkgygVRLkiYuSuZLIvIZFw1B6dykz4vKxdEuSDKBUll7komazJZVt3DVo9F7H+rGW3lgigXRLkg5cydotNDyKx5AlYuiHJBlAuyLXOjPWOnV5tZ/0msXBDlgigXpJy5T2ZZtW/Q+W3EeVm5IMoFUS5IKnOJ/9npuYXMHpnuRVi5IMoFUS5ImLlP7mef7CE8eV5WLohyQZQLkprPzVzL6swbrN/PrB9Rvc5W7V1Uf5uVC6JcEOWCjPUWiCzO0NkjZ/rCnTkKKxdEuSDKBXlFz1voZFm0TsTUrEJ0XDr3I6xcEOWCKBdkbFass88lZnWfvD/Y3sIGlAuiXJBwnxvRydbq/AC9z526hy3CygVRLohyQfBZsU6uda5ldfazU1ls5YIoF0S5IK3eQqdvEH0nsz4x81DtXWSwckGUC6JckPKsWESnf9p5rkL1uEQPJMLKBVEuiHJBxvq5Kyf0dnf1Q1asXBDlgigXpJy5UxBZTN9PUV3TygVRLohyQba9JyL6nJ6fnep7ZNaxckGUC6JckKPfE0Fc16rmbOc7Vi6IckGUC3LceyIyxzrhHWgZrFwQ5YIoF+SI90SsVPu5nT5sZ47N3sJmlAuiXJBtmbvSmc2ir6F1ZuCsXBDlgigXZNt7IjJZRj/rNpP1nfuArVwQ5YIoF+SI90REn08976a6/orPzz0U5YIoF2TbfO5/wMoFUS6IckGUC6JcEOWCKBfkA5PFkp647d5bAAAAAElFTkSuQmCC",
+  "ПП-0104": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACaUlEQVR4nO2dQW7DQAgAm6ovyP/fmC8k172ggmCCm84c3c3aHiFE8a59ez6fX8LwvX0Bn4xyQZQLolwQ5YIoF0S5ID/RH+73+/jJHo/Hr/NnxmTGn8dP6Ps6MXJBlAuiXJAw555EOSVDNbd2xlevk7ivEyMXRLkgygVJ5dyTau1ZpVMLZ8ZHEPdl5IIoF0S5IOWcO0WU4zK5L6ptOzUvgZELolwQ5YKs5dyIag17ZYxcEOWCKBeknHOJ+jGaM9NnmKp5ifsyckGUC6JckFTOfWeNmcmV1bUNmXMRGLkgygVRLshta09EZ11XZrz93A9HuSDKBUmtz60+96/WodXaNvptZv4qnfxu5IIoF0S5IGGdW12nRa/hjcZ39kTQ+y+MXBDlgigXpNxbmOqBTv3v38nX0fjOOt8TIxdEuSDKBSnXuSdEX/WdPdmputg6dwHlgigXpNVbiKBr4er8nR5CByMXRLkgygXB37cwle+IHm40JoN17jLKBVEuyFg/t5PLptbbEvVsp9dh5IIoF0S5IGP70OhnWdXjGei+s5ELolwQ5YIgz9CieYh1vsR7cqfuy8gFUS6IckEusQ8tgniGVr2eTt43ckGUC6JckLXvRGSOV+eZ2vPWGX9i5IIoF0S5IJf4TkR1nk5vd+peMvMYuSDKBVEuyNp3IqaeoWXmJNbz2s9dRrkgygVZe2c5vQ63c96pvoqRC6JcEOWC/JnvRJzQ/Yqpcxm5IMoFUS7IJb4TUT0vnSunMHJBlAuiXJC170RkcuLW/rTMb+3nLqNcEOWCrK3P/Q8YuSDKBVEuiHJBlAuiXBDlgrwAaP2EyrGibS0AAAAASUVORK5CYII=",
+  "ПП-0105": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACf0lEQVR4nO3dQW6DQAxG4abqCXL/M+YK6XYWtWTLfpi271umCMgvy50MAzze7/eHGJ/bJ/CXGS7IcEGGCzJckOGCDBf0Ff3h+XyOH+z1ev24/+jzzn4i9Pc6WbkgwwUZLijsuadML4tkely1b06hv5eVCzJckOGCUj33VB2HZraJ9tkZkxLj32qPtnJBhgsyXFC5506Z+o1fnZe4kpULMlyQ4YLWem40ZiTG0VusXJDhggwXVO65RC/LzAOc20Tbd86N+F5WLshwQYYLSvVc4jd7Zt1C1Aer6x86Y+oOKxdkuCDDBYU9d+u3eabPEvsnWLkgwwUZLii1PjdznWpqjW20TWc/p+r4t3OeVi7IcEGGC3pE9/5e2TczOnMI0X5Onf5rz11guCDDBaV67pXrsTr99DR1n1uHlQsyXJDhgsrX0KpjSXrsGbny/mDHuQsMF2S4oHCce+qMDafmT4lxbuecM6xckOGCDBc01nNP9FiyM3dM//84WbkgwwUZLmjsPrROT+yst43ulcgcN3MOHVYuyHBBhgsqrxWLtolU+2wGcT9FtE103AwrF2S4IMMFpeYWMqbWA0ytOeuMVZ1b+AUMF2S4oLGeWzU1xrxynre6TysXZLggwwWtvSci+pxeP1sdq2bmjl0rtsBwQYYLut17IqLjEs/bpbexckGGCzJc0C3eE1E91h3egZZh5YIMF2S4oNu9JyJ6Hm61/1bHztV5ZOcWlhkuyHBBaz331JlDoK+hde6Ls3JBhgsyXNDaeyLo5+R2zqF6rSxi5YIMF2S4oFu8J+I09UzbzHGnngvs3MICwwUZLmhtfe5/YOWCDBdkuCDDBRkuyHBBhgv6Bg0ojhjGRRSjAAAAAElFTkSuQmCC",
+  "ПР-0301": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACfUlEQVR4nO2dUU4DMQwFAXGC3v+MvUL5zY8lP9nTVGjmE7bZ7MgywXG636/X60sYfm5P4D+jXBDlgigXRLkgygVRLshv9YvH47F+s+fzGV1fzaEap3P9O5/LyAVRLohyQcqce5LmypNOjjuvqe5V5c3J3OjnMnJBlAuiXJBWzj3p5Jo0l6X5tHN9up4lnsvIBVEuiHJB4px7iyq30nWDCUYuiHJBlAvyETk3rRWka+FbGLkgygVRLkicc7dyWbUmTdez6TgVRI42ckGUC6JckFbOpf9n79QHOnXbtM5AP5eRC6JcEOWCfH/CmYit/autfoYtjFwQ5YIoF6TVn9vph+2sMbf6vdK5EXPoYOSCKBdEuSBlzk1z6GScE2I/bTL/yWeNXBDlgigXJD4T0am3Vj9Pc2J6zYTJ3p3n0C6gXBDlgsR7aPQ5Bfo8xTsxckGUC6JckNEe2qSeW43TuT6dA/HzDkYuiHJBlAsyWuemuWmSi4n1bPo3I72vkQuiXBDlgsR9C8R3d231MBDjn6R538gFUS6IckFatYV31hDoOkM6ZnqvEyMXRLkgygVZ+/7crXrCZJytc2hb+29GLohyQZQLcu0c2tYaufos3edrPfcyygVRLsi190RsnUega8eT/TQjF0S5IMoFufaeiEnP74RJnk3HMXJBlAuiXJBr74lI97gmeXmrNl2N6Tr3AsoFUS7Ite8s3+rxos84dHqTK4xcEOWCKBfkWs7dOuOwtc7dOq9xYuSCKBdEuSDX3hNRjUn0G0zmM7nGyAVRLohyQcpeMbpvgVhXdtjqWzhxnXsB5YIoF+Qj3hPxXzFyQZQLolwQ5YIoF0S5IMoF+QPkrKbAfuDvNgAAAABJRU5ErkJggg==",
+  "ПР-0410": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACcUlEQVR4nO2dwW3DMAwAm6ITZP8ZvYL71YeoCPJMNbh7uo7tHAhWkUnpdd/3lzB8Tz/AJ6NcEOWCKBdEuSDKBVEuyE/0h/f73X6z67r+PGe973p+dDz6bHTfJ7+XkQuiXBDlgoQ5d2UnV0ZEOW4nP2avmb0O8b1WjFwQ5YIoF2Qr564Q+W69ZjYXV8bF0XUisjnayAVRLohyQdI5l2Dnt3+UQ+l5gwpGLohyQZQLMpZzs/mxMg8whZELolwQ5YKkc25X7uuaByCepwsjF0S5IMoF2cq5xG/27Dxs5fjOMxAYuSDKBVEuyOuEnggin65MzUsYuSDKBVEuyFZ9LjEOzd6XJlv/u/NsRi6IckGUC1J6h5atMaBrDyq5MttnsYORC6JcEOWChDm30gPWNQ9Q6SurzOd2jceNXBDlgigXpK1WjMjRdB9E5Rz70IZRLohyQcJ3aNm+rOw4t2ss+WT9g31oB6FcEOWCpOsWnpxnWOl6n/bkONrIBVEuiHJBtsa5xHoF9NxCdN8I4v+BkQuiXBDlgrS9Q4s+u9L1u76yhk50TnYc7XzuMMoFUS5IqT53h656smy9V1fdgvO5h6JcEOWCjPWh0T1mJ/RiGLkgygVRLsjYPhFdNQ90bq2sq2vkgigXRLkgY/tERNffyb90/YN1C/8A5YIoF2Rsn4iuMexOLibWxLEPbRjlgigXZGzNcmJ9g9PW3DFyQZQLolyQI/aJqKw7U5kXruR3x7nDKBdEuSBH7BMRHc/W5z6516/zucMoF0S5IKX1FrJUesa6armsW/gQlAuiXJAj9on4VIxcEOWCKBdEuSDKBVEuiHJBfgFI78ROEcI3PgAAAABJRU5ErkJggg==",
+  "ПЧ-0301": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACb0lEQVR4nO2dQW7EMAgAu1VfkP+/MV/YXn1BBcHE1nbm2mycjBCi2I5f7/f7Sxi+dz/AJ6NcEOWCKBdEuSDKBVEuyE/0h+u6xge77/vPsdZromeIronuH401RTSukQuiXBDlgoQ5dyWTyyIyOW4qz1bzL/1eRi6IckGUC5LKuSvVHFq9Tyf/dph6rxUjF0S5IMoFKedcgmqtmqlzqzUvgZELolwQ5YIckXMzNeZUP+FJjFwQ5YIoF6Scc4m81qlVq72IzDNMYeSCKBdEuSCpnEvM9WfozJtVa2cCIxdEuSDKBQlz7mn/p0dU8+yT72XkgigXRLkgqfW5U+sE1vtMrdOq3nPq+TMYuSDKBVEuSLnOzawliK6f+l+emEOrvldmXCMXRLkgygXB1+d25rWmxqpeP1XjG7kgygVRLki5t3Ba/7SaH6eeOXONkQuiXBDlgrwy3xXrrI0l+gkRnf0U1WsyGLkgygVRLsjYHNpUD6HTL+7sW6vmVvu5m1EuiHJBwjp36ltfGaZq5yf7GJlxjVwQ5YIoF6S1D43IfVPrIqbq6wj7uZtRLohyQcp1bsTUXP/UN3an6PR8jVwQ5YIoFyQ1h0ZAf7OGqHntLRyEckGUC7LtnIjONxM6ayRct/AhKBdEuSDbzomYWv8wla8zVHsaRi6IckGUC7LtnIjMb+kzKTJ0fmvkgigXRLkgR3yzfKUzV1bdP0bv6TByQZQLolyQI3Luk2egEesoIoxcEOWCKBdk2zkR9D4Iei9yBiMXRLkgygXZdk7E1H6ETs+Brq+NXBDlgigXZNv63P+AkQuiXBDlgigXRLkgygVRLsgvwo6LkNjSveQAAAAASUVORK5CYII=",
+  "ПЧ-0312": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACd0lEQVR4nO2dwW3DMAwAm6ITeP8ZvYLz1aMESJAXCe3d03EU+0AQCkXZr+d5voThe/cF/GWUC6JcEOWCKBdEuSDKBfmJPriua/zH7vv+dfz1ePV6qmPS97Vi5IIoF0S5IGHOXcnkxIhqrozOyeTQ6nUS97Vi5IIoF0S5IKmcu5LJNZ1cRuf36ner46wYuSDKBVEuSDnnThHluOp//069gsbIBVEuiHJBtuXcDJ+syRIYuSDKBVEuSDnn0vPHTJ13JZrbVue8xH0ZuSDKBVEuSCrn0vPKTK7MHK9C35eRC6JcEOWChDl3Vz20k08zc9tP3peRC6JcEOWCpPpzq+v+U/PQFbqvq/q7GT9GLohyQZQLgq+hddbBqj28nX0TmT4Ke8UOQrkgygUp1xam9o91xpyiMzfPXKeRC6JcEOWCvDLPuJn6b96Zq0bnd6juFa72RRi5IMoFUS5ImHOn9iZ0zok4bb9ZhJELolwQ5YKUn7dQ3T+W6R+Y6sPtzEmJHgkjF0S5IMoFSdUWOkz9f89A1ChcQzsU5YIoF2SsbyHKTVNrccT+iE4+dZ67GeWCKBdk7Pm5U3PMqV6Cqfzbqe0auSDKBVEuCF5biKDXwabG7Kz7GbkgygVRLsi290RExzv7d4leYOu5h6JcEOWCHPeeiKk+2c48OqKaf41cEOWCKBdk23sipvrDMmMStWnX0DajXBDlgmx7Zjmx72tq7W6qrmLkgigXRLkgR78nYmr/RWb8ah63trAZ5YIoF+SI90R0+sCIXDmFkQuiXBDlgmx7T0Q1J9LP2al+13ruZpQLolyQbf25/wEjF0S5IMoFUS6IckGUC6JckDfoF3V2a+tOdQAAAABJRU5ErkJggg==",
+  "РЗ-0090": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACcUlEQVR4nO2dQU7EMAwAWcQL+v839gvlmoslG3s2AWaO0M1uR5YbOU7zep7nQxg+d/+Av4xyQZQLolwQ5YIoF0S5IF/RP67rGv+y+75/PH702czfV+j7WjFyQZQLolyQMOeuRDklQ5Tjqjk0GieTZyOI+1oxckGUC6JckFTOXcnkGjr3VeewmfGJ+zJyQZQLolyQcs6dYqo+EF3TmcNOYeSCKBdEuSDbcu5Kpm6wckI+zWDkgigXRLkg5ZxL5Lvq2lqnRpz5DVMYuSDKBVEuSCrnEmv9GarrbFXo+zJyQZQLolyQ1649EZ1escw4J9QfjFwQ5YIoFyTVn1td96/OQzs1gQyd+WxnHc/IBVEuiHJBxtbQMv0DU/m3mt87n+08A4xcEOWCKBckzLnEPq6p+gAx/+08GyKMXBDlgigXJKznduZ3RF2CqM92eoGtLWxGuSDKBUmtoXVqAu+8fqrPYSq/G7kgygVRLkj5HTedNaUqdA13pVozcZ67GeWCKBek3CvWyV90HiTms66hHYpyQZQL0upbIGoIdN0g+i6iZm3kgigXRLkgqTW0lanc1KlddK7PMDX/NXJBlAuiXJDj9qFNvXdxaszOc8LIBVEuiHJBtp0TQYxTrV1Yz/3FKBdEuSDHnRORGWeqn6FKNf8auSDKBVEuyLZzIqbybGZMov/Beu5mlAuiXJBt7ywn9n1FVPvSpuoqRi6IckGUC3LcORGd+WxEZx9Hp0Zh5IIoF0S5IEecE7Ey1Z/7zvc2RBi5IMoFUS7ItnMiiH5bYt9E5ux367kbUC6IckG29ef+B4xcEOWCKBdEuSDKBVEuiHJBvgF2W4gMWo2NvwAAAABJRU5ErkJggg==",
+  "РМ-0012": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACZklEQVR4nO2dQU7EMAwAWcQL+v839gvlmkuELXvWAWaOSzekI8vKOk77ep7nQxg+pyfwl1EuiHJBlAuiXBDlgigX5Gv3h+u62v/Zfd8/jh+5JnL9+vkKfV8rRi6IckGUC7LNuSu7nBKBzq2RPBsZM0tkzkYuiHJBlAsSyrkr2fxYGb9rDRuZD3FfRi6IckGUC5LOuV105cfd9ZW834WRC6JcEOWCjOXclci6NVuLOAEjF0S5IMoFSedcev2Yrc9WahErxH0ZuSDKBVEuSCjnnrCuJNa89H0ZuSDKBVEuyGvqTEQ23xH7ZjRGLohyQZQLEurP7fqNH4HoCausZ7O15hUjF0S5IMoFSdcWIjXTyucrXXtrlTlUcr2RC6JcEOWCpM9EZNeMlVzWtbYl+iIi8zFyQZQLolyQbT33nWcfiDG7+nwrfRFGLohyQZQLUtpD66oV7MbcfberRhy5voKRC6JcEOWClJ5xUzkDlj1L1nUmuOvZN65zh1EuiHJBkF4xYi8rArGedQ/tUJQLolyQ0tlfoiZL9D/soPfojFwQ5YIoF6S0h7bS9WzcrrMPRE/ubnxz7gDKBVEuyNHn0LryKb13Z84dQLkgygUZe08EMU5kzkQ/2Q4jF0S5IMoF+TXviaDPtkXI5l8jF0S5IMoFGXtPRFeejYxJ1Kat5w6jXBDlgow9s5w497Uj25/bVVcxckGUC6JckCPeE9G1nt1BnJWwtjCMckGUC3LEeyKIZ4N1rZErGLkgygVRLkhbf26ESh585/Meu+Zg5IIoF0S5IGP9uf8BIxdEuSDKBVEuiHJBlAuiXJBvWBiOPMKUIlQAAAAASUVORK5CYII=",
+  "РМ-0013": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACdklEQVR4nO2dQW7DMAwEm6IvyP/fmC8kV16IkiAncoKZa11ZGRALgZat2/P5/BGG39MT+GaUC6JcEOWCKBdEuSDKBfnL/nC/39dv9ng8/r1XvCabQ2Wc7Pp3/i4rF0S5IMoFSTM3kmVKhSzjKjnbzehIZc7E74pYuSDKBVEuSClzI5Ws6eZdZcxuRldyORs/o5vRVi6IckGUC9LO3HfSzUGibzDBygVRLohyQY5l7lav9spYuSDKBVEuSDtzJz3Q7jhbfYOt+XSxckGUC6JckFLmEmvMrf5sd89DNgcCKxdEuSDKBbld7Z2ISYZmEGvYClYuiHJBlAtS2p9LrEOze2XQz8q29qhFrFwQ5YIoFyTN3K29q5N9Y5NxuvMhnt1ZuSDKBVEuSHudm10T6b5LRvReJ2NOnu9FrFwQ5YIoFyTt525l5VZeT3oLRD/XzD2MckGUC1LK3FPr3Mn7Y5NvO2ztS7NyQZQLolyQUj+3m5uTnOrmHbG3YSt/rVwQ5YIoF6S9zp18x2Dr+q3vkGVjdrG3cADlgigXpLQ/dys3J/3Zrft2x+zeK2LlgigXRLkga/sWttakEbrPMHmOV8HKBVEuiHJBjr2HRu9JoHsgFaxcEOWCKBfk2DkRk1w71V+uzCdi5YIoF0S5IMfOiciuqaxb6W8vuG/hA1AuiHJBjp0TQZyBVjkHqILvoX0AygVRLsixb5YT75tl40fe2ee1ckGUC6JckMudExHZ2i8xmUPlf13nHkC5IMoFucQ5Ed2zgbe+CdnFfu6FUC6IckHa37iZQO/PreC+hS9BuSDKBbncORHfhJULolwQ5YIoF0S5IMoFUS7ICzJeqy7LGVDUAAAAAElFTkSuQmCC",
+  "РС-0071": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACc0lEQVR4nO2dwW3DMAwAm6ITeP8ZvUL61aMESJAHOsXds41l5UAQDC3Jr/f7/SUM39sT+M8oF0S5IMoFUS6IckGUC/IT/eO6rvGb3ff95/jn36tzyFwb3XeKaA5GLohyQZQLEubckyinZIhyHJFnic9EZOZp5IIoF0S5IKmcezKVEzO5eKpW7cynOs6JkQuiXBDlgpRz7hSZHNqpVYkeQhUjF0S5IMoFWcu5EZk+76dg5IIoF0S5IOWcO5UHM3Vo9TlbZ25EfjdyQZQLolyQVM6lf6dXe7hT6xDo72XkgigXRLkgYc6lf9dX140R96UxckGUC6JckNT63E5+zDwf28q/nd5F5lojF0S5IMoFaT1Dy+Sdai6rjlOdT4apdWNGLohyQZQLkuotdHqpmdxaXas7RWd869xllAuiXJCx3kK1bp1ak0v0B6ae1xm5IMoFUS7IK3OuGH3uwRNq3ir2FpZRLohyQVr93M5eMuLMhE596vrcD0O5IMoFCevczm//zDhVpu7bqaldt/AglAuiXJBUb+Gk0xOIxokg9p4RZ+uYcxdQLohyQcp1bsRUbu3cd6vPa85dQLkgygXB96ERubg6N/psyQgjF0S5IMoFWXtPRHSvqbNuM9d29lnYz11GuSDKBXnceyKq1xLnl099xsgFUS6IckHW3hORGb+zn+L8DLHHzDp3GeWCKBfkEWeWE+fadNbnZvK1de4yygVRLshazu3UklP1b2d9mHXuMsoFUS7I2nsips5qmDo3hzhP0sgFUS6IckHW3hNRPZOsOibxLgnXLTwI5YIoF6S8D03yGLkgygVRLohyQZQLolwQ5YL8AqohqnR3bS0oAAAAAElFTkSuQmCC",
+  "РС-0072": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACc0lEQVR4nO2dSW7DMAwAm6Iv8P/f6C+4Vx1KgAQ5kZDOHFPEkgcEq1Db63meL2H43t2BT0a5IMoFUS6IckGUC6JckJ/oD9d1jTd23/efz48+73x3/XyFfq8VIxdEuSDKBQlz7kqUUzJkcminrUyejSDea8XIBVEuiHJBUjl3JZNr6FxWHcNm+kO8l5ELolwQ5YKUc+4Und/4mbFtJ+9PYeSCKBdEuSDbcu5Kp857MkYuiHJBlAtSzrnE+DHKp51acLXOS7yXkQuiXBDlgqRyLj3G7IxzO3No9HsZuSDKBVEuSJhzd9VDO/WE0+q8Ri6IckGUC5Jan1ud95/Km1N0nplZI+H63A0oF0S5IK/q3t9q/ursZaiu36ruiaDbMnJBlAuiXJDyPrRqruzsGcu022Eq/0YYuSDKBVEuSGqcOzUGnMq/1X526gOdPhu5IMoFUS5ImHOr49wMU3nttP1mEUYuiHJBlAuSyrlEvps6V6FTA+n0zXHuZpQLolyQ1hwaMQ8WtZWBqMl2/k8YuSDKBVEuCL4Pjfi9T6xLI84zM3JBlAuiXJCx83On1hV0xrxE/u3Udo1cEOWCKBekXFuY4p3njnfG2p1atpELolwQ5YJsuyciaqtzHk2mz8RcWYSRC6JcEOWCHHdPxNTa3s76iohq/jVyQZQLolyQbfdETO1zyzyTqE07h7YZ5YIoF2TbmeX0XuGVao14qq5i5IIoF0S5IEfcExFBjFuj5xB3rBm5IMoFUS7IEfdERM8naruen/shKBdEuSDb7okg1tsS+yaqNZAVIxdEuSDKBdm2Pvc/YOSCKBdEuSDKBVEuiHJBlAvyC89snKA8WcNDAAAAAElFTkSuQmCC",
+  "УС-0031": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACc0lEQVR4nO2dUW6EMAwFu1VPwP3PyBXYX36stWUPibozny0KMLJeUxPI67quH2H4XX0B/xnlgigXRLkgygVRLohyQf6iXxzHMX6y8zw/HlM9bzTmfZz7MU/el5ULolwQ5YKEmXsnk5URUcZFP4/ysXoNmeOJ+7pj5YIoF0S5IKnMvZPJmk4+ZjK6OrfNQNyXlQuiXBDlgpQzdwcyc+QdsHJBlAuiXJBlmTv1vz/Rn53CygVRLohyQcqZS88lq8+7pvoMxH1ZuSDKBVEuSCpziblkZl1B5+fVayCwckGUC6JckDBzn+yNZnJz6nqevC8rF0S5IMoFSa3PnVpTVc3Tztw206PInDci48TKBVEuiHJBWmvFqrlGrwOrXgPdL7ZyQZQLolyQcj+3Ot+sHkOsA+v0iKNxMli5IMoFUS5IuZ+byZ1qxlWzuJP7U8/N7C0sRrkgygV5Rd8VI+awU/3THdbkmrmLUS6IckFaa8Wq616nnqdVx6fXmdnPXYByQZQLssU8t8qqd3+r57VyQZQLolwQZN1C1KvtZGW1nzDV04iwt7AY5YIoF6T17m9n3ViH6tovIlvtLSxGuSDKBQl7CzTEtxOJeXTnb4mVC6JcEOWCLNsnorPeq0O1v9zZb8LKBVEuiHJBlu0TkRmfyOInvzFm5YIoF0S5IFvsE0HswdN5D2JqTm3lgigXRLkg2+0TMfU9h86zvsz4GaxcEOWCKBdki8ztZOvUHLbzfkeElQuiXBDlgmyxT8TUN8MyY3a+F1HFygVRLohyQbbYJ2LqXJ2crY6ZwcoFUS6IckGWrc/9BqxcEOWCKBdEuSDKBVEuiHJB3oZkfrKY7zFaAAAAAElFTkSuQmCC",
+  "УС-0044": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHQAAAB0CAIAAADb+IFwAAACd0lEQVR4nO2dUU7EMAwFWcQJev8z9grLb38sbNlTl9XML920O7IewSTp6/1+fwnD9/YDfDLKBVEuiHJBlAuiXBDlgvxEPziOY/xm53n+ea/rNdEzZMaJrr/ze1m5IMoFUS5ImLlXokzJUM24KH8J6O9l5YIoF0S5IKnMvZLJmmqWTWVrZz5LfC8rF0S5IMoFKWcuQaa3kMk7om/QwcoFUS6IckEekblVMllM9yUyWLkgygVRLkg5c6eyjM7N6hyZyGgrF0S5IMoFSWXunX+zV/sM1TUP0b0IrFwQ5YIoF+T15D0RnbVi9hY+HOWCKBckzNxMfnXW1XbysTO3nXqGDFYuiHJBlAsS9haq+w4y40Sf7axbqF4TPVtE57NWLohyQZQLMrYPjei3Zpj63RA9Z/TMmay3ckGUC6JckLF9aEQ/oTpHrn6WxsoFUS6IckHK/0Pr5BfRMyXWOUz1fK1cEOWCKBcE3xNB94WJNbzVvnOElQuiXBDlgrTWLUTXZ6DX3mbuGzHVJ7FyQZQLolyQ1LoF4u9uIjczz3nnvmErF0S5IMoFSc1zI+j5b2acqd5FZsxofOe5CygXRLkg5fW5VYhMjMbpzFure4Xt5y6jXBDlgqy9J6KTxVPn5Hay2HnuMsoFUS7I2nsiqvNTeg/Flam+ipULolwQ5YKsvSeic05CdZypnnI0pvPcBZQLolyQtTPLibMUiLUWmT3BEVYuiHJBlAuylrlT5zFO9SWIcyOtXBDlgigXZO09EVc6vdqtd2I6z11GuSDKBVl7T8TUvtups3en1lFcsXJBlAuiXJBHvyfiv2PlgigXRLkgygVRLohyQZQL8gvI/ouKWkEr/QAAAABJRU5ErkJggg=="
+};
+function qrValue(i){ return `SKLAD-ITEM:${i.sku}`; }
+function drawQR(container, i){
+  const src = QR_IMAGES[i.sku];
+  container.innerHTML = src
+    ? `<img src="${src}" width="110" height="110" alt="QR ${i.sku}">`
+    : '<div class="s" style="padding:20px;color:var(--red)">QR не найден</div>';
+}
+
+/* ================= КЛАССИФИКАЦИИ СКЛАДА ================= */
+let categoriesList = ['ФПВ','НРТК','НСУ','Комплектующие','Расход'];
+let componentSubcats = ['Комплектующие для НСУ','Платы программирования','Расходники','Кабели','Антенны','Приёмники управления','Передатчики управления'];
+const CAT_ICON = {'ФПВ':'🚁','НРТК':'🤖','НСУ':'🖥','Комплектующие':'🧩','Расход':'🧪',
+  'Комплектующие для НСУ':'📡','Платы программирования':'💾','Расходники':'🧴','Кабели':'〰️','Антенны':'📶','Приёмники управления':'📥','Передатчики управления':'📤'};
+const ABC_INFO = {A:'A — высокий оборот, критично для остатков', B:'B — средний оборот', C:'C — редко расходуется, можно закупать реже'};
+
+/* ================= ДАННЫЕ (в памяти, демо) ================= */
+let itemSeq = 1000;
+const items = [
+  // ===== Расход (top-level, расходуемые в ремонте материалы) =====
+  {id:'flux', icon:'🧪', name:'Флюс паяльный ТТ', sku:'РМ-0012', topCat:'Расход', unit:'г', stock:850, min:200, abc:'A',
+    desc:'Флюс для пайки радиоэлектронных узлов, банка 1 кг.',
+    posts:{'ТЭЧ':40,'НРТК':25}, ext:0,
+    lots:[{lot:'Л-0231', qty:600, exp:'01.2027'},{lot:'Л-0245', qty:250, exp:'09.2026'}],
+    history:[
+      {d:'12.07.2026', type:'in', text:'Приход · ООО «РадиоДеталь»', q:'+1000 г'},
+      {d:'14.07.2026', type:'out', text:'Выдано на пост ТЭЧ', q:'−50 г'},
+      {d:'16.07.2026', type:'out', text:'Выдано на пост НРТК', q:'−30 г'},
+      {d:'18.07.2026', type:'off', text:'Списано по АВР-144', q:'−15 г'},
+    ]},
+  {id:'solder', icon:'🔗', name:'Припой ПОС-61 ⌀1мм', sku:'РМ-0013', topCat:'Расход', unit:'г', stock:1200, min:500, abc:'A',
+    desc:'Припой оловянно-свинцовый для монтажа, катушка 1 кг.',
+    posts:{'ТЭЧ':80,'НРТК':60}, ext:0,
+    lots:[{lot:'Л-0118', qty:1200, exp:'03.2028'}],
+    history:[
+      {d:'12.07.2026', type:'in', text:'Приход · ООО «РадиоДеталь»', q:'+2000 г'},
+      {d:'14.07.2026', type:'out', text:'Выдано на пост ТЭЧ', q:'−100 г'},
+      {d:'18.07.2026', type:'off', text:'Списано по АВР-144', q:'−20 г'},
+    ]},
+  {id:'petg', icon:'🧶', name:'Пластик PETG 1.75мм (чёрный)', sku:'ПЧ-0301', topCat:'Расход', unit:'г', stock:2400, min:1000, abc:'A',
+    desc:'Расходный материал для FDM-печати корпусов и оснастки.',
+    posts:{'3D печать':300}, ext:0,
+    lots:[{lot:'Л-0301', qty:1500, exp:'12.2026'},{lot:'Л-0308', qty:900, exp:'02.2027'}],
+    history:[
+      {d:'06.07.2026', type:'in', text:'Приход · REC (заказ 2207), 3 катушки', q:'+3000 г'},
+      {d:'14.07.2026', type:'out', text:'Выдано на пост 3D печать', q:'−300 г'},
+      {d:'18.07.2026', type:'off', text:'Списано по АВР-143', q:'−300 г'},
+    ]},
+  {id:'wire', icon:'〰️', name:'Провод AWG24 (медь, силикон)', sku:'КБ-0207', topCat:'Расход', unit:'м', stock:320, min:100, abc:'B',
+    desc:'Монтажный силиконовый провод для внутренней разводки.',
+    posts:{'ТЭЧ':12}, ext:20,
+    history:[
+      {d:'05.07.2026', type:'in', text:'Приход · «ЧипДип» (счёт 4412)', q:'+500 м'},
+      {d:'15.07.2026', type:'out', text:'Выдача на сторону · «СтройМонтаж» (ВН-018)', q:'−20 м'},
+      {d:'16.07.2026', type:'out', text:'Выдано на пост ТЭЧ', q:'−12 м'},
+    ]},
+
+  // ===== Комплектующие → Комплектующие для НСУ =====
+  {id:'sfp', icon:'💠', name:'Модуль SFP 1.25G 20км', sku:'ОП-0210', topCat:'Комплектующие', subCat:'Комплектующие для НСУ', unit:'шт', stock:6, min:4, abc:'B',
+    desc:'Оптический SFP-модуль для канала связи НСУ.',
+    posts:{}, ext:2,
+    history:[
+      {d:'04.07.2026', type:'in', text:'Приход · ООО «ОптикТелеком»', q:'+8 шт'},
+      {d:'15.07.2026', type:'out', text:'Выдача на сторону · «СтройМонтаж» (ВН-018)', q:'−2 шт'},
+    ]},
+  {id:'patch', icon:'🧵', name:'Патч-корд оптический SC/UPC 10м', sku:'ОП-0215', topCat:'Комплектующие', subCat:'Комплектующие для НСУ', unit:'шт', stock:14, min:10, abc:'C',
+    desc:'Оптический патч-корд для подключения НСУ к магистрали.',
+    posts:{}, ext:0,
+    history:[{d:'04.07.2026', type:'in', text:'Приход · ООО «ОптикТелеком»', q:'+14 шт'}]},
+  {id:'amp', icon:'📡', name:'Усилитель сигнала ACASOM 20W', sku:'УС-0031', topCat:'Комплектующие', subCat:'Комплектующие для НСУ', unit:'шт', stock:4, min:2, abc:'B',
+    desc:'Усилитель радиоканала для наземной станции управления.',
+    posts:{'НРТК':1}, ext:1,
+    history:[
+      {d:'01.07.2026', type:'in', text:'Приход · ИП Сергеев (заказ 118)', q:'+6 шт'},
+      {d:'15.07.2026', type:'out', text:'Выдача на сторону · «СтройМонтаж» (ВН-018)', q:'−1 шт'},
+      {d:'17.07.2026', type:'out', text:'Выдано на пост НРТК под ДФ-041', q:'−1 шт'},
+    ]},
+  {id:'att', icon:'🎚', name:'Аттенюатор 10 дБ SMA', sku:'УС-0044', topCat:'Комплектующие', subCat:'Комплектующие для НСУ', unit:'шт', stock:12, min:5, abc:'C',
+    desc:'Аттенюатор для настройки уровня сигнала тракта НСУ.',
+    posts:{'НРТК':1}, ext:0,
+    history:[
+      {d:'01.07.2026', type:'in', text:'Приход · ИП Сергеев (заказ 118)', q:'+14 шт'},
+      {d:'17.07.2026', type:'out', text:'Выдано на пост НРТК под ДФ-041', q:'−1 шт'},
+    ]},
+
+  // ===== Комплектующие → Платы программирования =====
+  {id:'esp32', icon:'🖥', name:'Плата ESP32-S3 DevKit', sku:'ПП-0104', topCat:'Комплектующие', subCat:'Платы программирования', unit:'шт', stock:15, min:5, abc:'B',
+    desc:'Отладочная плата для прошивки периферийных контроллеров.',
+    posts:{'ТЭЧ':2}, ext:0,
+    history:[
+      {d:'08.07.2026', type:'in', text:'Приход · «ЧипДип» (счёт 4420)', q:'+20 шт'},
+      {d:'11.07.2026', type:'out', text:'Выдано на пост ТЭЧ', q:'−2 шт'},
+      {d:'13.07.2026', type:'off', text:'Списано по АВР-142', q:'−3 шт'},
+    ]},
+  {id:'stlink', icon:'⚡', name:'Программатор ST-Link V2', sku:'ПП-0105', topCat:'Комплектующие', subCat:'Платы программирования', unit:'шт', stock:3, min:2, abc:'C',
+    desc:'Программатор/отладчик для микроконтроллеров STM32.',
+    posts:{'ТЭЧ':1}, ext:0,
+    history:[
+      {d:'08.07.2026', type:'in', text:'Приход · «ЧипДип» (счёт 4420)', q:'+4 шт'},
+      {d:'11.07.2026', type:'out', text:'Выдано на пост ТЭЧ', q:'−1 шт'},
+    ]},
+  {id:'fc', icon:'🧭', name:'Полётный контроллер F7 (ArduPilot)', sku:'ДР-0520', topCat:'Комплектующие', subCat:'Платы программирования', unit:'шт', stock:5, min:3, abc:'B',
+    desc:'Плата автопилота на базе ArduPilot для платформ ФПВ.',
+    posts:{}, ext:0,
+    history:[
+      {d:'02.07.2026', type:'in', text:'Приход · «RCшоп» (заказ 765)', q:'+6 шт'},
+      {d:'12.07.2026', type:'off', text:'Списано по АВР-140 (облёт после сборки)', q:'−1 шт'},
+    ]},
+
+  // ===== Комплектующие → Расходники =====
+  {id:'corp', icon:'📐', name:'Корпус печатный «КД-12» (своя печать)', sku:'ПЧ-0312', topCat:'Комплектующие', subCat:'Расходники', unit:'шт', stock:9, min:6, abc:'C',
+    desc:'Печатный защитный корпус собственного изготовления.',
+    posts:{}, ext:0,
+    history:[
+      {d:'14.07.2026', type:'in', text:'Приход · собственная 3Д-печать (партия 11 шт)', q:'+11 шт'},
+      {d:'17.07.2026', type:'off', text:'Списано по АВР-142', q:'−2 шт'},
+    ]},
+  {id:'heatshrink', icon:'🧦', name:'Термоусадка ассорти 2-10мм', sku:'РС-0071', topCat:'Комплектующие', subCat:'Расходники', unit:'м', stock:40, min:15, abc:'C',
+    desc:'Набор термоусадочных трубок разного диаметра.',
+    posts:{}, ext:0,
+    history:[{d:'10.07.2026', type:'in', text:'Приход · «ЧипДип»', q:'+50 м'}]},
+  {id:'tape', icon:'🎗', name:'Изолента ПВХ чёрная', sku:'РС-0072', topCat:'Комплектующие', subCat:'Расходники', unit:'шт', stock:18, min:10, abc:'C',
+    desc:'Изолента для защиты монтажа проводки.',
+    posts:{}, ext:0,
+    history:[{d:'10.07.2026', type:'in', text:'Приход · «ЧипДип»', q:'+20 шт'}]},
+
+  // ===== Комплектующие → Кабели =====
+  {id:'sma', icon:'🔌', name:'Разъём SMA-male обжимной', sku:'РЗ-0090', topCat:'Комплектующие', subCat:'Кабели', unit:'шт', stock:8, min:30, abc:'C',
+    desc:'SMA-разъём для сборки антенных кабелей.',
+    posts:{}, ext:0,
+    history:[
+      {d:'20.06.2026', type:'in', text:'Приход · «ЧипДип» (счёт 4390)', q:'+50 шт'},
+      {d:'10.07.2026', type:'off', text:'Списано по АВР-141', q:'−6 шт'},
+    ]},
+  {id:'coax', icon:'🪢', name:'Кабель коаксиальный RG-58 (бухта 50м)', sku:'КБ-0230', topCat:'Комплектующие', subCat:'Кабели', unit:'м', stock:120, min:50, abc:'B',
+    desc:'Коаксиальный кабель для антенных трактов.',
+    posts:{}, ext:0,
+    history:[{d:'20.06.2026', type:'in', text:'Приход · «ЧипДип»', q:'+150 м'}]},
+
+  // ===== Комплектующие → Антенны =====
+  {id:'antsec', icon:'📶', name:'Антенна секторная 2.4ГГц 14dBi', sku:'АН-0021', topCat:'Комплектующие', subCat:'Антенны', unit:'шт', stock:6, min:3, abc:'B',
+    desc:'Секторная антенна для канала передачи данных.',
+    posts:{}, ext:0,
+    history:[{d:'01.07.2026', type:'in', text:'Приход · ИП Сергеев (заказ 118)', q:'+8 шт'}]},
+
+  // ===== Комплектующие → Приёмники управления =====
+  {id:'rxctrl', icon:'📥', name:'Приёмник управления FrSky R-XSR', sku:'ПР-0301', topCat:'Комплектующие', subCat:'Приёмники управления', unit:'шт', stock:11, min:5, abc:'A',
+    desc:'Радиоприёмник канала управления для платформ ФПВ.',
+    posts:{}, ext:0,
+    history:[{d:'02.07.2026', type:'in', text:'Приход · «RCшоп» (заказ 765)', q:'+15 шт'}]},
+
+  // ===== Комплектующие → Передатчики управления =====
+  {id:'txctrl', icon:'📤', name:'Модуль передатчика управления ELRS 915', sku:'ПР-0410', topCat:'Комплектующие', subCat:'Передатчики управления', unit:'шт', stock:4, min:3, abc:'B',
+    desc:'Модуль передатчика канала управления ELRS 915МГц.',
+    posts:{}, ext:0,
+    history:[{d:'02.07.2026', type:'in', text:'Приход · «RCшоп» (заказ 765)', q:'+5 шт'}]},
+
+  // ===== ФПВ (платформы воздушного/лётного базирования) =====
+  {id:'motor', icon:'🌀', name:'Мотор бесколлекторный 2207 1900KV', sku:'ДР-0501', topCat:'ФПВ', unit:'шт', stock:16, min:8, abc:'A',
+    desc:'Бесколлекторный мотор для сборки лётной платформы.',
+    posts:{'ТЭЧ':2}, ext:0,
+    history:[
+      {d:'09.07.2026', type:'in', text:'Приход · «RCшоп» (заказ 771)', q:'+20 шт'},
+      {d:'15.07.2026', type:'out', text:'Выдано на пост ТЭЧ · сборка рамы', q:'−2 шт'},
+      {d:'18.07.2026', type:'off', text:'Списано по АВР-146 (замена мотора)', q:'−2 шт'},
+    ]},
+  {id:'prop', icon:'🍃', name:'Пропеллер 5" (комплект 2CW+2CCW)', sku:'ДР-0512', topCat:'ФПВ', unit:'компл', stock:22, min:10, abc:'A',
+    desc:'Комплект пропеллеров для платформы 5 дюймов.',
+    posts:{'ТЭЧ':3}, ext:0,
+    history:[
+      {d:'09.07.2026', type:'in', text:'Приход · «RCшоп» (заказ 771)', q:'+30 компл'},
+      {d:'16.07.2026', type:'out', text:'Выдано на пост ТЭЧ', q:'−3 компл'},
+    ]},
+  {id:'fpvcam', icon:'📹', name:'FPV-камера 1200TVL', sku:'ДР-0530', topCat:'ФПВ', unit:'шт', stock:7, min:4, abc:'B',
+    desc:'Камера видеонаблюдения для FPV-канала платформы.',
+    posts:{}, ext:0,
+    history:[
+      {d:'02.07.2026', type:'in', text:'Приход · «RCшоп» (заказ 765)', q:'+10 шт'},
+      {d:'13.07.2026', type:'out', text:'Выдача на сторону · «СтройМонтаж» (обследование объекта)', q:'−1 шт'},
+    ]},
+  {id:'frame', icon:'⬡', name:'Рама карбон 5" (комплект)', sku:'ДР-0540', topCat:'ФПВ', unit:'шт', stock:4, min:3, abc:'C',
+    desc:'Карбоновая рама для сборки лётной платформы 5".',
+    posts:{}, ext:0,
+    history:[
+      {d:'02.07.2026', type:'in', text:'Приход · «RCшоп» (заказ 765)', q:'+5 шт'},
+      {d:'12.07.2026', type:'off', text:'Списано по АВР-140', q:'−1 шт'},
+    ]},
+
+  // ===== НРТК (наземные роботизированные комплексы) =====
+  {id:'ant', icon:'📶', name:'Антенна направленная АН-9', sku:'АН-0009', topCat:'НРТК', unit:'шт', stock:3, min:1, abc:'A', serial:'000966',
+    desc:'Направленная антенна канала связи наземного комплекса.',
+    posts:{'НРТК':1}, ext:0,
+    history:[
+      {d:'03.06.2026', type:'in', text:'Приход · собственное производство', q:'+4 шт'},
+      {d:'16.07.2026', type:'out', text:'№000966 принята в ремонт на пост НРТК (ДФ-041)', q:'−1 шт'},
+    ]},
+  {id:'battnrtk', icon:'🔋', name:'Аккумулятор тяговый НРТК 6S 10000мАч', sku:'АКБ-0610', topCat:'НРТК', unit:'шт', stock:9, min:4, abc:'A',
+    desc:'Тяговый аккумулятор для наземного роботизированного комплекса.',
+    posts:{'НРТК':2}, ext:0,
+    history:[
+      {d:'05.07.2026', type:'in', text:'Приход · «PowerCell» (заказ 512)', q:'+12 шт'},
+      {d:'17.07.2026', type:'out', text:'Выдано на пост НРТК', q:'−2 шт'},
+      {d:'19.07.2026', type:'off', text:'Списано по АВР-147 (замена АКБ на изделии №118)', q:'−1 шт'},
+    ]},
+
+  // ===== НСУ (наземные станции управления) =====
+  {id:'nsukit', icon:'📡', name:'Комплект антенного поста НСУ', sku:'НСУ-0011', topCat:'НСУ', unit:'компл', stock:2, min:1, abc:'B',
+    desc:'Базовый комплект антенного поста станции управления.',
+    posts:{}, ext:0,
+    history:[{d:'28.06.2026', type:'in', text:'Приход · собственная сборка', q:'+3 компл'}]},
+  {id:'nsumon', icon:'🖥', name:'Монитор станции управления 15.6"', sku:'НСУ-0022', topCat:'НСУ', unit:'шт', stock:3, min:2, abc:'C',
+    desc:'Монитор рабочего места оператора НСУ.',
+    posts:{}, ext:0,
+    history:[{d:'28.06.2026', type:'in', text:'Приход · «ЧипДип»', q:'+4 шт'}]},
+];
+
+/* ================= ПОСТЫ ================= */
+const posts = [
+  {name:'ТЭЧ', full:'Технически-эксплуатационная часть', curator:'Иванов А.',
+   stock:[{id:'flux',q:40},{id:'solder',q:80},{id:'wire',q:12},{id:'esp32',q:2},{id:'stlink',q:1},{id:'motor',q:2},{id:'prop',q:3}], repairs:[]},
+  {name:'НРТК', full:'Наземные роботизированные комплексы', curator:'Петров С.',
+   stock:[{id:'flux',q:25},{id:'solder',q:60},{id:'amp',q:1},{id:'att',q:1},{id:'battnrtk',q:2},{id:'ant',q:1}],
+   repairs:[{serial:'000966', item:'Антенна направленная АН-9', status:'В ремонте', doc:'ДФ-041'}]},
+  {name:'FPV радио', full:'Сборка и настройка FPV-радиоканала', curator:'Сидоров К.', stock:[], repairs:[]},
+  {name:'FPV СТ радио', full:'FPV с спутниковой/специальной радиосвязью', curator:'—', stock:[], repairs:[]},
+  {name:'FPV оптоволокно', full:'Сборка комплектов с оптоволоконным каналом', curator:'—', stock:[], repairs:[]},
+  {name:'3D печать', full:'Печать корпусов и оснастки (пластик)', curator:'Кузнецов Р.', stock:[{id:'petg',q:300}], repairs:[]},
+  {name:'Термопласт печать', full:'Печать термопластами повышенной прочности', curator:'—', stock:[], repairs:[]},
+  {name:'Обучения и апробации', full:'Обучение операторов, испытания изделий', curator:'—', stock:[], repairs:[]},
+  {name:'Разработки ПО', full:'Разработка встроенного и наземного ПО', curator:'—', stock:[], repairs:[]},
+  {name:'Зарядки', full:'Зарядная станция аккумуляторов', curator:'—', stock:[{id:'battnrtk',q:0}], repairs:[]},
+  {name:'Намотки оптоволокна', full:'Намотка катушек оптоволокна для FPV', curator:'—', stock:[], repairs:[]},
+];
+
+/* ================= ДОКУМЕНТЫ ================= */
+const docs = [
+  {no:'ДФ-041', kind:'defekt', status:'Закрыт', date:'16.07.2026', orderNo:'З-2207', serial:'000966', item:'Антенна направленная АН-9',
+   from:'Возврат с объекта «Вышка-12»', callsign:'Сокол', post:'НРТК',
+   fault:'Нет усиления сигнала, обрыв кабеля питания у разъёма',
+   defects:['Выход из строя усилителя ACASOM 20W','Обрыв кабеля питания (участок 5–7 м)','Окисление контактов аттенюатора'],
+   verdict:'Ремонтопригодно', workDoc:'АВР-145'},
+  {no:'АВР-145', kind:'work', status:'Черновик', date:'17.07.2026', orderNo:'З-2207', serial:'000966', item:'Антенна направленная АН-9',
+   defektDoc:'ДФ-041', post:'НРТК',
+   planQty:1, factQty:null,
+   participants:[{worker:'Петров С.', work:'Замена усилителя ACASOM 20W'},{worker:'Петров С.', work:'Замена участка кабеля питания 7 м'}],
+   works:['Замена усилителя ACASOM 20W','Замена участка кабеля питания 7 м','Чистка и пропайка контактов аттенюатора'],
+   materials:[{id:'flux',q:10},{id:'solder',q:20},{id:'wire',q:7},{id:'amp',q:1},{id:'att',q:1}]},
+  {no:'ДФ-040', kind:'defekt', status:'Закрыт', date:'12.07.2026', orderNo:'З-2198', serial:'000871', item:'Антенна направленная АН-9',
+   from:'Возврат с объекта «Ретранслятор-3»', callsign:'Игла', post:'ТЭЧ',
+   fault:'Механическое повреждение кронштейна', defects:['Трещина кронштейна крепления'],
+   verdict:'Ремонтопригодно', workDoc:'АВР-144'},
+  {no:'АВР-144', kind:'work', status:'Закрыт', date:'18.07.2026', orderNo:'З-2198', serial:'000871', item:'Антенна направленная АН-9',
+   defektDoc:'ДФ-040', post:'ТЭЧ', planQty:1, factQty:1,
+   participants:[{worker:'Иванов А.', work:'Замена кронштейна, пропайка разъёма'}],
+   works:['Замена кронштейна, пропайка разъёма'],
+   materials:[{id:'flux',q:15},{id:'solder',q:20}]},
+  {no:'АВР-147', kind:'work', status:'Расхождение', date:'19.07.2026', orderNo:'З-2214', serial:'—', item:'Приёмник управления FrSky R-XSR (партия 150 шт)',
+   defektDoc:'ДФ-039', post:'ТЭЧ', planQty:150, factQty:147,
+   participants:[{worker:'Иванов А.', work:'Входной контроль и настройка партии приёмников'}],
+   works:['Входной контроль партии 150 шт', 'Настройка и биндинг приёмников'],
+   materials:[{id:'heatshrink',q:2}]},
+];
+
+/* ================= ВЫДАЧИ НА СТОРОНУ ================= */
+const extIssues = [
+  {no:'ВН-018', to:'Подрядчик «СтройМонтаж»', date:'15.07.2026', status:'Выдано', due:'01.08.2026',
+   items:[{id:'wire',q:20},{id:'amp',q:1}], note:'Монтаж линии на объекте «Вышка-12»'},
+  {no:'ВН-017', to:'ИП Кузнецов (монтаж)', date:'02.07.2026', status:'Возвращено', due:'10.07.2026',
+   items:[{id:'sma',q:4}], note:'Обжим на объекте'},
+];
+
+/* ================= РОЛИ И АУДИТ ================= */
+const ROLES = {
+  admin:{label:'Администратор', desc:'Полный доступ ко всей системе', rights:['Создание и удаление карточек и категорий','Передача товаров между складом и постами','Проведение инвентаризации','Выгрузка отчётов и актов в Excel','Создание новых постов','Закрытие актов с расхождением по количеству'], restricted:[]},
+  kladovshik:{label:'Кладовщик', desc:'Складской учёт, акты и выгрузки', rights:['Создание акта дефектовки','Создание акта выполненных работ','Создание карточек и категорий','Выгрузка актов и инвентаризации в Excel'], restricted:['Создание постов недоступно','Закрытие актов с расхождением недоступно']},
+  rabotnik:{label:'Работник (старший на посту)', desc:'Доступ только к своему посту', rights:['Создание акта дефектовки на своём посту','Создание акта выполненных работ','Списание израсходованных материалов'], restricted:['Создание карточек и категорий недоступно','Создание постов недоступно','Закрытие актов с расхождением недоступно']},
+};
+let currentRole = 'admin';
+
+const auditLog = [
+  {t:'19.07.2026 15:10', user:'Иванов А.', action:'Акт с расхождением', detail:'АВР-147: получено 150, годных 147 — направлено администратору', post:'ТЭЧ', item:null},
+  {t:'18.07.2026 16:40', user:'Петров С.', action:'Списание материалов', detail:'АВР-144 закрыт, антенна №000871 возвращена на склад', post:'ТЭЧ', item:'ant'},
+  {t:'17.07.2026 11:05', user:'Петров С.', action:'Приёмка в ремонт', detail:'Открыт акт дефектовки ДФ-041, антенна №000966', post:'НРТК', item:'ant'},
+  {t:'17.07.2026 09:40', user:'Петров С.', action:'Приход на пост', detail:'Аккумулятор тяговый НРТК 6S: +2 шт на пост НРТК', post:'НРТК', item:'battnrtk'},
+  {t:'15.07.2026 09:20', user:'Иванов А.', action:'Выдача на сторону', detail:'ВН-018 · «СтройМонтаж»: провод AWG24 20 м, усилитель 1 шт', post:null, item:'wire'},
+  {t:'14.07.2026 14:02', user:'Иванов А.', action:'Выдача на пост', detail:'Пост ТЭЧ: флюс 50 г, припой 100 г', post:'ТЭЧ', item:'flux'},
+  {t:'12.07.2026 10:00', user:'admin', action:'Приход по накладной', detail:'ООО «РадиоДеталь»: флюс 1000 г, припой 2000 г', post:null, item:'flux'},
+];
+function logAction(action, detail, post, itemId){
+  auditLog.unshift({t:'21.07.2026 '+String(8+auditLog.length%10).padStart(2,'0')+':00', user:ROLES[currentRole].label, action, detail, post:post||null, item:itemId||null});
+}
+
+/* ================= ИНВЕНТАРИЗАЦИЯ ================= */
+let cycleCount = null;
+
+/* ================= НАВИГАЦИЯ ================= */
+const stack = [];
+let current = null;
+const $ = id => document.getElementById(id);
+const item = id => items.find(i=>i.id===id);
+const fmtQ = (i,q) => `${q} ${i.unit}`;
+
+function setHdr(title, sub, canBack, showPlus){
+  $('hdrTitle').innerHTML = title + (sub?`<div class="sub">${sub}</div>`:'');
+  $('backBtn').classList.toggle('show', !!canBack);
+  $('plusBtn').style.display = showPlus ? 'block' : 'none';
+}
+function setTab(tab){
+  document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('on', b.dataset.tab===tab));
+}
+function render(view, push=true){
+  if(push && current) stack.push(current);
+  current = view;
+  view.fn();
+  $('content').scrollTop = 0;
+}
+function goBack(){
+  const prev = stack.pop();
+  if(prev){ current = prev; prev.fn(); }
+}
+function go(tab){
+  stack.length = 0;
+  if(tab==='sklad'){ skladPath=[]; searchQ=''; filterABC='Все'; filterLow=false; }
+  if(tab==='ext'){ issueSelected={}; issueDest=''; issueSearchQ=''; }
+  setTab(tab);
+  render({fn:views[tab]}, false);
+}
+function toast(msg){
+  const t=$('toast'); t.textContent=msg; t.classList.add('show');
+  clearTimeout(t._tm); t._tm=setTimeout(()=>t.classList.remove('show'), 2600);
+}
+function scanDemo(){
+  const layer=$('sheetLayer');
+  layer.innerHTML = `
+    <div class="scan-screen">
+      <button class="x" onclick="$('sheetLayer').innerHTML=''">×</button>
+      <div class="scan-frame"><i></i><i></i><i></i><i></i></div>
+      <h2>Наведите камеру на QR-код</h2>
+      <p>Код закреплён за конкретной номенклатурой</p>
+      <button class="btn primary" style="width:220px" onclick="$('sheetLayer').innerHTML=''; openItem('solder')">Демо: распознать «Припой ПОС-61»</button>
+    </div>`;
+}
+function csvDownload(filename, rows){
+  const csv = '﻿'+rows.map(r=>r.map(c=>`"${String(c??'').replace(/"/g,'""')}"`).join(';')).join('\r\n');
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download=filename; document.body.appendChild(a); a.click();
+  setTimeout(()=>{document.body.removeChild(a); URL.revokeObjectURL(url);}, 300);
+  toast('⤓ Файл '+filename+' скачан');
+}
+function printLabel(sku){
+  const i = items.find(x=>x.sku===sku);
+  const src = QR_IMAGES[sku];
+  const w = window.open('', '_blank', 'width=400,height=500');
+  if(!w){ toast('Разрешите всплывающие окна для печати'); return; }
+  w.document.write(`<html><head><title>Этикетка ${sku}</title><style>
+    body{font-family:Arial,sans-serif;text-align:center;padding:24px;}
+    img{width:180px;height:180px;} h2{font-size:14px;margin:10px 0 2px} p{font-size:12px;color:#555}
+  </style></head><body>
+    <img src="${src||''}"><h2>${i?i.name:''}</h2><p>${sku}</p>
+    <script>window.onload=()=>{window.print();}<\/script>
+  </body></html>`);
+  w.document.close();
+}
+
+/* ================= НИЖНЯЯ ШТОРКА (МЕНЮ +) ================= */
+function openSheet(title, itemsArr){
+  const layer=$('sheetLayer');
+  layer.innerHTML = `
+    <div class="sheet-backdrop" onclick="if(event.target===this) closeSheet()">
+      <div class="sheet">
+        <div class="handle"></div>
+        <div class="sec" style="margin-top:0">${title}</div>
+        ${itemsArr.map(it=>`<div class="sheet-item" onclick="closeSheet(); ${it.action}">
+          <div class="icbox">${it.icon}</div>
+          <div class="grow"><div class="t">${it.label}</div>${it.sub?`<div class="s">${it.sub}</div>`:''}</div>
+        </div>`).join('')}
+      </div>
+    </div>`;
+}
+function closeSheet(){ $('sheetLayer').innerHTML=''; }
+
+function openPlusMenu(){
+  if(currentTab==='sklad'){
+    const inComponents = skladPath[0]==='Комплектующие';
+    const opts=[
+      {icon:'🏷', label:'Добавить карточку товара', sub:'Новая номенклатура в текущем разделе', action:'openAddItemForm()'},
+      {icon:'📁', label:'Добавить категорию', sub: inComponents ? 'Новая подкатегория в «Комплектующие»' : 'Новый раздел верхнего уровня склада', action:'openAddCategoryForm()'},
+    ];
+    openSheet('Склад', opts);
+  } else if(currentTab==='posts'){
+    openSheet('Посты', [{icon:'🛠', label:'Добавить пост', sub:'Новый рабочий пост и куратор', action:'openAddPostForm()'}]);
+  }
+}
+
+/* ================= ЭКРАНЫ ================= */
+let sortMode='name', filterLow=false, searchQ='', filterABC='Все';
+let skladPath=[]; // [] = корень; ['ФПВ'] = внутри категории; ['Комплектующие','Кабели'] = вложенная подкатегория
+let currentTab='sklad';
+
+function itemsIn(topCat, subCat){
+  return items.filter(i=> i.topCat===topCat && (subCat===undefined ? true : i.subCat===subCat));
+}
+function catStats(topCat, subCat){
+  const list=itemsIn(topCat, subCat);
+  return {count:list.length, low:list.filter(i=>i.stock<i.min).length};
+}
+
+const views = {
+
+sklad(){
+  currentTab='sklad'; setTab('sklad');
+  if(searchQ.trim()){ renderSkladSearch(); return; }
+  if(skladPath.length===0){ renderSkladRoot(); return; }
+  if(skladPath.length===1 && skladPath[0]==='Комплектующие'){ renderComponentSubfolders(); return; }
+  if(skladPath.length===1){ renderSkladList(skladPath[0], undefined); return; }
+  renderSkladList(skladPath[0], skladPath[1]);
+},
+
+posts(){
+  currentTab='posts'; setTab('posts');
+  setHdr('Посты', `${posts.length} рабочих постов`, false, currentRole!=='rabotnik');
+  $('content').innerHTML = posts.map((p,idx)=>`
+    <div class="card" onclick="openPost(${idx})">
+      <div class="row">
+        <div class="icbox">🛠</div>
+        <div class="grow">
+          <div class="t">${p.name}</div>
+          <div class="s">${p.full}${p.curator&&p.curator!=='—'?' · '+p.curator:''}</div>
+          <div class="s" style="margin-top:6px">
+            <span class="chip blue">${p.stock.filter(s=>s.q>0).length} позиций</span>
+            ${p.repairs.length?`<span class="chip amber">${p.repairs.length} в ремонте</span>`:''}
+          </div>
+        </div>
+        <div style="color:var(--muted)">›</div>
+      </div>
+    </div>`).join('');
+},
+
+docs(){
+  currentTab='docs'; setTab('docs');
+  setHdr('Документы', 'Дефектовки и акты выполненных работ', false, false);
+  const chip = d => d.status==='Закрыт' ? 'green' : d.status==='Расхождение' ? 'red' : 'amber';
+  const nDefekt = docs.filter(d=>d.kind==='defekt').length;
+  const nProgress = docs.filter(d=>d.kind==='work' && d.status==='Черновик').length;
+  const nDone = docs.filter(d=>d.status==='Закрыт').length;
+  const mismatches = docs.filter(d=>d.status==='Расхождение');
+  $('content').innerHTML = `
+    <button class="btn primary" style="margin:0 0 10px" onclick="render({fn:views.newDefekt})">＋ Новый акт дефектовки</button>
+    <div class="btn-row" style="margin-bottom:12px">
+      <button class="btn ghost" style="margin-top:0" onclick="exportDocsExcel()">⤓ Экспорт актов в Excel</button>
+      <button class="btn ghost" style="margin-top:0" onclick="exportInventoryExcel()">⤓ Экспорт инвентаризации</button>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="n">${nDefekt}</div><div class="l">Дефектовка</div></div>
+      <div class="stat"><div class="n">${nProgress}</div><div class="l">В работе</div></div>
+      <div class="stat"><div class="n">${nDone}</div><div class="l">Закрыто</div></div>
+    </div>
+    ${mismatches.map(m=>{
+      const dIdx=docs.indexOf(m);
+      return `<div class="notice-danger" onclick="openDoc(${dIdx})">
+        <div class="icbox" style="background:var(--red-soft);color:var(--red)">!</div>
+        <div class="grow"><div class="t" style="color:var(--red)">Акт ${m.no} требует решения администратора</div>
+        <div class="s">Получено ${m.planQty}, выполнено ${m.factQty} · расхождение ${m.planQty-m.factQty} шт</div></div>
+        <div style="color:var(--red);font-size:13px;font-weight:700">Открыть ›</div>
+      </div>`;}).join('')}
+    <div class="sec">Порядок оформления</div>
+    <div class="steps">
+      <div class="step done">1. Дефектовка</div><div class="arrow">→</div>
+      <div class="step now">2. Ремонт</div><div class="arrow">→</div>
+      <div class="step">3. Акт работ</div><div class="arrow">→</div>
+      <div class="step">4. На склад</div>
+    </div>
+    <div class="sec">Все документы</div>
+    ${docs.map((d,i)=>`
+      <div class="card" onclick="openDoc(${i})">
+        <div class="row">
+          <div class="icbox">${d.kind==='defekt'?'🔍':(d.status==='Расхождение'?'⚠':'✅')}</div>
+          <div class="grow">
+            <div class="t">${d.no} · ${d.kind==='defekt'?'Акт дефектовки':'Акт выполненных работ'}</div>
+            <div class="s">${d.item} ${d.serial&&d.serial!=='—'?'№'+d.serial:''} · ${d.date}</div>
+          </div>
+          <span class="chip ${chip(d)}">${d.status}</span>
+        </div>
+      </div>`).join('')}
+  `;
+},
+
+ext(){
+  currentTab='ext'; setTab('ext');
+  setHdr('Выдачи', 'На пост, на склад, на сторону', false, false);
+  $('content').innerHTML = `
+    <div class="btn-row" style="margin:0 0 12px">
+      <button class="btn primary" style="margin-top:0" onclick="render({fn:views.issueToPost})">→ Выдать на пост</button>
+      <button class="btn ghost" style="margin-top:0" onclick="render({fn:views.issueToSklad})">← Выдать на склад</button>
+    </div>
+    <div class="sec">Выдачи на сторону</div>
+    <button class="btn primary" style="margin:0 0 10px" onclick="extDraftLines=[]; render({fn:views.issueExt})">＋ Новая выдача на сторону</button>
+    ${extIssues.map((e,ei)=>`
+      <div class="card static">
+        <div class="row" style="margin-bottom:8px">
+          <div class="icbox">🚚</div>
+          <div class="grow">
+            <div class="t">${e.no} · ${e.to}</div>
+            <div class="s">${e.date} · ${e.note}</div>
+          </div>
+          <span class="chip ${e.status==='Возвращено'?'green':'amber'}">${e.status}</span>
+        </div>
+        ${e.items.map(m=>{const it=item(m.id);return `<div class="mat"><div class="grow"><div class="t">${it.icon} ${it.name}</div></div><div class="q">${fmtQ(it,m.q)}</div></div>`;}).join('')}
+        ${e.status!=='Возвращено'?`<div class="s" style="margin-top:8px">Срок возврата: <b style="color:var(--amber)">${e.due}</b></div>
+        <button class="btn ghost" onclick="returnExtIssue(${ei})">↩ Оформить возврат</button>`:''}
+      </div>`).join('')}
+  `;
+},
+
+issueToPost(){
+  setHdr('Выдать на пост', 'Поиск и сортировка по всей базе', true, false);
+  renderIssuePicker('post');
+},
+issueToSklad(){
+  setHdr('Выдать на склад', 'Возврат с поста на основной склад', true, false);
+  renderIssuePicker('sklad');
+},
+issueExt(){
+  setHdr('Выдача на сторону', '', true, false);
+  $('content').innerHTML = `
+    <div class="fld"><label>Получатель <span class="req">*</span></label><input id="ei_to" placeholder="Организация или ФИО"></div>
+    <div class="fld"><label>Срок возврата</label><input id="ei_due" placeholder="Например, 15.08.2026"></div>
+    <div class="fld"><label>Примечание</label><input id="ei_note" placeholder="Назначение выдачи"></div>
+    <div class="fld"><label>Товар</label>
+      <select id="ei_item">${items.map(i=>`<option value="${i.id}">${i.icon} ${i.name} (склад: ${i.stock} ${i.unit})</option>`).join('')}</select></div>
+    <div class="fld"><label>Количество</label><input id="ei_qty" type="number" value="1"></div>
+    <div id="ei_list"></div>
+    <button class="fbtn" style="width:100%;padding:11px;margin-bottom:10px" onclick="addExtLine()">＋ Добавить позицию в выдачу</button>
+    <button class="btn primary" onclick="submitExtIssue()">Оформить выдачу на сторону</button>
+  `;
+},
+
+newDefekt(){
+  setHdr('Новый акт дефектовки', 'Все поля обязательны', true, false);
+  $('content').innerHTML = `
+    <div class="progress-note" id="defNote">⚠ Черновик — акт работ будет доступен после заполнения всех полей и закрытия дефектовки</div>
+    <div class="fld"><label>Номер заявки <span class="req">*</span></label><input id="f_order" placeholder="Например, З-2231" oninput="checkDefekt()"></div>
+    <div class="fld"><label>Изделие / серийный № <span class="req">*</span></label>
+      <div style="display:flex;gap:6px">
+        <input id="f_serial" placeholder="Скан QR или ввод вручную" oninput="checkDefekt()">
+        <button class="addmat" style="margin:0"><span onclick="$('f_serial').value='АН-9 №000967'; checkDefekt(); toast('📷 QR изделия распознан')" style="background:var(--accent-soft);color:var(--accent);border-radius:11px;padding:11px 13px;cursor:pointer;font-weight:700">▣</span></button>
+      </div></div>
+    <div class="fld"><label>Дата поступления <span class="req">*</span></label><input id="f_date" type="text" value="21.07.2026" oninput="checkDefekt()"></div>
+    <div class="fld"><label>Подразделение, откуда поступило <span class="req">*</span></label><input id="f_from" placeholder="Объект, подразделение, поставщик…" oninput="checkDefekt()"></div>
+    <div class="fld"><label>Пост / принял <span class="req">*</span></label>
+      <select id="f_post" onchange="checkDefekt()">
+        <option value="">— выберите пост —</option>
+        ${posts.map(p=>`<option>${p.name}</option>`).join('')}
+      </select></div>
+    <div class="fld"><label>Позывной проводившего дефектовку <span class="req">*</span></label><input id="f_callsign" placeholder="Например, Сокол" oninput="checkDefekt()"></div>
+    <div class="fld"><label>Описание неисправности со слов сдающего <span class="req">*</span></label><textarea id="f_fault" placeholder="Что не работает, при каких условиях…" oninput="checkDefekt()"></textarea></div>
+    <div class="fld"><label>Выявленные дефекты (по результатам осмотра) <span class="req">*</span></label><textarea id="f_defects" placeholder="Каждый дефект с новой строки" oninput="checkDefekt()"></textarea></div>
+    <div class="fld"><label>Заключение <span class="req">*</span></label>
+      <select id="f_verdict" onchange="checkDefekt()">
+        <option value="">— выберите —</option>
+        <option>Ремонтопригодно</option>
+        <option>Не подлежит ремонту (списание)</option>
+        <option>Требуется замена узлов</option>
+      </select></div>
+    <div class="fld"><label>Фото дефектов</label><button class="fbtn" style="width:100%;padding:11px" onclick="toast('Демо: камера — фото прикрепится к акту')">📷 Прикрепить фото</button></div>
+    <button class="btn primary" id="defSubmit" disabled onclick="submitDefekt()">Закрыть акт дефектовки</button>
+  `;
+},
+
+more(){
+  currentTab='more'; setTab('more');
+  setHdr('Ещё', 'Роли, журнал, инвентаризация', false, false);
+  const r = ROLES[currentRole];
+  $('content').innerHTML = `
+    <div class="card" onclick="render({fn:views.roles})">
+      <div class="row">
+        <div class="icbox">👤</div>
+        <div class="grow"><div class="t">Роли и доступ</div><div class="s">Текущая: ${r.label}</div></div>
+        <div style="color:var(--muted)">›</div>
+      </div>
+    </div>
+    <div class="card" onclick="${currentRole==='admin'?'render({fn:views.inventory})':'toast(\'Доступно только администратору\')'}">
+      <div class="row">
+        <div class="icbox">🔢</div>
+        <div class="grow"><div class="t">Инвентаризация</div><div class="s">Пересчёт остатков сканером, акт расхождений</div></div>
+        <div style="color:var(--muted)">${currentRole==='admin'?'›':'🔒'}</div>
+      </div>
+    </div>
+    <div class="card" onclick="render({fn:views.audit})">
+      <div class="row">
+        <div class="icbox">📜</div>
+        <div class="grow"><div class="t">Журнал действий</div><div class="s">Фильтр одновременно по посту и по товару</div></div>
+        <div style="color:var(--muted)">›</div>
+      </div>
+    </div>
+    <div class="card" onclick="toast('Демо: список позиций ниже минимума + экспорт для закупки')">
+      <div class="row">
+        <div class="icbox">🛒</div>
+        <div class="grow"><div class="t">Список на закупку</div><div class="s">Автосписок по минимальным остаткам</div></div>
+        <div style="color:var(--muted)">›</div>
+      </div>
+    </div>
+    <div class="card" onclick="exportStockExcel()">
+      <div class="row">
+        <div class="icbox">⤓</div>
+        <div class="grow"><div class="t">Экспорт остатков в Excel</div><div class="s">Весь склад, все категории и посты</div></div>
+        <div style="color:var(--muted)">›</div>
+      </div>
+    </div>
+  `;
+},
+
+roles(){
+  setHdr('Роли и доступ', '', true, false);
+  $('content').innerHTML = `
+    ${Object.entries(ROLES).map(([k,v])=>`
+      <div class="card static">
+        <div class="row" style="cursor:pointer" onclick="setRole('${k}')">
+          <div class="icbox">${k===currentRole?'●':'○'}</div>
+          <div class="grow"><div class="t">${v.label}${k===currentRole?'<span class="badge-role">активна</span>':''}</div><div class="s">${v.desc}</div></div>
+        </div>
+        <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--line)">
+          ${v.rights.map(r=>`<div class="s" style="color:var(--green);margin:4px 0">✓ ${r}</div>`).join('')}
+          ${v.restricted.map(r=>`<div class="s" style="color:var(--red);margin:4px 0">✕ ${r}</div>`).join('')}
+        </div>
+      </div>`).join('')}
+    <div class="progress-note">Переключатель — для демонстрации прав в прототипе. В реальном приложении роль определяется логином сотрудника, а не переключателем в приложении.</div>
+  `;
+},
+
+audit(){
+  setHdr('Журнал действий', `${auditLog.length} записей`, true, false);
+  renderAuditLog();
+},
+
+inventory(){
+  setHdr('Инвентаризация', cycleCount?'Идёт пересчёт':'Сверка факта с базой', true, false);
+  if(!cycleCount){
+    $('content').innerHTML = `
+      <div class="progress-note">Инвентаризация фиксирует фактический остаток по каждой позиции (сканированием QR или вручную) и сравнивает с учётными данными. Расхождения формируют акт.</div>
+      <button class="btn primary" onclick="startCycleCount()">▶ Начать инвентаризацию склада</button>
+    `;
+    return;
+  }
+  const done = Object.keys(cycleCount.counts).length;
+  $('content').innerHTML = `
+    <div class="progress-note">Сосчитано позиций: ${done} из ${items.length}. Можно вводить вручную или сканером.</div>
+    ${items.map(i=>{
+      const counted = cycleCount.counts[i.id];
+      return `
+      <div class="card static">
+        <div class="row">
+          <div class="icbox">${i.icon}</div>
+          <div class="grow"><div class="t">${i.name}</div><div class="s">${i.sku} · учёт: ${i.stock} ${i.unit}</div></div>
+          <input type="number" style="width:70px;text-align:right;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:8px 6px;font-weight:700"
+            placeholder="${i.stock}" value="${counted??''}" onchange="setCount('${i.id}', this.value)">
+        </div>
+      </div>`;}).join('')}
+    <button class="btn green" onclick="finishCycleCount()">✓ Завершить и сформировать акт</button>
+    <button class="btn ghost" onclick="cycleCount=null; render({fn:views.inventory},false)">Отменить инвентаризацию</button>
+  `;
+},
+
+};
+
+/* ================= СКЛАД: КОРЕНЬ / ПАПКИ ================= */
+function renderSkladRoot(){
+  setHdr('Склад', `${items.length} номенклатур · ${categoriesList.length} разделов`, false, currentRole!=='rabotnik');
+  const low=items.filter(i=>i.stock<i.min).length;
+  const onPosts=items.reduce((s,i)=>s+Object.keys(i.posts).length,0);
+  $('content').innerHTML = `
+    <div class="stats">
+      <div class="stat"><div class="n">${items.length}</div><div class="l">Номенклатур</div></div>
+      <div class="stat"><div class="n ${low?'red':''}">${low}</div><div class="l">Ниже минимума</div></div>
+      <div class="stat"><div class="n">${onPosts}</div><div class="l">Позиций на постах</div></div>
+    </div>
+    <div class="toolbar">
+      <input class="search" placeholder="🔍 Поиск по всему складу…" value="${searchQ}"
+        oninput="searchQ=this.value; views.sklad(); this.focus(); this.setSelectionRange(this.value.length,this.value.length)">
+    </div>
+    ${categoriesList.map(c=>{
+      const st=catStats(c);
+      return `
+      <div class="card" onclick="skladPath=['${c}']; views.sklad()">
+        <div class="row">
+          <div class="icbox" style="width:46px;height:46px;font-size:22px">${CAT_ICON[c]||'📦'}</div>
+          <div class="grow">
+            <div class="t">${c}</div>
+            <div class="s">${st.count} номенклатур${st.low?` · <span style="color:var(--red);font-weight:600">${st.low} ниже минимума</span>`:''}${c==='Комплектующие'?` · ${componentSubcats.length} подразделов`:''}</div>
+          </div>
+          <div style="color:var(--muted);font-size:18px">›</div>
+        </div>
+      </div>`;}).join('')}
+  `;
+}
+
+function renderComponentSubfolders(){
+  setHdr('Комплектующие', `${componentSubcats.length} подразделов`, true, currentRole!=='rabotnik');
+  $('content').innerHTML = componentSubcats.map(sc=>{
+    const st=catStats('Комплектующие', sc);
+    return `
+    <div class="card" onclick="skladPath=['Комплектующие','${sc}']; views.sklad()">
+      <div class="row">
+        <div class="icbox">${CAT_ICON[sc]||'🧩'}</div>
+        <div class="grow">
+          <div class="t">${sc}</div>
+          <div class="s">${st.count} номенклатур${st.low?` · <span style="color:var(--red);font-weight:600">${st.low} ниже минимума</span>`:''}</div>
+        </div>
+        <div style="color:var(--muted)">›</div>
+      </div>
+    </div>`;}).join('');
+}
+
+function renderSkladList(topCat, subCat){
+  const title = subCat || topCat;
+  setHdr(title, subCat?`Комплектующие → ${subCat}`:'Раздел склада', true, currentRole!=='rabotnik');
+  let list = itemsIn(topCat, subCat);
+  if(filterABC!=='Все') list=list.filter(i=>i.abc===filterABC);
+  if(filterLow) list=list.filter(i=>i.stock<i.min);
+  if(sortMode==='name') list.sort((a,b)=>a.name.localeCompare(b.name,'ru'));
+  if(sortMode==='qty') list.sort((a,b)=>a.stock-b.stock);
+  if(sortMode==='qtyd') list.sort((a,b)=>b.stock-a.stock);
+  $('content').innerHTML = `
+    <div class="filters" style="margin-bottom:10px">
+      <button class="fbtn" onclick="skladPath=${subCat?"['Комплектующие']":'[]'}; filterABC='Все'; filterLow=false; views.sklad()">← ${subCat?'Комплектующие':'Все разделы'}</button>
+    </div>
+    <div class="toolbar">
+      <input class="search" placeholder="🔍 Поиск в разделе «${title}»…" value="${searchQ}"
+        oninput="searchQ=this.value; views.sklad(); this.focus(); this.setSelectionRange(this.value.length,this.value.length)">
+      <select class="sort" onchange="sortMode=this.value; views.sklad()">
+        <option value="name" ${sortMode==='name'?'selected':''}>По названию</option>
+        <option value="qty" ${sortMode==='qty'?'selected':''}>Остаток ↑</option>
+        <option value="qtyd" ${sortMode==='qtyd'?'selected':''}>Остаток ↓</option>
+      </select>
+    </div>
+    <div class="filters">
+      <button class="fbtn ${filterLow?'on':''}" onclick="filterLow=!filterLow; views.sklad()">⚠ Ниже минимума</button>
+      ${['A','B','C'].map(a=>`<button class="fbtn ${filterABC===a?'on':''}" title="${ABC_INFO[a]}" onclick="filterABC=filterABC==='${a}'?'Все':'${a}'; views.sklad()">Группа ${a}</button>`).join('')}
+    </div>
+    ${renderItemCards(list)}
+  `;
+}
+
+function renderSkladSearch(){
+  setHdr('Поиск по складу', `по запросу «${searchQ}»`, false, false);
+  const q=searchQ.toLowerCase();
+  const list=items.filter(i=>(i.name+i.sku).toLowerCase().includes(q));
+  $('content').innerHTML = `
+    <div class="toolbar">
+      <input class="search" placeholder="🔍 Поиск по всему складу…" value="${searchQ}"
+        oninput="searchQ=this.value; views.sklad(); this.focus(); this.setSelectionRange(this.value.length,this.value.length)">
+    </div>
+    <div class="filters" style="margin-bottom:10px">
+      <button class="fbtn" onclick="searchQ=''; views.sklad()">✕ Очистить поиск</button>
+    </div>
+    ${renderItemCards(list)}
+  `;
+}
+
+function renderItemCards(list){
+  return list.map(i=>`
+      <div class="card" onclick="openItem('${i.id}')">
+        <div class="row">
+          <div class="icbox">${i.icon}</div>
+          <div class="grow">
+            <div class="t">${i.name} <span class="chip ${i.abc==='A'?'blue':i.abc==='B'?'amber':''}" style="padding:1px 7px;font-size:9px;vertical-align:middle">${i.abc}</span></div>
+            <div class="s">${i.sku} · ${i.subCat||i.topCat}${Object.keys(i.posts).length?` · на постах: ${Object.values(i.posts).reduce((a,b)=>a+b,0)} ${i.unit}`:''}${i.ext?` · на стороне: ${i.ext} ${i.unit}`:''}</div>
+          </div>
+          <div class="qty ${i.stock<i.min?'low':''}">${i.stock}<br><small>${i.unit}${i.stock<i.min?' · мало!':''}</small></div>
+        </div>
+      </div>`).join('') || '<div class="s" style="text-align:center;padding:30px">Ничего не найдено</div>';
+}
+
+/* ================= ДОБАВЛЕНИЕ КАТЕГОРИЙ / КАРТОЧЕК / ПОСТОВ ================= */
+function openAddCategoryForm(){
+  const inComponents = skladPath[0]==='Комплектующие';
+  render({fn(){
+    setHdr(inComponents?'Новая подкатегория':'Новая категория', inComponents?'Внутри «Комплектующие»':'Верхний уровень склада', true, false);
+    $('content').innerHTML = `
+      <div class="fld"><label>Название категории <span class="req">*</span></label><input id="nc_name" placeholder="Например, Оптика"></div>
+      <div class="fld"><label>Иконка (эмодзи)</label><input id="nc_icon" placeholder="📦" value="📦"></div>
+      <button class="btn primary" onclick="submitNewCategory(${inComponents})">Создать категорию</button>
+    `;
+  }});
+}
+function submitNewCategory(inComponents){
+  const name = $('nc_name').value.trim();
+  if(!name){ toast('Введите название категории'); return; }
+  const icon = $('nc_icon').value.trim() || '📦';
+  if(inComponents){
+    if(!componentSubcats.includes(name)) componentSubcats.push(name);
+    CAT_ICON[name]=icon;
+    logAction('Создана подкатегория', `«${name}» в разделе Комплектующие`);
+    skladPath=['Комплектующие'];
+  } else {
+    if(!categoriesList.includes(name)) categoriesList.push(name);
+    CAT_ICON[name]=icon;
+    logAction('Создана категория', `«${name}» — новый раздел склада`);
+    skladPath=[];
+  }
+  toast('✓ Категория «'+name+'» создана');
+  setTimeout(()=>go('sklad'), 500);
+}
+
+function openAddItemForm(){
+  const topCat = skladPath[0], subCat = skladPath[1];
+  render({fn(){
+    setHdr('Новая карточка товара', topCat?(subCat?`${topCat} → ${subCat}`:topCat):'Выберите раздел', true, false);
+    $('content').innerHTML = `
+      <div class="fld"><label>Раздел склада <span class="req">*</span></label>
+        <select id="ni_top" onchange="onNewItemTopChange()">
+          ${categoriesList.map(c=>`<option ${c===topCat?'selected':''}>${c}</option>`).join('')}
+        </select></div>
+      <div class="fld" id="ni_sub_wrap" style="${(topCat||categoriesList[0])==='Комплектующие'?'':'display:none'}">
+        <label>Подкатегория</label>
+        <select id="ni_sub">${componentSubcats.map(sc=>`<option ${sc===subCat?'selected':''}>${sc}</option>`).join('')}</select></div>
+      <div class="fld"><label>Название товара <span class="req">*</span></label><input id="ni_name" placeholder="Например, Разъём XT60"></div>
+      <div class="fld"><label>Артикул</label><input id="ni_sku" placeholder="Автоматически, если оставить пустым"></div>
+      <div class="fld"><label>Единица измерения <span class="req">*</span></label><input id="ni_unit" placeholder="шт / г / м / компл" value="шт"></div>
+      <div class="fld"><label>Начальный остаток</label><input id="ni_stock" type="number" value="0"></div>
+      <div class="fld"><label>Минимальный остаток</label><input id="ni_min" type="number" value="1"></div>
+      <div class="fld"><label>Описание</label><textarea id="ni_desc" placeholder="Краткое описание товара"></textarea></div>
+      <button class="btn primary" onclick="submitNewItem()">Создать карточку</button>
+    `;
+  }});
+}
+function onNewItemTopChange(){
+  $('ni_sub_wrap').style.display = $('ni_top').value==='Комплектующие' ? 'block' : 'none';
+}
+function submitNewItem(){
+  const name=$('ni_name').value.trim();
+  if(!name){ toast('Введите название товара'); return; }
+  const topCat=$('ni_top').value;
+  const subCat = topCat==='Комплектующие' ? $('ni_sub').value : undefined;
+  itemSeq++;
+  const sku = $('ni_sku').value.trim() || `НВ-${itemSeq}`;
+  const newItem = {id:'item'+itemSeq, icon:CAT_ICON[subCat||topCat]||'📦', name, sku, topCat, unit:$('ni_unit').value||'шт',
+    stock:parseFloat($('ni_stock').value)||0, min:parseFloat($('ni_min').value)||1, abc:'C',
+    desc:$('ni_desc').value||'', posts:{}, ext:0,
+    history:[{d:'21.07.2026', type:'in', text:'Создание карточки товара', q:`+${parseFloat($('ni_stock').value)||0} ${$('ni_unit').value||'шт'}`}]};
+  if(subCat) newItem.subCat=subCat;
+  items.push(newItem);
+  QR_IMAGES[sku] = null;
+  logAction('Создана карточка товара', `${name} (${sku}) в разделе ${subCat||topCat}`);
+  toast('✓ Карточка «'+name+'» создана');
+  skladPath = subCat ? ['Комплектующие', subCat] : [topCat];
+  setTimeout(()=>go('sklad'), 400);
+}
+
+function openEditItemForm(id){
+  const i=item(id);
+  render({fn(){
+    setHdr('Редактирование карточки', i.name, true, false);
+    $('content').innerHTML = `
+      <div class="fld"><label>Название товара</label><input id="ei_name" value="${i.name}"></div>
+      <div class="fld"><label>Артикул</label><input id="ei_sku" value="${i.sku}"></div>
+      <div class="fld"><label>Единица измерения</label><input id="ei_unit" value="${i.unit}"></div>
+      <div class="fld"><label>Минимальный остаток</label><input id="ei_min" type="number" value="${i.min}"></div>
+      <div class="fld"><label>Описание</label><textarea id="ei_desc">${i.desc||''}</textarea></div>
+      <button class="btn primary" onclick="submitEditItem('${id}')">Сохранить изменения</button>
+    `;
+  }});
+}
+function submitEditItem(id){
+  const i=item(id);
+  i.name=$('ei_name').value.trim()||i.name;
+  i.sku=$('ei_sku').value.trim()||i.sku;
+  i.unit=$('ei_unit').value.trim()||i.unit;
+  i.min=parseFloat($('ei_min').value)||i.min;
+  i.desc=$('ei_desc').value;
+  logAction('Карточка отредактирована', `${i.name} (${i.sku})`);
+  toast('✓ Изменения сохранены');
+  setTimeout(()=>openItem(id), 400);
+}
+
+function openAddPostForm(){
+  render({fn(){
+    setHdr('Новый пост', '', true, false);
+    $('content').innerHTML = `
+      <div class="fld"><label>Название поста <span class="req">*</span></label><input id="np_name" placeholder="Например, Пост тестирования РЭБ"></div>
+      <div class="fld"><label>Описание</label><input id="np_full" placeholder="Краткое назначение поста"></div>
+      <div class="fld"><label>Куратор</label><input id="np_curator" placeholder="Позывной или ФИО"></div>
+      <button class="btn primary" onclick="submitNewPost()">Создать пост</button>
+    `;
+  }});
+}
+function submitNewPost(){
+  const name=$('np_name').value.trim();
+  if(!name){ toast('Введите название поста'); return; }
+  posts.push({name, full:$('np_full').value||'', curator:$('np_curator').value||'—', stock:[], repairs:[]});
+  logAction('Создан новый пост', name);
+  toast('✓ Пост «'+name+'» создан');
+  setTimeout(()=>go('posts'), 400);
+}
+
+/* ================= ПЕРЕДАЧА ТОВАРА (реальный движок остатков) ================= */
+function transferToPost(i, postName, qty){
+  qty = Math.min(qty, i.stock);
+  if(qty<=0) return 0;
+  i.stock -= qty;
+  i.posts[postName] = (i.posts[postName]||0) + qty;
+  i.history.push({d:'21.07.2026', type:'out', text:`Выдано на пост ${postName}`, q:`−${qty} ${i.unit}`});
+  const p = posts.find(p=>p.name===postName);
+  if(p){
+    const existing = p.stock.find(s=>s.id===i.id);
+    if(existing) existing.q += qty; else p.stock.push({id:i.id, q:qty});
+  }
+  return qty;
+}
+function transferToSklad(i, postName, qty){
+  const have = i.posts[postName]||0;
+  qty = Math.min(qty, have);
+  if(qty<=0) return 0;
+  i.posts[postName] = have - qty;
+  if(!i.posts[postName]) delete i.posts[postName];
+  i.stock += qty;
+  i.history.push({d:'21.07.2026', type:'in', text:`Возврат с поста ${postName} на склад`, q:`+${qty} ${i.unit}`});
+  const p = posts.find(p=>p.name===postName);
+  if(p){
+    const existing = p.stock.find(s=>s.id===i.id);
+    if(existing){ existing.q -= qty; if(existing.q<=0) p.stock=p.stock.filter(s=>s.id!==i.id); }
+  }
+  return qty;
+}
+
+/* быстрая передача одной позиции — из карточки товара или из карточки поста */
+function openQuickTransfer(itemId, direction, presetPost){
+  const i=item(itemId);
+  render({fn(){
+    setHdr(direction==='toPost'?'Выдать на пост':'Вернуть на склад', i.name, true, false);
+    const postOptions = direction==='toPost' ? posts.map(p=>p.name) : Object.keys(i.posts).filter(p=>i.posts[p]>0);
+    $('content').innerHTML = `
+      <div class="card static"><div class="row"><div class="icbox">${i.icon}</div><div class="grow"><div class="t">${i.name}</div><div class="s">${i.sku} · склад: ${i.stock} ${i.unit}</div></div></div></div>
+      <div class="fld"><label>${direction==='toPost'?'Пост назначения':'Пост-источник'} <span class="req">*</span></label>
+        <select id="qt_post">${postOptions.length? postOptions.map(p=>`<option ${p===presetPost?'selected':''}>${p}</option>`).join('') : '<option value="">Нет постов с остатком</option>'}</select></div>
+      <div class="fld"><label>Количество <span class="req">*</span></label><input id="qt_qty" type="number" placeholder="${i.unit}" value="1"></div>
+      <button class="btn primary" onclick="submitQuickTransfer('${itemId}','${direction}')">${direction==='toPost'?'Выдать':'Вернуть на склад'}</button>
+    `;
+  }});
+}
+function submitQuickTransfer(itemId, direction){
+  const i=item(itemId);
+  const post=$('qt_post').value;
+  const qty=parseFloat($('qt_qty').value);
+  if(!post){ toast('Выберите пост'); return; }
+  if(!qty || qty<=0){ toast('Укажите количество'); return; }
+  if(direction==='toPost'){
+    if(qty>i.stock){ toast('Недостаточно на складе: '+i.stock+' '+i.unit); return; }
+    transferToPost(i, post, qty);
+    logAction('Выдача на пост', `${i.name}: ${qty} ${i.unit} на пост ${post}`, post, itemId);
+    toast(`✓ Выдано ${qty} ${i.unit} на пост ${post}`);
+  } else {
+    const have=i.posts[post]||0;
+    if(qty>have){ toast('На посту всего '+have+' '+i.unit); return; }
+    transferToSklad(i, post, qty);
+    logAction('Возврат на склад', `${i.name}: ${qty} ${i.unit} с поста ${post}`, post, itemId);
+    toast(`✓ Возвращено ${qty} ${i.unit} на склад`);
+  }
+  setTimeout(()=>openItem(itemId), 500);
+}
+
+/* выбор товара для передачи из карточки конкретного поста */
+function openPostIssuePicker(postName, direction){
+  render({fn(){
+    setHdr(direction==='toPost'?'Выдать на пост':'Вернуть на склад', postName, true, false);
+    const list = direction==='toPost' ? items : items.filter(i=> (i.posts[postName]||0) > 0);
+    $('content').innerHTML = list.map(i=>`
+      <div class="card" onclick="openQuickTransfer('${i.id}','${direction}','${postName}')">
+        <div class="row">
+          <div class="icbox">${i.icon}</div>
+          <div class="grow"><div class="t">${i.name}</div><div class="s">${i.sku} · ${direction==='toPost'?'склад: '+i.stock:'на посту: '+(i.posts[postName]||0)} ${i.unit}</div></div>
+          <div style="color:var(--muted)">›</div>
+        </div>
+      </div>`).join('') || '<div class="s" style="text-align:center;padding:30px">Ничего нет</div>';
+  }});
+}
+
+/* ================= ВЫДАЧИ: МУЛЬТИВЫБОР С НАЗНАЧЕНИЕМ ================= */
+let issueSearchQ='', issueSort='name', issueSelected={}, issueDest='';
+function renderIssuePicker(mode){
+  const destOptions = posts.map(p=>p.name);
+  if(!issueDest) issueDest = destOptions[0]||'';
+  let list = mode==='sklad' ? items.filter(i=>(i.posts[issueDest]||0)>0) : [...items];
+  if(issueSearchQ) list=list.filter(i=>(i.name+i.sku).toLowerCase().includes(issueSearchQ.toLowerCase()));
+  if(issueSort==='name') list.sort((a,b)=>a.name.localeCompare(b.name,'ru'));
+  if(issueSort==='cat') list.sort((a,b)=>(a.subCat||a.topCat).localeCompare(b.subCat||b.topCat,'ru'));
+  if(issueSort==='qty') list.sort((a,b)=>b.stock-a.stock);
+  const viewFn = mode==='post'?'issueToPost':'issueToSklad';
+  const selCount = Object.keys(issueSelected).length;
+  $('content').innerHTML = `
+    <div class="fld"><label>${mode==='post'?'Пост назначения':'Пост-источник (откуда возвращаем)'} <span class="req">*</span></label>
+      <select onchange="issueDest=this.value; issueSelected={}; views.${viewFn}()">
+        ${destOptions.map(p=>`<option ${p===issueDest?'selected':''}>${p}</option>`).join('')}
+      </select></div>
+    <div class="toolbar">
+      <input class="search" placeholder="🔍 Поиск по всей базе…" value="${issueSearchQ}"
+        oninput="issueSearchQ=this.value; views.${viewFn}(); this.focus(); this.setSelectionRange(this.value.length,this.value.length)">
+      <select class="sort" onchange="issueSort=this.value; views.${viewFn}()">
+        <option value="name" ${issueSort==='name'?'selected':''}>По названию</option>
+        <option value="cat" ${issueSort==='cat'?'selected':''}>По категории</option>
+        <option value="qty" ${issueSort==='qty'?'selected':''}>По остатку</option>
+      </select>
+    </div>
+    ${list.map(i=>{
+      const sel = issueSelected[i.id]!=null;
+      const avail = mode==='post' ? i.stock : (i.posts[issueDest]||0);
+      return `
+      <div class="card" onclick="toggleIssueItem('${i.id}','${mode}',${avail})">
+        <div class="row">
+          <div class="sel-check ${sel?'on':''}">${sel?'✓':''}</div>
+          <div class="icbox">${i.icon}</div>
+          <div class="grow"><div class="t">${i.name}</div><div class="s">${i.sku} · ${i.subCat||i.topCat} · ${mode==='post'?'склад':'на посту'}: ${avail} ${i.unit}</div>
+            ${sel?`<div class="qty-picker" onclick="event.stopPropagation()"><input type="number" min="0" max="${avail}" value="${issueSelected[i.id]}" onchange="setIssueQty('${i.id}', this.value, ${avail})"><span class="s">${i.unit}</span></div>`:''}
+          </div>
+        </div>
+      </div>`;}).join('') || '<div class="s" style="text-align:center;padding:30px">Ничего не найдено</div>'}
+    ${selCount>0?`
+    <div class="issue-bar">
+      <span><b>${selCount}</b>выбрано</span>
+      <button class="btn primary" style="margin:0;width:auto;padding:10px 18px" onclick="commitIssue('${mode}')">Продолжить →</button>
+    </div>`:''}
+  `;
+}
+function toggleIssueItem(id, mode, avail){
+  if(issueSelected[id]!=null){ delete issueSelected[id]; }
+  else { issueSelected[id] = Math.min(1, avail)||1; }
+  views[mode==='post'?'issueToPost':'issueToSklad']();
+}
+function setIssueQty(id, val, avail){
+  let v=parseFloat(val);
+  if(isNaN(v)||v<0) v=0;
+  if(v>avail) v=avail;
+  issueSelected[id]=v;
+}
+function commitIssue(mode){
+  const ids = Object.keys(issueSelected).filter(id=>issueSelected[id]>0);
+  if(!ids.length){ toast('Укажите количество хотя бы для одной позиции'); return; }
+  if(!issueDest){ toast('Выберите пост'); return; }
+  const names=[];
+  ids.forEach(id=>{
+    const i=item(id); const q=issueSelected[id];
+    if(mode==='post') transferToPost(i, issueDest, q); else transferToSklad(i, issueDest, q);
+    names.push(`${i.name} (${q} ${i.unit})`);
+  });
+  logAction(mode==='post'?'Выдача на пост':'Возврат на склад', `${issueDest}: ${names.join(', ')}`, issueDest);
+  toast(mode==='post' ? `✓ Выдано на пост «${issueDest}»` : `✓ Возвращено на склад с поста «${issueDest}»`);
+  issueSelected={};
+  setTimeout(()=>go('ext'), 700);
+}
+
+/* ================= ВЫДАЧА НА СТОРОНУ (реальное создание/возврат) ================= */
+let extDraftLines=[];
+function addExtLine(){
+  const id=$('ei_item').value, q=parseFloat($('ei_qty').value);
+  if(!q||q<=0){ toast('Укажите количество'); return; }
+  const i=item(id);
+  if(q>i.stock){ toast('Недостаточно на складе: '+i.stock+' '+i.unit); return; }
+  extDraftLines.push({id,q});
+  $('ei_list').innerHTML = extDraftLines.map((l,n)=>{const it=item(l.id); return `<div class="mat"><div class="grow"><div class="t">${it.icon} ${it.name}</div></div><div class="q">${l.q} ${it.unit}</div></div>`;}).join('');
+  toast('Позиция добавлена в выдачу');
+}
+function submitExtIssue(){
+  const to=$('ei_to').value.trim();
+  if(!to){ toast('Укажите получателя'); return; }
+  if(!extDraftLines.length){ toast('Добавьте хотя бы одну позицию'); return; }
+  extDraftLines.forEach(l=>{
+    const i=item(l.id);
+    const q=Math.min(l.q, i.stock);
+    i.stock -= q; i.ext += q;
+    i.history.push({d:'21.07.2026', type:'out', text:`Выдача на сторону · ${to}`, q:`−${q} ${i.unit}`});
+  });
+  const no='ВН-0'+(20+extIssues.length);
+  extIssues.unshift({no, to, date:'21.07.2026', status:'Выдано', due:$('ei_due').value||'—', items:extDraftLines.slice(), note:$('ei_note').value||''});
+  logAction('Выдача на сторону оформлена', `${no}: ${to}`);
+  toast('✓ Выдача '+no+' оформлена');
+  extDraftLines=[];
+  setTimeout(()=>go('ext'), 600);
+}
+function returnExtIssue(idx){
+  const e=extIssues[idx];
+  e.items.forEach(l=>{
+    const i=item(l.id);
+    i.stock += l.q; i.ext = Math.max(0, i.ext-l.q);
+    i.history.push({d:'21.07.2026', type:'in', text:`Возврат по выдаче ${e.no} · ${e.to}`, q:`+${l.q} ${i.unit}`});
+  });
+  e.status='Возвращено';
+  logAction('Возврат выдачи на сторону', `${e.no}: ${e.to}`);
+  toast('✓ Возврат по '+e.no+' оформлен, остатки восстановлены');
+  setTimeout(()=>go('ext'), 600);
+}
+
+/* ================= ЖУРНАЛ ДЕЙСТВИЙ (комбинированный фильтр) ================= */
+let auditPostFilter='', auditItemFilter='';
+function renderAuditLog(){
+  const postOpts = ['', ...posts.map(p=>p.name)];
+  const itemOpts = ['', ...items.map(i=>i.id)];
+  let list = auditLog.filter(a=>
+    (!auditPostFilter || a.post===auditPostFilter) &&
+    (!auditItemFilter || a.item===auditItemFilter)
+  );
+  $('content').innerHTML = `
+    <div class="fld"><label>Фильтр по посту</label>
+      <select onchange="auditPostFilter=this.value; renderAuditLog()">
+        <option value="">Все посты</option>
+        ${posts.map(p=>`<option value="${p.name}" ${auditPostFilter===p.name?'selected':''}>${p.name}</option>`).join('')}
+      </select></div>
+    <div class="fld"><label>Фильтр по товару</label>
+      <select onchange="auditItemFilter=this.value; renderAuditLog()">
+        <option value="">Все товары</option>
+        ${items.map(i=>`<option value="${i.id}" ${auditItemFilter===i.id?'selected':''}>${i.name}</option>`).join('')}
+      </select></div>
+    ${(auditPostFilter||auditItemFilter)?`<button class="fbtn" style="margin-bottom:12px" onclick="auditPostFilter='';auditItemFilter='';renderAuditLog()">✕ Сбросить фильтры</button>`:''}
+    <div class="card static">
+      <div class="tl">
+        ${list.map(a=>`
+          <div class="tl-item">
+            <div class="t">${a.action}</div>
+            <div class="s" style="color:var(--ink)">${a.detail}</div>
+            <div class="s">${a.t} · ${a.user}${a.post?' · пост '+a.post:''}</div>
+          </div>`).join('') || '<div class="s">Нет записей по выбранным фильтрам</div>'}
+      </div>
+    </div>
+  `;
+}
+
+/* ================= ДЕТАЛЬНЫЕ ЭКРАНЫ ================= */
+function openItem(id){
+  const i=item(id);
+  render({fn(){
+    setHdr(i.name, `${i.sku} · ${i.subCat||i.topCat}`, true, false);
+    const total=i.stock+Object.values(i.posts).reduce((a,b)=>a+b,0)+i.ext;
+    $('content').innerHTML = `
+      <div class="detail-top">
+        <div class="qr-wrap"><div id="qrc" style="width:110px;height:110px"></div><div class="s">QR · ${i.sku}</div>
+          <button class="fbtn" style="margin-top:5px" onclick="printLabel('${i.sku}')">🖨 Печать</button></div>
+        <div class="grow">
+          <div class="kv"><span class="k">Всего в учёте</span><span class="v">${total} ${i.unit}</span></div>
+          <div class="kv"><span class="k">Основной склад</span><span class="v" style="${i.stock<i.min?'color:var(--red)':''}">${i.stock} ${i.unit}</span></div>
+          <div class="kv"><span class="k">Мин. остаток</span><span class="v">${i.min} ${i.unit}</span></div>
+          ${i.serial?`<div class="kv"><span class="k">Серия</span><span class="v">№${i.serial}…</span></div>`:''}
+        </div>
+      </div>
+      ${i.desc?`<div class="card static"><div class="s" style="font-size:12.5px;color:var(--ink)">${i.desc}</div></div>`:''}
+      <button class="btn ghost" onclick="openEditItemForm('${i.id}')">✎ Редактировать карточку</button>
+      ${i.stock<i.min?`<div class="progress-note">⚠ Остаток ниже минимума — позиция попала в список закупки</div>`:''}
+      <div class="sec">Группа ABC-анализа</div>
+      <div class="card static"><div class="s" style="font-size:12.5px;color:var(--ink)"><b>${i.abc}</b> — ${ABC_INFO[i.abc]}</div></div>
+      ${i.lots?`
+      <div class="sec">Партии (партионный учёт)</div>
+      <div class="card static">
+        ${i.lots.map(l=>{const soon=isSoonExp(l.exp); return `
+          <div class="kv"><span class="k">Партия ${l.lot}${soon?' <span class=\"chip amber\" style=\"padding:1px 7px;font-size:9px\">истекает</span>':''}</span><span class="v">${l.qty} ${i.unit} · до ${l.exp}</span></div>`;}).join('')}
+      </div>`:''}
+      <div class="sec">Где находится</div>
+      <div class="card static">
+        <div class="kv"><span class="k">📦 Основной склад</span><span class="v">${i.stock} ${i.unit}</span></div>
+        ${Object.entries(i.posts).filter(([p,q])=>q>0).map(([p,q])=>`<div class="kv"><span class="k">🛠 ${p} (под отчётом)</span><span class="v">${q} ${i.unit}</span></div>`).join('')}
+        ${i.ext?`<div class="kv"><span class="k">🚚 Выдано на сторону</span><span class="v">${i.ext} ${i.unit}</span></div>`:''}
+      </div>
+      <div class="btn-row">
+        <button class="btn ghost" onclick="openQuickTransfer('${i.id}','toPost')">→ На пост</button>
+        <button class="btn ghost" onclick="openQuickTransfer('${i.id}','toSklad')">← Возврат</button>
+      </div>
+      <div class="sec">История движений</div>
+      <div class="card static"><div class="tl">
+        ${i.history.slice().reverse().map(h=>`
+          <div class="tl-item ${h.type}">
+            <div class="t">${h.text} <b style="white-space:nowrap">${h.q}</b></div>
+            <div class="s">${h.d}</div>
+          </div>`).join('')}
+      </div></div>
+    `;
+    drawQR($('qrc'), i);
+  }});
+}
+
+function isSoonExp(exp){
+  const [mm,yy]=exp.split('.').map(Number);
+  const months=(yy-2026)*12+(mm-7);
+  return months<=3;
+}
+
+function openPost(idx){
+  const p=posts[idx];
+  render({fn(){
+    setHdr(p.name, p.full, true, false);
+    $('content').innerHTML = `
+      <div class="s" style="margin-bottom:10px">Куратор: <b style="color:var(--ink)">${p.curator}</b></div>
+      ${p.repairs.length?`<div class="sec">Изделия в ремонте</div>`+p.repairs.map(r=>`
+        <div class="card" onclick="openDoc(${docs.findIndex(d=>d.no===r.doc)})">
+          <div class="row">
+            <div class="icbox">📶</div>
+            <div class="grow"><div class="t">${r.item} №${r.serial}</div>
+            <div class="s">Дефектовка: <span class="doc-link">${r.doc}</span></div></div>
+            <span class="chip amber">${r.status}</span>
+          </div>
+        </div>`).join(''):''}
+      <div class="sec">Материалы под отчётом</div>
+      <div class="card static">
+        ${p.stock.filter(m=>m.q>0).map(m=>{const it=item(m.id);return `
+          <div class="mat">
+            <div class="icbox" style="width:34px;height:34px;font-size:16px">${it.icon}</div>
+            <div class="grow"><div class="t">${it.name}</div><div class="s">${it.sku}</div></div>
+            <div class="q">${fmtQ(it,m.q)}</div>
+          </div>`;}).join('') || '<div class="s" style="padding:6px 0">Пусто</div>'}
+      </div>
+      <div class="btn-row">
+        <button class="btn ghost" onclick="openPostIssuePicker('${p.name}','toPost')">＋ Выдать на пост</button>
+        <button class="btn ghost" onclick="openPostIssuePicker('${p.name}','toSklad')">↩ Вернуть на склад</button>
+      </div>
+      <button class="btn primary" onclick="exportPostExcel(${idx})">⤓ Выгрузить акт по посту в Excel</button>
+    `;
+  }});
+}
+
+function openDoc(idx){
+  const d=docs[idx];
+  if(d.kind==='defekt') return openDefekt(d);
+  return openWork(d);
+}
+
+function openDefekt(d){
+  render({fn(){
+    setHdr(d.no+' · Акт дефектовки', `${d.item} ${d.serial&&d.serial!=='—'?'№'+d.serial:''}`, true, false);
+    const work = docs.find(x=>x.no===d.workDoc);
+    $('content').innerHTML = `
+      <div class="progress-note ok">✓ Акт закрыт ${d.date} — на его основании ${work?`создан <b>${d.workDoc}</b>`:'можно создать акт работ'}</div>
+      <div class="card static">
+        <div class="kv"><span class="k">Номер заявки</span><span class="v">${d.orderNo||'—'}</span></div>
+        <div class="kv"><span class="k">Изделие</span><span class="v">${d.item} ${d.serial&&d.serial!=='—'?'№'+d.serial:''}</span></div>
+        <div class="kv"><span class="k">Дата поступления</span><span class="v">${d.date}</span></div>
+        <div class="kv"><span class="k">Подразделение</span><span class="v">${d.from||'—'}</span></div>
+        <div class="kv"><span class="k">Пост</span><span class="v">${d.post}</span></div>
+        <div class="kv"><span class="k">Позывной</span><span class="v">${d.callsign||'—'}</span></div>
+        <div class="kv"><span class="k">Заключение</span><span class="v" style="color:var(--green)">${d.verdict}</span></div>
+      </div>
+      <div class="sec">Неисправность со слов сдающего</div>
+      <div class="card static"><div class="s" style="font-size:13px;color:var(--ink)">${d.fault||'—'}</div></div>
+      <div class="sec">Выявленные дефекты</div>
+      <div class="card static">${(d.defects||[]).map((x,n)=>`<div class="kv"><span class="k">${n+1}.</span><span class="v" style="text-align:left;flex:1;margin-left:8px;font-weight:500">${x}</span></div>`).join('')}</div>
+      ${work?`<button class="btn primary" onclick="openDoc(${docs.indexOf(work)})">Открыть ${d.workDoc} →</button>`
+            :`<button class="btn primary" onclick="createWorkFromDefekt('${d.no}')">Создать акт выполненных работ</button>`}
+      <button class="btn ghost" onclick="printDoc('${d.no}')">⤓ Экспорт в PDF</button>
+    `;
+  }});
+}
+
+function openWork(d){
+  render({fn(){
+    const mismatch = d.planQty!=null && d.factQty!=null && d.factQty!==d.planQty;
+    const closed = d.status==='Закрыт';
+    setHdr(d.no+' · Акт выполненных работ', `${d.item} · из дефектовки ${d.defektDoc}`, true, false);
+    const sum = d.materials.map(m=>{const it=item(m.id);return {it,q:m.q};});
+    $('content').innerHTML = `
+      ${d.status==='Расхождение'?`<div class="progress-note bad">⚠ Расхождение по количеству: получено ${d.planQty}, годных ${d.factQty} (брак: ${d.planQty-d.factQty}). Администратору отправлено push-уведомление. Закрыть акт может только администратор.</div>`
+        : closed?`<div class="progress-note ok">✓ Акт закрыт — материалы списаны, изделие возвращено на склад${d.mismatchReason?' (принято с расхождением: '+d.mismatchReason+')':''}</div>`
+        : '<div class="progress-note">⚠ Черновик — при закрытии материалы спишутся с поста, изделие вернётся на склад</div>'}
+      <div class="card static">
+        <div class="kv"><span class="k">Основание</span><span class="v doc-link" onclick="openDoc(${docs.findIndex(x=>x.no===d.defektDoc)})">${d.defektDoc}</span></div>
+        <div class="kv"><span class="k">Номер заявки</span><span class="v">${d.orderNo||'—'}</span></div>
+        <div class="kv"><span class="k">Пост</span><span class="v">${d.post}</span></div>
+        <div class="kv"><span class="k">Дата</span><span class="v">${d.date}</span></div>
+        ${d.planQty!=null?`<div class="kv"><span class="k">Получено / годных</span><span class="v" style="${mismatch?'color:var(--red)':''}">${d.planQty} / ${d.factQty??'—'}</span></div>`:''}
+      </div>
+      <div class="sec">Участники и выполненные работы</div>
+      <div class="card static">
+        ${(d.participants||[]).map(p=>`<div class="kv"><span class="k">${p.worker}</span><span class="v" style="text-align:left;flex:1;margin-left:8px;font-weight:500">${p.work}</span></div>`).join('') || '<div class="s">Не указаны</div>'}
+      </div>
+      <div class="sec">Израсходованные материалы</div>
+      <div class="card static" id="matList">
+        ${sum.map((m,n)=>`
+          <div class="mat">
+            <div class="icbox" style="width:34px;height:34px;font-size:16px">${m.it.icon}</div>
+            <div class="grow"><div class="t">${m.it.name}</div><div class="s">${m.it.sku} · с поста ${d.post}</div></div>
+            <div class="q">${fmtQ(m.it,m.q)}</div>
+            ${closed?'':`<button class="del" onclick="event.stopPropagation(); this.closest('.mat').remove(); toast('Позиция убрана из акта')">✕</button>`}
+          </div>`).join('')}
+      </div>
+      ${closed?'':`
+      <div class="addmat">
+        <select id="addSel">${items.map(i=>`<option value="${i.id}">${i.icon} ${i.name}</option>`).join('')}</select>
+        <input id="addQty" type="number" placeholder="Кол-во" min="0">
+        <button onclick="addMat('${d.post}')">＋</button>
+      </div>
+      <div class="s" style="margin:6px 2px 0">Или добавьте сканированием QR с этикетки материала</div>
+      ${d.status==='Расхождение'
+        ? (currentRole==='admin'
+          ? `<div class="fld"><label>Причина расхождения <span class="req">*</span></label><textarea id="mm_reason" placeholder="Например, 3 изделия признаны неремонтопригодными" oninput="checkMismatch()">${d.mismatchReason||''}</textarea></div>
+             <div class="fld"><label>Решение <span class="req">*</span></label>
+               <select id="mm_decision" onchange="checkMismatch()">
+                 <option value="">— выберите —</option>
+                 <option value="accept" ${d.mismatchDecision==='accept'?'selected':''}>Принять акт с расхождением</option>
+                 <option value="rework" ${d.mismatchDecision==='rework'?'selected':''}>Вернуть на доработку</option>
+               </select></div>
+             <button class="btn red" id="mm_submit" disabled onclick="resolveMismatch('${d.no}')">Подтвердить решение администратора</button>`
+          : `<button class="btn red" disabled>🔒 Закрыть может только администратор</button>`)
+        : `<button class="btn green" onclick="closeWork('${d.no}')">Закрыть акт · списать материалы</button>`}`}
+      <button class="btn ghost" onclick="printDoc('${d.no}')">⤓ Экспорт в PDF</button>
+      <button class="btn ghost" onclick="exportWorkActExcel('${d.no}')">⤓ Экспорт акта в Excel</button>
+    `;
+    if(d.status==='Расхождение' && currentRole==='admin') checkMismatch();
+  }});
+}
+function checkMismatch(){
+  const reason=$('mm_reason')?.value.trim();
+  const decision=$('mm_decision')?.value;
+  if($('mm_submit')) $('mm_submit').disabled = !(reason && decision);
+}
+function printDoc(no){
+  const w = window.open('', '_blank', 'width=480,height=640');
+  if(!w){ toast('Разрешите всплывающие окна для печати'); return; }
+  const d=docs.find(x=>x.no===no);
+  w.document.write(`<html><head><title>${no}</title><style>body{font-family:Arial,sans-serif;padding:24px;font-size:13px}h1{font-size:16px}table{width:100%;border-collapse:collapse;margin-top:10px}td{border:1px solid #ccc;padding:6px;font-size:12px}</style></head><body>
+    <h1>${d.kind==='defekt'?'Акт дефектовки':'Акт выполненных работ'} ${d.no}</h1>
+    <p>Изделие: ${d.item} ${d.serial&&d.serial!=='—'?'№'+d.serial:''}<br>Дата: ${d.date}<br>Пост: ${d.post}</p>
+    ${d.materials?`<table>${d.materials.map(m=>{const it=item(m.id);return `<tr><td>${it.name}</td><td>${m.q} ${it.unit}</td></tr>`;}).join('')}</table>`:''}
+    <script>window.onload=()=>window.print();<\/script>
+  </body></html>`);
+  w.document.close();
+}
+
+function addMat(post){
+  const id=$('addSel').value, q=parseFloat($('addQty').value);
+  if(!q||q<=0){ toast('Укажите количество'); return; }
+  const it=item(id);
+  const div=document.createElement('div'); div.className='mat';
+  div.innerHTML=`<div class="icbox" style="width:34px;height:34px;font-size:16px">${it.icon}</div>
+    <div class="grow"><div class="t">${it.name}</div><div class="s">${it.sku} · с поста ${post}</div></div>
+    <div class="q">${fmtQ(it,q)}</div>
+    <button class="del" onclick="this.closest('.mat').remove()">✕</button>`;
+  $('matList').appendChild(div); $('addQty').value='';
+  toast('Материал добавлен в акт');
+}
+
+function closeWork(no){
+  const d=docs.find(x=>x.no===no);
+  if(d.status==='Расхождение'){ toast('Сначала укажите причину расхождения и решение выше'); return; }
+  performWorkClose(d);
+}
+function resolveMismatch(no){
+  if(currentRole!=='admin'){ toast('🔒 Закрыть акт с расхождением может только администратор'); return; }
+  const d=docs.find(x=>x.no===no);
+  const reason=$('mm_reason').value.trim();
+  const decision=$('mm_decision').value;
+  if(!reason||!decision){ toast('Заполните причину и решение'); return; }
+  d.mismatchReason=reason; d.mismatchDecision=decision;
+  if(decision==='rework'){
+    d.status='Черновик';
+    logAction('Акт возвращён на доработку', `${d.no}: ${reason}`, d.post);
+    toast('↩ Акт возвращён на доработку');
+    setTimeout(()=>go('docs'), 800);
+  } else {
+    performWorkClose(d, 'расхождение принято администратором — '+reason);
+  }
+}
+function performWorkClose(d, note){
+  d.status='Закрыт';
+  d.materials.forEach(m=>{
+    const it=item(m.id);
+    const postQ=it.posts[d.post]||0;
+    it.posts[d.post]=Math.max(0,postQ-m.q);
+    if(!it.posts[d.post]) delete it.posts[d.post];
+    it.history.push({d:'21.07.2026', type:'off', text:`Списано по ${d.no} (${d.item.toLowerCase()})`, q:`−${m.q} ${it.unit}`});
+  });
+  const p=posts.find(p=>p.name===d.post);
+  if(p){ p.repairs=p.repairs.filter(r=>r.serial!==d.serial);
+    d.materials.forEach(m=>{ p.stock=p.stock.map(s=>s.id===m.id?{...s,q:Math.max(0,s.q-m.q)}:s).filter(s=>s.q>0); });
+  }
+  const ant=item('ant'); if(ant && d.serial==='000966'){ ant.stock+=1; ant.posts={}; ant.history.push({d:'21.07.2026', type:'in', text:`№${d.serial} возвращена на склад после ремонта (${d.no})`, q:'+1 шт'}); }
+  logAction('Акт выполненных работ закрыт', `${d.no}: ${d.item}, списано ${d.materials.length} позиций материалов${note?' · '+note:''}`, d.post);
+  toast('✓ Акт закрыт: материалы списаны');
+  setTimeout(()=>go('docs'), 900);
+}
+
+function checkDefekt(){
+  const ok = ['f_order','f_serial','f_date','f_from','f_post','f_callsign','f_fault','f_defects','f_verdict'].every(id=>$(id).value.trim());
+  $('defSubmit').disabled = !ok;
+  const note=$('defNote');
+  if(ok){ note.classList.add('ok'); note.textContent='✓ Все обязательные поля заполнены — можно закрывать акт'; }
+  else { note.classList.remove('ok'); note.textContent='⚠ Черновик — акт работ будет доступен после заполнения всех полей и закрытия дефектовки'; }
+}
+
+function submitDefekt(){
+  const verdict=$('f_verdict').value;
+  const newNo='ДФ-'+(100+docs.filter(d=>d.kind==='defekt').length);
+  docs.unshift({no:newNo, kind:'defekt', status:'Закрыт', date:$('f_date').value,
+    orderNo:$('f_order').value,
+    serial:($('f_serial').value.match(/\d+/)||['000967'])[0], item:$('f_serial').value||'Изделие',
+    from:$('f_from').value, callsign:$('f_callsign').value, post:$('f_post').value,
+    fault:$('f_fault').value, defects:$('f_defects').value.split('\n').filter(Boolean),
+    verdict:verdict, workDoc:null});
+  logAction('Акт дефектовки закрыт', `${newNo}: ${$('f_serial').value||'изделие'}, заключение: ${verdict}`, $('f_post').value);
+  if(verdict.includes('Не подлежит')){
+    toast('✓ Акт закрыт: изделие уходит в списание');
+    setTimeout(()=>go('docs'), 900);
+  } else {
+    render({fn(){
+      setHdr('Дефектовка закрыта', newNo, false, false);
+      $('content').innerHTML = `
+        <div class="progress-note ok">✓ Акт ${newNo} закрыт и сохранён</div>
+        <div class="card static"><div class="s" style="font-size:13px;color:var(--ink)">Создать сейчас акт выполненных работ на основании этой дефектовки? Номер акта дефектовки подставится автоматически.</div></div>
+        <button class="btn primary" onclick="createWorkFromDefekt('${newNo}')">＋ Создать акт выполненных работ</button>
+        <button class="btn ghost" onclick="go('docs')">Позже, вернуться к документам</button>
+      `;
+    }}, false);
+  }
+}
+
+function createWorkFromDefekt(defektNo){
+  const d = docs.find(x=>x.no===defektNo);
+  const newNo = 'АВР-'+(200+docs.filter(x=>x.kind==='work').length);
+  docs.unshift({no:newNo, kind:'work', status:'Черновик', date:'21.07.2026', orderNo:d.orderNo,
+    serial:d.serial, item:d.item, defektDoc:defektNo, post:d.post, planQty:null, factQty:null,
+    participants:[], works:[], materials:[]});
+  d.workDoc = newNo;
+  toast('✓ Акт '+newNo+' создан, привязан к '+defektNo);
+  setTimeout(()=>openDoc(docs.indexOf(docs.find(x=>x.no===newNo))), 400);
+}
+
+function setRole(role){
+  currentRole = role;
+  render({fn:views.roles}, false);
+  toast('Роль: '+ROLES[role].label);
+}
+
+function startCycleCount(){
+  cycleCount = {counts:{}};
+  logAction('Инвентаризация начата', 'Полный пересчёт основного склада');
+  render({fn:views.inventory}, false);
+}
+function setCount(id, val){
+  const v = parseFloat(val);
+  if(isNaN(v)){ delete cycleCount.counts[id]; return; }
+  cycleCount.counts[id] = v;
+}
+function finishCycleCount(){
+  const diffs = items.map(i=>{
+    const counted = cycleCount.counts[i.id];
+    if(counted===undefined) return null;
+    const delta = counted - i.stock;
+    return delta!==0 ? {i, counted, delta} : null;
+  }).filter(Boolean);
+  diffs.forEach(({i,counted,delta})=>{
+    i.history.push({d:'21.07.2026', type: delta>0?'in':'off', text:'Корректировка по инвентаризации', q:`${delta>0?'+':''}${delta} ${i.unit}`});
+    i.stock = counted;
+  });
+  logAction('Инвентаризация завершена', diffs.length ? `Расхождений: ${diffs.length} позиций` : 'Расхождений не найдено, остатки подтверждены');
+  cycleCount = null;
+  toast(diffs.length ? `✓ Акт расхождений: ${diffs.length} позиций скорректировано` : '✓ Расхождений нет, остатки подтверждены');
+  setTimeout(()=>go('sklad'), 1000);
+}
+
+/* ================= ЭКСПОРТ В EXCEL (CSV) ================= */
+function exportStockExcel(){
+  const rows=[['Артикул','Название','Раздел','Подраздел','Остаток','Ед.','Мин.остаток','ABC']];
+  items.forEach(i=>rows.push([i.sku,i.name,i.topCat,i.subCat||'',i.stock,i.unit,i.min,i.abc]));
+  csvDownload('sklad_ostatki.csv', rows);
+  logAction('Экспорт остатков в Excel', `${items.length} позиций`);
+}
+function exportPostExcel(idx){
+  const p=posts[idx];
+  const rows=[['Пост',p.name],['Куратор',p.curator],[],['Товар','Артикул','Количество','Ед.']];
+  p.stock.filter(s=>s.q>0).forEach(s=>{const it=item(s.id); rows.push([it.name,it.sku,s.q,it.unit]);});
+  csvDownload(`post_${p.name.replace(/\s+/g,'_')}.csv`, rows);
+  logAction('Экспорт акта по посту', p.name, p.name);
+}
+function exportDocsExcel(){
+  const rows=[['№ акта','Тип','Статус','Дата','Изделие','Пост']];
+  docs.forEach(d=>rows.push([d.no, d.kind==='defekt'?'Дефектовка':'Акт работ', d.status, d.date, d.item, d.post]));
+  csvDownload('dokumenty_akty.csv', rows);
+  logAction('Экспорт документов в Excel', `${docs.length} актов`);
+}
+function exportWorkActExcel(no){
+  const d=docs.find(x=>x.no===no);
+  const rows=[['Акт выполненных работ',d.no],['Дефектовка',d.defektDoc],['Пост',d.post],['Дата',d.date],[],
+    ['Участник','Работа']];
+  (d.participants||[]).forEach(p=>rows.push([p.worker,p.work]));
+  rows.push([],['Материал','Артикул','Количество']);
+  d.materials.forEach(m=>{const it=item(m.id); rows.push([it.name,it.sku,`${m.q} ${it.unit}`]);});
+  csvDownload(`${no}.csv`, rows);
+  logAction('Экспорт акта работ в Excel', no, d.post);
+}
+function exportInventoryExcel(){
+  const rows=[['Артикул','Название','Учётный остаток','Ед.']];
+  items.forEach(i=>rows.push([i.sku,i.name,i.stock,i.unit]));
+  csvDownload('inventarizatsiya.csv', rows);
+  logAction('Экспорт инвентаризации в Excel', `${items.length} позиций`);
+}
+
+/* start */
+go('sklad');
+</script>
+</body>
+</html>
