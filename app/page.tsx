@@ -2,116 +2,79 @@
 
 import { useMemo, useState } from "react";
 
-type Screen = "home" | "stock" | "repairs" | "more";
-type Modal = null | "scan" | "issue" | "defect" | "work" | "product";
+type Screen = "home" | "stock" | "repairs" | "issue" | "more";
+type Modal = null | "scan" | "product" | "defect" | "work" | "inventory" | "journal" | "roles" | "verify";
 
-const products = [
-  { name: "Припой ПОС-61", sku: "MAT-0018", qty: "1 240 г", place: "Стеллаж A · 03", tone: "blue" },
-  { name: "Провод AWG24", sku: "MAT-0034", qty: "86 м", place: "Стеллаж B · 11", tone: "violet" },
-  { name: "Усилитель ACASOM 20W", sku: "CMP-0091", qty: "3 шт", place: "Шкаф 2 · 06", tone: "orange", low: true },
-  { name: "Аттенюатор 10 дБ", sku: "CMP-0142", qty: "18 шт", place: "Шкаф 2 · 08", tone: "green" },
-  { name: "Флюс RMA-223", sku: "MAT-0007", qty: "620 г", place: "Стеллаж A · 01", tone: "pink" },
+const goods = [
+  {name:"Аккумуляторная батарея 12V 18Ah",sku:"АКБ-1218",cat:"Аккумуляторы",qty:"24 шт",date:"20.07.2026",place:"Стеллаж B-04",low:false},
+  {name:"Усилитель ACASOM 20W",sku:"УСЛ-0020",cat:"Радиокомпоненты",qty:"3 шт",date:"18.07.2026",place:"Шкаф 2-06",low:true},
+  {name:"Провод AWG24",sku:"ПРВ-0024",cat:"Кабельная продукция",qty:"86 м",date:"19.07.2026",place:"Стеллаж A-11",low:false},
+  {name:"Припой ПОС-61",sku:"МАТ-0061",cat:"Расходные материалы",qty:"1 240 г",date:"18.07.2026",place:"Стеллаж A-03",low:false},
+  {name:"Аттенюатор 10 дБ",sku:"АТТ-0010",cat:"Радиокомпоненты",qty:"18 шт",date:"15.07.2026",place:"Шкаф 2-08",low:false},
 ];
 
-const repairs = [
-  { id: "DF-0248", item: "Антенна № 000966", stage: "Дефектовка", status: "Нужно заполнить", color: "amber" },
-  { id: "RW-0241", item: "Модуль связи № 001245", stage: "В работе", status: "Пост № 2", color: "blue" },
-  { id: "RW-0239", item: "Антенна № 000821", stage: "Готово", status: "Акт закрыт", color: "green" },
+const events = [
+  {time:"Сегодня · 10:42",type:"Передача",title:"Аккумуляторная батарея 12V 18Ah",meta:"Основной склад → Пост НРТК · 4 шт",doc:"Накладная OUT-0254"},
+  {time:"Сегодня · 09:36",type:"Дефектовка",title:"Аккумуляторная батарея № АКБ-00418",meta:"Пост НРТК · Не держит заряд",doc:"Акт DF-0248"},
+  {time:"Вчера · 17:20",type:"Акт работ",title:"Аккумуляторная батарея № АКБ-00391",meta:"Пост НРТК · Восстановление контактов",doc:"Акт RW-0241"},
+  {time:"19 июля · 12:10",type:"Приход",title:"Аккумуляторная батарея 12V 18Ah",meta:"ООО «Энергоком» → Основной склад · 20 шт",doc:"Накладная IN-1842"},
 ];
 
-export default function Home() {
-  const [screen, setScreen] = useState<Screen>("home");
-  const [modal, setModal] = useState<Modal>(null);
-  const [query, setQuery] = useState("");
-  const [step, setStep] = useState(0);
-  const [toast, setToast] = useState("");
-  const filtered = useMemo(() => products.filter(p => (p.name + p.sku).toLowerCase().includes(query.toLowerCase())), [query]);
-
-  const notify = (text: string) => { setToast(text); setTimeout(() => setToast(""), 2600); };
-  const open = (m: Modal) => { setStep(0); setModal(m); };
-
-  return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div className="brand"><div className="brandmark">С</div><div><b>СКЛАД.ОК</b><span>Основной склад</span></div></div>
-        <button className="avatar" onClick={() => notify("Профиль: Алексей Морозов · Кладовщик")}>АМ</button>
-      </header>
-
-      <section className="content">
-        {screen === "home" && <HomeScreen open={open} />}
-        {screen === "stock" && <StockScreen query={query} setQuery={setQuery} products={filtered} open={open} />}
-        {screen === "repairs" && <RepairsScreen open={open} />}
-        {screen === "more" && <MoreScreen notify={notify} />}
-      </section>
-
-      <nav className="bottom-nav">
-        <Nav active={screen === "home"} icon="⌂" text="Главная" onClick={() => setScreen("home")} />
-        <Nav active={screen === "stock"} icon="▦" text="Остатки" onClick={() => setScreen("stock")} />
-        <button className="scan-main" onClick={() => open("scan")} aria-label="Сканировать QR"><span>⌗</span></button>
-        <Nav active={screen === "repairs"} icon="◫" text="Ремонты" onClick={() => setScreen("repairs")} />
-        <Nav active={screen === "more"} icon="•••" text="Ещё" onClick={() => setScreen("more")} />
-      </nav>
-
-      {modal && <Overlay modal={modal} step={step} setStep={setStep} close={() => setModal(null)} open={open} notify={notify} />}
-      {toast && <div className="toast">✓ {toast}</div>}
-    </main>
-  );
+export default function Home(){
+  const [screen,setScreen]=useState<Screen>("home");
+  const [modal,setModal]=useState<Modal>(null);
+  const [query,setQuery]=useState("");
+  const [category,setCategory]=useState("Все категории");
+  const [sort,setSort]=useState("По названию");
+  const [toast,setToast]=useState("");
+  const notify=(s:string)=>{setToast(s);setTimeout(()=>setToast(""),2600)};
+  const filtered=useMemo(()=>goods.filter(g=>(g.name+g.sku+g.cat).toLowerCase().includes(query.toLowerCase())&&(category==="Все категории"||g.cat===category)).sort((a,b)=>sort==="По дате"?b.date.localeCompare(a.date):sort==="По остатку"?parseFloat(a.qty)-parseFloat(b.qty):a.name.localeCompare(b.name)),[query,category,sort]);
+  return <main className="app-shell">
+    <header className="topbar"><div className="brand"><div className="brandmark">Т</div><div><b>ТРЁШКА <i>СКЛАД</i></b><span>Основной склад · онлайн</span></div></div><button className="avatar" onClick={()=>notify("Алексей Морозов · Кладовщик")}>АМ</button></header>
+    <section className="content">
+      {screen==="home"&&<HomeScreen setScreen={setScreen} setModal={setModal}/>} 
+      {screen==="stock"&&<StockScreen data={filtered} query={query} setQuery={setQuery} category={category} setCategory={setCategory} sort={sort} setSort={setSort} setModal={setModal}/>} 
+      {screen==="repairs"&&<RepairsScreen setModal={setModal}/>} 
+      {screen==="issue"&&<IssueScreen data={filtered} query={query} setQuery={setQuery} category={category} setCategory={setCategory} sort={sort} setSort={setSort} notify={notify}/>} 
+      {screen==="more"&&<MoreScreen setModal={setModal}/>} 
+    </section>
+    <nav className="bottom-nav">
+      <Nav icon="⌂" text="Главная" active={screen==="home"} click={()=>setScreen("home")}/><Nav icon="▦" text="Склад" active={screen==="stock"} click={()=>setScreen("stock")}/><Nav icon="◫" text="Ремонты" active={screen==="repairs"} click={()=>setScreen("repairs")}/><Nav icon="⇄" text="Выдача" active={screen==="issue"} click={()=>setScreen("issue")}/><Nav icon="•••" text="Ещё" active={screen==="more"} click={()=>setScreen("more")}/>
+    </nav>
+    {modal&&<Overlay modal={modal} close={()=>setModal(null)} setModal={setModal} notify={notify}/>} {toast&&<div className="toast">✓ {toast}</div>}
+  </main>
 }
 
-function HomeScreen({ open }: { open: (m: Modal) => void }) {
-  return <>
-    <div className="hello"><div><span>Вторник, 21 июля</span><h1>Доброе утро, Алексей</h1></div><div className="sync"><i /> Синхронизировано</div></div>
-    <div className="stats">
-      <div><span>Позиций на складе</span><strong>1 284</strong><small>↑ 24 за неделю</small></div>
-      <div><span>Требуют внимания</span><strong className="orange">7</strong><small>Ниже минимума</small></div>
-      <div><span>У внешних получателей</span><strong>32</strong><small>3 возврата сегодня</small></div>
-    </div>
-    <h2>Быстрые действия</h2>
-    <div className="actions">
-      <button onClick={() => open("scan")}><b className="action-icon blue">⌗</b><span><strong>Сканировать QR</strong><small>Найти товар или изделие</small></span><em>›</em></button>
-      <button onClick={() => open("issue")}><b className="action-icon violet">↗</b><span><strong>Выдать со склада</strong><small>На пост, сотруднику или на сторону</small></span><em>›</em></button>
-      <button onClick={() => open("defect")}><b className="action-icon orange">＋</b><span><strong>Новая дефектовка</strong><small>Принять изделие в ремонт</small></span><em>›</em></button>
-    </div>
-    <div className="section-head"><h2>Сегодня</h2><button>Все операции</button></div>
-    <div className="timeline">
-      <Movement time="10:42" icon="↗" tone="violet" title="Выдача на пост № 2" detail="Провод AWG24 · 12 м" person="Сергей Петров" />
-      <Movement time="09:18" icon="↓" tone="green" title="Приход от Радиокомплект" detail="8 позиций · накладная № 1842" person="Принял Алексей Морозов" />
-      <Movement time="08:55" icon="↙" tone="blue" title="Возврат с поста № 1" detail="Аттенюатор 10 дБ · 2 шт" person="Иван Орлов" />
-    </div>
-  </>;
+function HomeScreen({setScreen,setModal}:any){return <><div className="eyebrow">ВТОРНИК, 21 ИЮЛЯ</div><div className="hello"><h1>Доброе утро, Алексей</h1><span><i/> Синхронизировано</span></div><div className="stats"><div><small>Позиций на складе</small><b>1 284</b><em>+24 за неделю</em></div><div><small>Требуют внимания</small><b className="warn">7</b><em>Ниже минимума</em></div><div><small>На постах</small><b>316</b><em>8 активных постов</em></div></div><h2>Быстрые действия</h2><div className="actions"><Action icon="⌗" title="Сканировать QR" sub="Найти товар или изделие" click={()=>setModal("scan")}/><Action icon="⇄" title="Оформить выдачу" sub="На пост или обратно на склад" click={()=>setScreen("issue")}/><Action icon="＋" title="Новая дефектовка" sub="Принять изделие в ремонт" click={()=>setModal("defect")}/></div><div className="section-head"><h2>Сегодня</h2><button onClick={()=>setModal("journal")}>Весь журнал</button></div><div className="activity"><EventRow e={events[0]}/><EventRow e={{time:"09:18",type:"Приход",title:"Поставка от ООО «Радиокомплект»",meta:"8 позиций · 184 единицы",doc:"IN-1842"}}/><EventRow e={{time:"08:55",type:"Возврат",title:"Возврат с поста № 1",meta:"Аттенюатор 10 дБ · 2 шт",doc:"RET-0081"}}/></div></>}
+
+function Filters({query,setQuery,category,setCategory,sort,setSort}:any){return <><div className="search"><span>⌕</span><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Поиск по всей базе данных"/><button>⌗</button></div><div className="filter-grid"><select value={category} onChange={e=>setCategory(e.target.value)}><option>Все категории</option><option>Аккумуляторы</option><option>Радиокомпоненты</option><option>Кабельная продукция</option><option>Расходные материалы</option></select><select value={sort} onChange={e=>setSort(e.target.value)}><option>По названию</option><option>По дате</option><option>По остатку</option></select></div></>}
+function StockScreen(p:any){return <><Title eyebrow="УЧЕТ ИМУЩЕСТВА" title="Склад" action={<button onClick={()=>p.setModal("scan")}>⌗ QR</button>}/><Filters {...p}/><div className="chips"><button className="active">Все · 1 284</button><button>Комплектующие</button><button>Изделия</button></div><ProductList data={p.data} click={()=>p.setModal("product")}/></>}
+
+function RepairsScreen({setModal}:any){return <><Title eyebrow="РЕМОНТНЫЙ КОНТУР" title="Ремонты" action={<button onClick={()=>setModal("defect")}>＋ Акт</button>}/><div className="repair-summary"><span><b>4</b>Дефектовка</span><span><b>11</b>В работе</span><span><b>6</b>Готовы</span></div><div className="notice danger"><b>!</b><span><strong>1 акт требует решения администратора</strong><small>Получено 150 изделий, выполнено 147</small></span><button onClick={()=>setModal("verify")}>Открыть</button></div><div className="chips"><button className="active">Активные</button><button>Завершенные</button><button>Пост НРТК</button></div><div className="repair-list"><Repair id="DF-0248" status="Дефектовка" item="Аккумуляторная батарея № АКБ-00418" meta="Пост НРТК · сегодня, 09:36" click={()=>setModal("defect")}/><Repair id="RW-0241" status="В работе" item="Модуль связи № 001245" meta="Пост № 2 · Сергей Петров" click={()=>setModal("work")}/><Repair id="RW-0238" status="Верификация" item="Партия изделий · 150 шт" meta="Выполнено 147 · расхождение 3 шт" click={()=>setModal("verify")}/></div></>}
+
+function IssueScreen(p:any){const [mode,setMode]=useState("post");const [selected,setSelected]=useState<string[]>([]);return <><Title eyebrow="ДВИЖЕНИЕ ТОВАРОВ" title="Выдача"/><div className="segmented"><button className={mode==="post"?"active":""} onClick={()=>setMode("post")}>Выдать на пост</button><button className={mode==="warehouse"?"active":""} onClick={()=>setMode("warehouse")}>Выдать на склад</button></div><div className="issue-destination"><small>{mode==="post"?"ПОЛУЧАТЕЛЬ":"ОТКУДА ВОЗВРАЩАЕМ"}</small><select><option>Пост НРТК</option><option>Пост № 1</option><option>Пост № 2</option></select></div><Filters {...p}/><div className="chips"><button className="active">Вся номенклатура</button><button>Изделия</button><button>Комплектующие</button></div><div className="select-list">{p.data.map((g:any)=><button key={g.sku} className={selected.includes(g.sku)?"selected":""} onClick={()=>setSelected((s:string[])=>s.includes(g.sku)?s.filter(x=>x!==g.sku):[...s,g.sku])}><i>{selected.includes(g.sku)?"✓":""}</i><span><b>{g.name}</b><small>{g.cat} · {g.sku}</small></span><em>{g.qty}</em></button>)}</div>{selected.length>0&&<div className="issue-bar"><span><b>{selected.length}</b> выбрано</span><button onClick={()=>{setSelected([]);p.notify(mode==="post"?"Выдача на пост НРТК оформлена":"Возврат на склад оформлен")}}>Продолжить →</button></div>}</>}
+
+function MoreScreen({setModal}:any){return <><Title eyebrow="СИСТЕМА" title="Ещё"/><div className="menu-card"><Menu icon="◉" title="Инвентаризация" sub="Сверка фактических остатков" click={()=>setModal("inventory")}/><Menu icon="≡" title="Журнал действий" sub="Движения, дефектовки и акты работ" click={()=>setModal("journal")}/><Menu icon="♙" title="Роли и доступ" sub="Администратор, кладовщик, работник" click={()=>setModal("roles")}/></div><h2>Дополнительно</h2><div className="menu-card"><Menu icon="▤" title="Отчеты и выгрузки" sub="Excel, документы и сводки" click={()=>setModal("journal")}/><Menu icon="⌂" title="Посты" sub="8 активных · создает администратор" click={()=>setModal("roles")}/><Menu icon="⚙" title="Настройки" sub="Категории и справочники" click={()=>setModal("roles")}/></div></>}
+
+function Overlay({modal,close,setModal,notify}:any){
+  if(modal==="scan")return <div className="overlay scanner-screen"><button className="x" onClick={close}>×</button><div className="scan-frame"><i/><i/><i/><i/><b>⌗</b></div><h2>Наведите камеру на QR-код</h2><p>Код закреплен за номенклатурой</p><button className="primary" onClick={()=>setModal("product")}>Демо: распознать товар</button></div>;
+  if(modal==="product")return <Sheet title="Карточка товара" close={close}><div className="product-hero"><div>АКБ</div><small>АККУМУЛЯТОРЫ</small><h2>Аккумуляторная батарея 12V 18Ah</h2><span>АКБ-1218 · QR-АКБ-1218</span></div><div className="balance"><small>Основной склад</small><b>24 шт</b><em>Доступно к выдаче</em></div><div className="info"><span>Дата прихода<b>20 июля 2026</b></span><span>Откуда пришло<b>ООО «Энергоком»</b></span><span>Место хранения<b>Стеллаж B-04</b></span><span>Категория<b>Аккумуляторы</b></span></div><button className="primary" onClick={()=>{close();notify("Товар добавлен в выдачу")}}>Добавить в выдачу</button><button className="secondary" onClick={()=>notify("QR-код готов к печати")}>Показать QR-код</button></Sheet>;
+  if(modal==="inventory")return <Sheet title="Инвентаризация" close={close}><div className="doc-head"><span>INV-0072</span><i>В процессе</i></div><div className="progress"><span><b>342</b> проверено</span><span><b>18</b> осталось</span><span><b className="red">3</b> расхождения</span></div><label>Локация<select><option>Основной склад</option><option>Пост НРТК</option></select></label><button className="primary" onClick={()=>notify("Сканер инвентаризации открыт")}>⌗ Сканировать следующий товар</button><div className="notice danger"><b>!</b><span><strong>Усилитель ACASOM 20W</strong><small>По учету 3 шт · Фактически 2 шт</small></span></div><button className="secondary" onClick={()=>{close();notify("Инвентаризация сохранена")}}>Сохранить черновик</button></Sheet>;
+  if(modal==="journal")return <Journal close={close}/>;
+  if(modal==="roles")return <Roles close={close}/>;
+  if(modal==="verify")return <Sheet title="Верификация акта" close={close}><div className="notice danger"><b>!</b><span><strong>Количественное расхождение</strong><small>Закрытие доступно только администратору</small></span></div><div className="verify-grid"><span>Получено<b>150 шт</b></span><span>Выполнено<b>147 шт</b></span><span>Расхождение<b className="red">−3 шт</b></span></div><label>Причина расхождения<textarea defaultValue="3 изделия признаны неремонтопригодными"/></label><label>Решение<select><option>Принять акт с расхождением</option><option>Вернуть на доработку</option></select></label><button className="primary admin" onClick={()=>{close();notify("Акт принят администратором")}}>◆ Подтвердить как администратор</button></Sheet>;
+  if(modal==="defect")return <Sheet title="Акт дефектовки" close={close}><div className="doc-head"><span>DF-0249</span><i>Черновик</i></div><label>Изделие / серийный номер<input defaultValue="Аккумуляторная батарея № АКБ-00418"/></label><label>Пост<select><option>Пост НРТК</option></select></label><label>Описание неисправности<textarea defaultValue="Не держит заряд, падение напряжения под нагрузкой"/></label><label>Выявленные дефекты<textarea placeholder="Обязательное поле"/></label><label>Заключение<select><option>Ремонтопригодно</option><option>Не подлежит ремонту</option></select></label><button className="primary" onClick={()=>setModal("work")}>Закрыть дефектовку и создать акт работ</button></Sheet>;
+  return <Sheet title="Акт выполненных работ" close={close}><div className="doc-head"><span>RW-0249</span><i>Черновик</i></div><div className="linked">Связан с актом дефектовки <b>DF-0249</b></div><label>Выполненные работы<textarea defaultValue="Восстановление контактов, контрольный цикл заряда-разряда"/></label><h3>Израсходованные товары</h3><div className="line"><span><b>Припой ПОС-61</b><small>Найдено по всей базе</small></span><strong>20 г</strong></div><div className="line"><span><b>Провод AWG24</b><small>Остаток поста НРТК</small></span><strong>0,5 м</strong></div><button className="secondary">＋ Найти и добавить товар</button><button className="primary" onClick={()=>{close();notify("Акт сохранен и отправлен на верификацию")}}>Сохранить акт</button></Sheet>
 }
 
-function StockScreen({ query, setQuery, products, open }: any) {
-  return <><div className="page-title"><div><span>УЧЕТ ИМУЩЕСТВА</span><h1>Остатки</h1></div><button className="square" onClick={() => open("scan")}>⌗</button></div>
-    <div className="search"><span>⌕</span><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Название, артикул или QR" /></div>
-    <div className="chips"><button className="active">Все · 1 284</button><button>Ниже минимума · 7</button><button>Основной склад</button></div>
-    <div className="stock-list">{products.map((p: any) => <button key={p.sku} className="product" onClick={() => open("product")}><span className={`cube ${p.tone}`}>◇</span><span><strong>{p.name}</strong><small>{p.sku} · {p.place}</small></span><span className={p.low ? "qty low" : "qty"}>{p.qty}<small>{p.low ? "Ниже минимума" : "В наличии"}</small></span></button>)}</div>
-  </>;
-}
+function Journal({close}:any){const [post,setPost]=useState("Пост НРТК"),[item,setItem]=useState("Аккумуляторная батарея");return <Sheet title="Журнал действий" close={close}><p className="hint">Фильтры применяются одновременно ко всем документам и движениям.</p><div className="filter-stack"><label>Пост<select value={post} onChange={e=>setPost(e.target.value)}><option>Пост НРТК</option><option>Все посты</option><option>Пост № 1</option></select></label><label>Товар или изделие<input value={item} onChange={e=>setItem(e.target.value)}/></label><label>Тип события<select><option>Все события</option><option>Движения товара</option><option>Акты дефектовки</option><option>Акты выполненных работ</option></select></label></div><div className="found">Найдено: <b>4 события</b></div><div className="journal-list">{events.map((e,i)=><EventRow e={e} key={i}/>)}</div></Sheet>}
+function Roles({close}:any){const roles=[{n:"Администратор",c:"admin",d:"Полный доступ · управление постами · верификация расхождений",rights:["Карточки и категории","Все перемещения","Отчеты и инвентаризация","Создание постов","Принятие актов с расхождением"]},{n:"Кладовщик",c:"store",d:"Складской учет, акты и выгрузки",rights:["Карточки и категории","Акты дефектовки и работ","Выгрузка актов в Excel","Инвентаризация"]},{n:"Работник · старший поста",c:"worker",d:"Доступ только к назначенному посту",rights:["Акты дефектовки","Акты выполненных работ","Добавление расхода материалов"]}];return <Sheet title="Роли и доступ" close={close}><p className="hint">Права применяются на сервере и определяют доступные действия в приложении.</p>{roles.map(r=><details className="role" key={r.n} open={r.c==="admin"}><summary><i className={r.c}>♙</i><span><b>{r.n}</b><small>{r.d}</small></span><em>⌄</em></summary><ul>{r.rights.map(x=><li key={x}>✓ {x}</li>)}</ul>{r.c!=="admin"&&<p>× Создание постов недоступно</p>}</details>)}</Sheet>}
 
-function RepairsScreen({ open }: { open: (m: Modal) => void }) {
-  return <><div className="page-title"><div><span>РЕМОНТНЫЙ КОНТУР</span><h1>Ремонты</h1></div><button className="primary-small" onClick={() => open("defect")}>＋ Дефектовка</button></div>
-    <div className="repair-summary"><div><strong>4</strong><span>На дефектовке</span></div><div><strong>11</strong><span>В работе</span></div><div><strong>6</strong><span>Готовы</span></div></div>
-    <div className="chips"><button className="active">Активные</button><button>Завершенные</button><button>Все посты</button></div>
-    <div className="repair-list">{repairs.map(r => <button key={r.id} onClick={() => r.stage === "Дефектовка" ? open("defect") : open("work")}><div className="repair-top"><span>{r.id}</span><i className={r.color}>{r.stage}</i></div><strong>{r.item}</strong><small>Поступило сегодня · 09:36</small><div className="repair-foot"><span>Ответственный: А. Морозов</span><b>{r.status} ›</b></div></button>)}</div>
-  </>;
-}
-
-function MoreScreen({ notify }: { notify: (s: string) => void }) {
-  return <><div className="page-title"><div><span>УПРАВЛЕНИЕ</span><h1>Ещё</h1></div></div><div className="menu-card">
-    {[['▤','Документы и отчеты','Накладные, акты, движения'],['⌂','Локации и посты','Остатки по местам хранения'],['♙','Получатели','Сотрудники и организации'],['◉','Инвентаризация','Сверка фактических остатков'],['⚙','Настройки','Роли, справочники, уведомления']].map(x => <button key={x[1]} onClick={() => notify(`${x[1]} — раздел откроется в полной версии`)}><b>{x[0]}</b><span><strong>{x[1]}</strong><small>{x[2]}</small></span><em>›</em></button>)}
-  </div></>;
-}
-
-function Overlay({ modal, step, setStep, close, open, notify }: any) {
-  if (modal === "scan") return <div className="overlay dark"><button className="close light" onClick={close}>×</button><div className="scanner"><span /><span /><span /><span /><div className="fake-qr">▦<br/>▣▦</div></div><h2>Наведите камеру на QR-код</h2><p>Код будет распознан автоматически</p><button className="flash">☼ Включить фонарик</button><button className="demo" onClick={() => open("product")}>Демо: распознать товар</button></div>;
-  if (modal === "product") return <Sheet title="Карточка товара" close={close}><div className="product-hero"><div className="big-cube">◇</div><span>КОМПОНЕНТ</span><h2>Усилитель ACASOM 20W</h2><p>CMP-0091</p></div><div className="balance"><span>Доступно на основном складе</span><strong>3 шт</strong><small>Минимальный остаток: 5 шт</small></div><div className="info-grid"><span>Место хранения<b>Шкаф 2 · ячейка 06</b></span><span>Последний приход<b>18 июля 2026</b></span><span>Поставщик<b>Радиокомплект</b></span><span>QR-код<b>QR-CMP-0091</b></span></div><button className="primary" onClick={() => open("issue")}>Выдать товар</button><button className="secondary" onClick={() => notify("QR-код подготовлен к печати")}>Показать QR-код</button></Sheet>;
-  if (modal === "issue") return <Sheet title="Выдача со склада" close={close}><div className="steps"><i className="on">1</i><span/><i className={step>0?'on':''}>2</i><span/><i className={step>1?'on':''}>3</i></div>{step === 0 ? <><h2>Куда выдаем?</h2><p className="muted">Выберите тип получателя</p><Choice icon="⌂" title="На ремонтный пост" detail="Временное перемещение" onClick={() => setStep(1)} /><Choice icon="♙" title="Сотруднику" detail="Под личную ответственность" onClick={() => setStep(1)} /><Choice icon="◎" title="Стороннему получателю" detail="Организации или физическому лицу" onClick={() => setStep(1)} /></> : step === 1 ? <><h2>Получатель и основание</h2><label>Получатель<select><option>ООО «Техносфера»</option><option>Пост № 2 — Сергей Петров</option></select></label><label>Тип выдачи<select><option>Временная, с возвратом</option><option>Безвозвратная</option></select></label><label>Плановая дата возврата<input type="date" defaultValue="2026-07-28" /></label><button className="primary" onClick={() => setStep(2)}>Добавить товары</button></> : <><h2>Состав выдачи</h2><div className="line-item"><span><b>Аттенюатор 10 дБ</b><small>CMP-0142</small></span><strong>2 шт</strong></div><div className="line-item"><span><b>Провод AWG24</b><small>MAT-0034</small></span><strong>7 м</strong></div><button className="add-line">＋ Добавить сканированием</button><div className="total"><span>Итого</span><b>2 позиции</b></div><button className="primary" onClick={() => {close(); notify("Накладная № OUT-0254 создана")}}>Оформить выдачу</button></>}</Sheet>;
-  if (modal === "defect") return <Sheet title="Акт дефектовки" close={close}><div className="doc-number">DF-0248 <span>{step === 0 ? "Черновик" : "Заполнено"}</span></div>{step === 0 ? <><label>Изделие / серийный номер<input defaultValue="Антенна № 000966" /></label><label>Откуда поступило<select><option>Участок эксплуатации № 4</option></select></label><label>Описание неисправности<textarea defaultValue="Не включается, отсутствует выходной сигнал" /></label><label>Выявленные дефекты<textarea placeholder="Опишите результаты осмотра" /></label><label>Заключение<select><option>Ремонтопригодно</option><option>Не подлежит ремонту</option></select></label><button className="attach">＋ Добавить фото дефекта</button><button className="primary" onClick={() => setStep(1)}>Сохранить и закрыть дефектовку</button></> : <div className="success"><div>✓</div><h2>Дефектовка закрыта</h2><p>Теперь можно создать акт выполненных работ. Данные изделия и дефекты перенесутся автоматически.</p><button className="primary" onClick={() => open("work")}>Создать акт работ</button><button className="secondary" onClick={close}>Вернуться к ремонтам</button></div>}</Sheet>;
-  return <Sheet title="Акт выполненных работ" close={close}><div className="doc-number">RW-0249 <span>Черновик</span></div><div className="linked">Связан с дефектовкой <b>DF-0248</b><small>Антенна № 000966</small></div><label>Выполненные работы<textarea defaultValue="Замена усилителя сигнала, восстановление кабельной линии, пайка соединений" /></label><h3>Израсходованные материалы</h3><div className="line-item"><span><b>Флюс RMA-223</b><small>Со склада поста № 2</small></span><strong>10 г</strong></div><div className="line-item"><span><b>Припой ПОС-61</b><small>Со склада поста № 2</small></span><strong>20 г</strong></div><div className="line-item"><span><b>Усилитель ACASOM 20W</b><small>Серийный учет</small></span><strong>1 шт</strong></div><button className="add-line">＋ Добавить материал</button><label>Результат<select><option>Отремонтировано, исправно</option><option>Требуется дополнительная диагностика</option></select></label><button className="primary" onClick={() => {close(); notify("Акт RW-0249 закрыт, материалы списаны")}}>Закрыть акт и списать материалы</button></Sheet>;
-}
-
-function Sheet({ title, close, children }: any) { return <div className="overlay sheet-wrap"><div className="sheet"><div className="sheet-head"><button onClick={close}>←</button><h1>{title}</h1><button onClick={close}>×</button></div><div className="sheet-body">{children}</div></div></div> }
-function Choice({ icon,title,detail,onClick }: any) { return <button className="choice" onClick={onClick}><b>{icon}</b><span><strong>{title}</strong><small>{detail}</small></span><em>›</em></button> }
-function Nav({ active,icon,text,onClick }: any) { return <button onClick={onClick} className={active?'active':''}><b>{icon}</b><span>{text}</span></button> }
-function Movement({ time,icon,tone,title,detail,person }: any) { return <div className="movement"><time>{time}</time><b className={tone}>{icon}</b><span><strong>{title}</strong><small>{detail}</small><em>{person}</em></span></div> }
+function ProductList({data,click}:any){return <div className="product-list">{data.map((g:any)=><button key={g.sku} onClick={click}><i>{g.cat.slice(0,2).toUpperCase()}</i><span><b>{g.name}</b><small>{g.cat} · {g.sku}</small><em>{g.date} · {g.place}</em></span><strong className={g.low?"red":""}>{g.qty}<small>{g.low?"Ниже минимума":"В наличии"}</small></strong></button>)}</div>}
+function Title({eyebrow,title,action}:any){return <div className="title"><div><span>{eyebrow}</span><h1>{title}</h1></div>{action}</div>}
+function Nav({icon,text,active,click}:any){return <button className={active?"active":""} onClick={click}><b>{icon}</b><span>{text}</span></button>}
+function Action({icon,title,sub,click}:any){return <button onClick={click}><i>{icon}</i><span><b>{title}</b><small>{sub}</small></span><em>›</em></button>}
+function EventRow({e}:any){return <div className="event"><i>{e.type.slice(0,1)}</i><span><small>{e.time} · {e.type}</small><b>{e.title}</b><em>{e.meta}</em></span><strong>{e.doc}</strong></div>}
+function Repair({id,status,item,meta,click}:any){return <button onClick={click}><span><small>{id}</small><i>{status}</i></span><b>{item}</b><em>{meta}</em><strong>Открыть ›</strong></button>}
+function Menu({icon,title,sub,click}:any){return <button onClick={click}><i>{icon}</i><span><b>{title}</b><small>{sub}</small></span><em>›</em></button>}
+function Sheet({title,close,children}:any){return <div className="overlay shade"><section className="sheet"><header><button onClick={close}>←</button><h2>{title}</h2><button onClick={close}>×</button></header><div className="sheet-body">{children}</div></section></div>}
