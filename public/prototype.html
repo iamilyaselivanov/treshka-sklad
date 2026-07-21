@@ -1076,7 +1076,14 @@ function openEditItemForm(id){
 function submitEditItem(id){
   const i=item(id);
   i.name=$('ei_name').value.trim()||i.name;
-  i.sku=$('ei_sku').value.trim()||i.sku;
+  const newSku=$('ei_sku').value.trim()||i.sku;
+  if(newSku!==i.sku){
+    if(Object.prototype.hasOwnProperty.call(QR_IMAGES, i.sku)){
+      QR_IMAGES[newSku]=QR_IMAGES[i.sku];
+      delete QR_IMAGES[i.sku];
+    }
+    i.sku=newSku;
+  }
   i.unit=$('ei_unit').value.trim()||i.unit;
   i.min=parseFloat($('ei_min').value)||i.min;
   i.desc=$('ei_desc').value;
@@ -1546,7 +1553,11 @@ function addMat(no){
   const id=$('addSel').value, q=parseFloat($('addQty').value);
   if(!q||q<=0){ toast('Укажите количество'); return; }
   const d=docs.find(x=>x.no===no);
+  const it=item(id);
   const existing=d.materials.find(m=>m.id===id);
+  const already=existing?existing.q:0;
+  const avail=(it.posts[d.post]||0);
+  if(already+q>avail){ toast('На посту доступно ещё только '+Math.max(0,avail-already)+' '+it.unit); return; }
   if(existing) existing.q += q; else d.materials.push({id,q});
   toast('Материал добавлен в акт');
   renderWorkDoc(d);
@@ -1592,35 +1603,45 @@ function performWorkClose(d, note){
   if(p){ p.repairs=p.repairs.filter(r=>r.serial!==d.serial);
     d.materials.forEach(m=>{ p.stock=p.stock.map(s=>s.id===m.id?{...s,q:Math.max(0,s.q-m.q)}:s).filter(s=>s.q>0); });
   }
-  const ant=item('ant'); if(ant && d.serial==='000966'){ ant.stock+=1; ant.posts={}; ant.history.push({d:'21.07.2026', type:'in', text:`№${d.serial} возвращена на склад после ремонта (${d.no})`, q:'+1 шт'}); }
+  const ant=item('ant');
+  if(ant && d.serial==='000966'){
+    ant.stock+=1;
+    if(ant.posts[d.post]){ ant.posts[d.post]=Math.max(0,ant.posts[d.post]-1); if(!ant.posts[d.post]) delete ant.posts[d.post]; }
+    ant.history.push({d:'21.07.2026', type:'in', text:`№${d.serial} возвращена на склад после ремонта (${d.no})`, q:'+1 шт'});
+  }
   logAction('Акт выполненных работ закрыт', `${d.no}: ${d.item}, списано ${d.materials.length} позиций материалов${note?' · '+note:''}`, d.post);
   toast('✓ Акт закрыт: материалы списаны');
   setTimeout(()=>go('docs'), 900);
 }
 
 function checkDefekt(){
-  const ok = ['f_order','f_serial','f_date','f_from','f_post','f_callsign','f_fault','f_defects','f_verdict'].every(id=>$(id).value.trim());
+  const fieldsOk = ['f_order','f_serial','f_date','f_from','f_post','f_callsign','f_fault','f_defects','f_verdict'].every(id=>$(id).value.trim());
+  const serialOk = !!extractSerial($('f_serial').value.trim());
+  const ok = fieldsOk && serialOk;
   $('defSubmit').disabled = !ok;
   const note=$('defNote');
   if(ok){ note.classList.add('ok'); note.textContent='✓ Все обязательные поля заполнены — можно закрывать акт'; }
+  else if(fieldsOk && !serialOk){ note.classList.remove('ok'); note.textContent='⚠ Не найден серийный номер в поле изделия — укажите номер (например, «АН-9 №000967»)'; }
   else { note.classList.remove('ok'); note.textContent='⚠ Черновик — акт работ будет доступен после заполнения всех полей и закрытия дефектовки'; }
 }
 
 function extractSerial(text){
-  if(!text) return '000967';
+  if(!text) return null;
   const afterMark = text.match(/№\s*(\d+)/);
   if(afterMark) return afterMark[1];
   const nums = text.match(/\d+/g);
-  if(!nums || !nums.length) return '000967';
+  if(!nums || !nums.length) return null;
   return nums.reduce((a,b)=>b.length>a.length?b:a);
 }
 
 function submitDefekt(){
   const verdict=$('f_verdict').value;
+  const serial=extractSerial($('f_serial').value.trim());
+  if(!serial){ toast('Не найден серийный номер — укажите его в поле изделия'); return; }
   const newNo='ДФ-'+(100+docs.filter(d=>d.kind==='defekt').length);
   docs.unshift({no:newNo, kind:'defekt', status:'Закрыт', date:$('f_date').value,
     orderNo:$('f_order').value,
-    serial:extractSerial($('f_serial').value), item:$('f_serial').value||'Изделие',
+    serial:serial, item:$('f_serial').value||'Изделие',
     from:$('f_from').value, callsign:$('f_callsign').value, post:$('f_post').value,
     fault:$('f_fault').value, defects:$('f_defects').value.split('\n').filter(Boolean),
     verdict:verdict, workDoc:null});
