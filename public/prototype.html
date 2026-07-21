@@ -1235,7 +1235,10 @@ function renderIssuePicker(mode){
 }
 function toggleIssueItem(id, mode, avail){
   if(issueSelected[id]!=null){ delete issueSelected[id]; }
-  else { issueSelected[id] = Math.min(1, avail)||1; }
+  else {
+    if(avail<=0){ toast('Нет остатка для выдачи'); return; }
+    issueSelected[id] = Math.min(1, avail);
+  }
   views[mode==='post'?'issueToPost':'issueToSklad']();
 }
 function setIssueQty(id, val, avail){
@@ -1266,8 +1269,11 @@ function addExtLine(){
   const id=$('ei_item').value, q=parseFloat($('ei_qty').value);
   if(!q||q<=0){ toast('Укажите количество'); return; }
   const i=item(id);
-  if(q>i.stock){ toast('Недостаточно на складе: '+i.stock+' '+i.unit); return; }
-  extDraftLines.push({id,q});
+  const already = extDraftLines.filter(l=>l.id===id).reduce((s,l)=>s+l.q,0);
+  const remaining = i.stock - already;
+  if(q>remaining){ toast('Недостаточно на складе: доступно ещё '+remaining+' '+i.unit); return; }
+  const existing = extDraftLines.find(l=>l.id===id);
+  if(existing) existing.q += q; else extDraftLines.push({id,q});
   $('ei_list').innerHTML = extDraftLines.map((l,n)=>{const it=item(l.id); return `<div class="mat"><div class="grow"><div class="t">${it.icon} ${it.name}</div></div><div class="q">${l.q} ${it.unit}</div></div>`;}).join('');
   toast('Позиция добавлена в выдачу');
 }
@@ -1275,14 +1281,18 @@ function submitExtIssue(){
   const to=$('ei_to').value.trim();
   if(!to){ toast('Укажите получателя'); return; }
   if(!extDraftLines.length){ toast('Добавьте хотя бы одну позицию'); return; }
+  const finalLines=[];
   extDraftLines.forEach(l=>{
     const i=item(l.id);
     const q=Math.min(l.q, i.stock);
+    if(q<=0) return;
     i.stock -= q; i.ext += q;
     i.history.push({d:'21.07.2026', type:'out', text:`Выдача на сторону · ${to}`, q:`−${q} ${i.unit}`});
+    finalLines.push({id:l.id, q});
   });
+  if(!finalLines.length){ toast('Недостаточно остатков для выдачи'); return; }
   const no='ВН-0'+(20+extIssues.length);
-  extIssues.unshift({no, to, date:'21.07.2026', status:'Выдано', due:$('ei_due').value||'—', items:extDraftLines.slice(), note:$('ei_note').value||''});
+  extIssues.unshift({no, to, date:'21.07.2026', status:'Выдано', due:$('ei_due').value||'—', items:finalLines, note:$('ei_note').value||''});
   logAction('Выдача на сторону оформлена', `${no}: ${to}`);
   toast('✓ Выдача '+no+' оформлена');
   extDraftLines=[];
@@ -1458,7 +1468,9 @@ function openDefekt(d){
 }
 
 function openWork(d){
-  render({fn(){
+  render({fn(){ renderWorkDoc(d); }});
+}
+function renderWorkDoc(d){
     const mismatch = d.planQty!=null && d.factQty!=null && d.factQty!==d.planQty;
     const closed = d.status==='Закрыт';
     setHdr(d.no+' · Акт выполненных работ', `${d.item} · из дефектовки ${d.defektDoc}`, true, false);
@@ -1485,14 +1497,14 @@ function openWork(d){
             <div class="icbox" style="width:34px;height:34px;font-size:16px">${m.it.icon}</div>
             <div class="grow"><div class="t">${m.it.name}</div><div class="s">${m.it.sku} · с поста ${d.post}</div></div>
             <div class="q">${fmtQ(m.it,m.q)}</div>
-            ${closed?'':`<button class="del" onclick="event.stopPropagation(); this.closest('.mat').remove(); toast('Позиция убрана из акта')">✕</button>`}
+            ${closed?'':`<button class="del" onclick="event.stopPropagation(); removeMat('${d.no}', ${n})">✕</button>`}
           </div>`).join('')}
       </div>
       ${closed?'':`
       <div class="addmat">
         <select id="addSel">${items.map(i=>`<option value="${i.id}">${i.icon} ${i.name}</option>`).join('')}</select>
         <input id="addQty" type="number" placeholder="Кол-во" min="0">
-        <button onclick="addMat('${d.post}')">＋</button>
+        <button onclick="addMat('${d.no}')">＋</button>
       </div>
       <div class="s" style="margin:6px 2px 0">Или добавьте сканированием QR с этикетки материала</div>
       ${d.status==='Расхождение'
@@ -1511,7 +1523,6 @@ function openWork(d){
       <button class="btn ghost" onclick="exportWorkActExcel('${d.no}')">⤓ Экспорт акта в Excel</button>
     `;
     if(d.status==='Расхождение' && currentRole==='admin') checkMismatch();
-  }});
 }
 function checkMismatch(){
   const reason=$('mm_reason')?.value.trim();
@@ -1531,17 +1542,20 @@ function printDoc(no){
   w.document.close();
 }
 
-function addMat(post){
+function addMat(no){
   const id=$('addSel').value, q=parseFloat($('addQty').value);
   if(!q||q<=0){ toast('Укажите количество'); return; }
-  const it=item(id);
-  const div=document.createElement('div'); div.className='mat';
-  div.innerHTML=`<div class="icbox" style="width:34px;height:34px;font-size:16px">${it.icon}</div>
-    <div class="grow"><div class="t">${it.name}</div><div class="s">${it.sku} · с поста ${post}</div></div>
-    <div class="q">${fmtQ(it,q)}</div>
-    <button class="del" onclick="this.closest('.mat').remove()">✕</button>`;
-  $('matList').appendChild(div); $('addQty').value='';
+  const d=docs.find(x=>x.no===no);
+  const existing=d.materials.find(m=>m.id===id);
+  if(existing) existing.q += q; else d.materials.push({id,q});
   toast('Материал добавлен в акт');
+  renderWorkDoc(d);
+}
+function removeMat(no, index){
+  const d=docs.find(x=>x.no===no);
+  d.materials.splice(index,1);
+  toast('Позиция убрана из акта');
+  renderWorkDoc(d);
 }
 
 function closeWork(no){
@@ -1592,12 +1606,21 @@ function checkDefekt(){
   else { note.classList.remove('ok'); note.textContent='⚠ Черновик — акт работ будет доступен после заполнения всех полей и закрытия дефектовки'; }
 }
 
+function extractSerial(text){
+  if(!text) return '000967';
+  const afterMark = text.match(/№\s*(\d+)/);
+  if(afterMark) return afterMark[1];
+  const nums = text.match(/\d+/g);
+  if(!nums || !nums.length) return '000967';
+  return nums.reduce((a,b)=>b.length>a.length?b:a);
+}
+
 function submitDefekt(){
   const verdict=$('f_verdict').value;
   const newNo='ДФ-'+(100+docs.filter(d=>d.kind==='defekt').length);
   docs.unshift({no:newNo, kind:'defekt', status:'Закрыт', date:$('f_date').value,
     orderNo:$('f_order').value,
-    serial:($('f_serial').value.match(/\d+/)||['000967'])[0], item:$('f_serial').value||'Изделие',
+    serial:extractSerial($('f_serial').value), item:$('f_serial').value||'Изделие',
     from:$('f_from').value, callsign:$('f_callsign').value, post:$('f_post').value,
     fault:$('f_fault').value, defects:$('f_defects').value.split('\n').filter(Boolean),
     verdict:verdict, workDoc:null});
@@ -1643,6 +1666,7 @@ function startCycleCount(){
 function setCount(id, val){
   const v = parseFloat(val);
   if(isNaN(v)){ delete cycleCount.counts[id]; return; }
+  if(v<0){ toast('Остаток не может быть отрицательным'); delete cycleCount.counts[id]; return; }
   cycleCount.counts[id] = v;
 }
 function finishCycleCount(){
