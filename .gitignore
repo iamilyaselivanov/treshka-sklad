@@ -40,3 +40,14 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+
+# android/ (ТРЁШКА склад apk-обёртка) — генерируемые Android Studio/Gradle файлы.
+# Проект намеренно без gradlew/gradlew.bat/gradle-wrapper.jar: их нельзя было
+# сгенерировать в этой песочнице (сеть до services.gradle.org/dl.google.com
+# заблокирована), Android Studio создаёт их сама при первом открытии проекта.
+android/local.properties
+android/.gradle/
+android/**/build/
+android/*.iml
+android/**/*.iml
+android/.idea/

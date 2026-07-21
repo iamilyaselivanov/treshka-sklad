@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Стилизованная "Т" (ТРЁШКА) в цвете акцента приложения -->
+    <path
+        android:fillColor="#4f8cff"
+        android:pathData="M34,30 h40 v12 h-40 z M48,42 h12 v36 h-12 z" />
+</vector>
