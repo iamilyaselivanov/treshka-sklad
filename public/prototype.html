@@ -651,11 +651,11 @@ posts(){
 docs(){
   currentTab='docs'; setTab('docs');
   setHdr('Документы', 'Дефектовки и акты выполненных работ', false, false);
-  const chip = d => d.status==='Закрыт' ? 'green' : d.status==='Расхождение' ? 'red' : 'amber';
+  const chip = d => d.status==='Закрыт' ? 'green' : hasUnresolvedMismatch(d) ? 'red' : 'amber';
   const nDefekt = docs.filter(d=>d.kind==='defekt').length;
-  const nProgress = docs.filter(d=>d.kind==='work' && d.status==='Черновик').length;
+  const nProgress = docs.filter(d=>d.kind==='work' && d.status!=='Закрыт' && !hasUnresolvedMismatch(d)).length;
   const nDone = docs.filter(d=>d.status==='Закрыт').length;
-  const mismatches = docs.filter(d=>d.status==='Расхождение');
+  const mismatches = docs.filter(d=>hasUnresolvedMismatch(d));
   $('content').innerHTML = `
     <button class="btn primary" style="margin:0 0 10px" onclick="render({fn:views.newDefekt})">＋ Новый акт дефектовки</button>
     <div class="btn-row" style="margin-bottom:12px">
@@ -686,7 +686,7 @@ docs(){
     ${docs.map((d,i)=>`
       <div class="card" onclick="openDoc(${i})">
         <div class="row">
-          <div class="icbox">${d.kind==='defekt'?'🔍':(d.status==='Расхождение'?'⚠':'✅')}</div>
+          <div class="icbox">${d.kind==='defekt'?'🔍':(hasUnresolvedMismatch(d)?'⚠':'✅')}</div>
           <div class="grow">
             <div class="t">${d.no} · ${d.kind==='defekt'?'Акт дефектовки':'Акт выполненных работ'}</div>
             <div class="s">${d.item} ${d.serial&&d.serial!=='—'?'№'+d.serial:''} · ${d.date}</div>
@@ -1044,16 +1044,21 @@ function submitNewItem(){
   if(!name){ toast('Введите название товара'); return; }
   const topCat=$('ni_top').value;
   const subCat = topCat==='Комплектующие' ? $('ni_sub').value : undefined;
+  const stockVal=parseFloat($('ni_stock').value);
+  if(stockVal<0){ toast('Начальный остаток не может быть отрицательным'); return; }
+  const sku = $('ni_sku').value.trim() || null;
+  if(sku && items.some(x=>x.sku===sku)){ toast('Артикул «'+sku+'» уже используется другим товаром'); return; }
   itemSeq++;
-  const sku = $('ni_sku').value.trim() || `НВ-${itemSeq}`;
-  const newItem = {id:'item'+itemSeq, icon:CAT_ICON[subCat||topCat]||'📦', name, sku, topCat, unit:$('ni_unit').value||'шт',
-    stock:parseFloat($('ni_stock').value)||0, min:parseFloat($('ni_min').value)||1, abc:'C',
+  const finalSku = sku || `НВ-${itemSeq}`;
+  const stock = isNaN(stockVal)?0:stockVal;
+  const newItem = {id:'item'+itemSeq, icon:CAT_ICON[subCat||topCat]||'📦', name, sku:finalSku, topCat, unit:$('ni_unit').value||'шт',
+    stock, min:parseFloat($('ni_min').value)||1, abc:'C',
     desc:$('ni_desc').value||'', posts:{}, ext:0,
-    history:[{d:'21.07.2026', type:'in', text:'Создание карточки товара', q:`+${parseFloat($('ni_stock').value)||0} ${$('ni_unit').value||'шт'}`}]};
+    history:[{d:'21.07.2026', type:'in', text:'Создание карточки товара', q:`+${stock} ${$('ni_unit').value||'шт'}`}]};
   if(subCat) newItem.subCat=subCat;
   items.push(newItem);
-  QR_IMAGES[sku] = null;
-  logAction('Создана карточка товара', `${name} (${sku}) в разделе ${subCat||topCat}`);
+  QR_IMAGES[finalSku] = null;
+  logAction('Создана карточка товара', `${name} (${finalSku}) в разделе ${subCat||topCat}`);
   toast('✓ Карточка «'+name+'» создана');
   skladPath = subCat ? ['Комплектующие', subCat] : [topCat];
   setTimeout(()=>go('sklad'), 400);
@@ -1078,6 +1083,7 @@ function submitEditItem(id){
   i.name=$('ei_name').value.trim()||i.name;
   const newSku=$('ei_sku').value.trim()||i.sku;
   if(newSku!==i.sku){
+    if(items.some(x=>x.id!==id && x.sku===newSku)){ toast('Артикул «'+newSku+'» уже используется другим товаром'); return; }
     if(Object.prototype.hasOwnProperty.call(QR_IMAGES, i.sku)){
       QR_IMAGES[newSku]=QR_IMAGES[i.sku];
       delete QR_IMAGES[i.sku];
@@ -1307,6 +1313,7 @@ function submitExtIssue(){
 }
 function returnExtIssue(idx){
   const e=extIssues[idx];
+  if(e.status==='Возвращено'){ toast('Возврат по этой выдаче уже оформлен'); return; }
   e.items.forEach(l=>{
     const i=item(l.id);
     i.stock += l.q; i.ext = Math.max(0, i.ext-l.q);
@@ -1479,11 +1486,12 @@ function openWork(d){
 }
 function renderWorkDoc(d){
     const mismatch = d.planQty!=null && d.factQty!=null && d.factQty!==d.planQty;
+    const unresolved = hasUnresolvedMismatch(d);
     const closed = d.status==='Закрыт';
     setHdr(d.no+' · Акт выполненных работ', `${d.item} · из дефектовки ${d.defektDoc}`, true, false);
     const sum = d.materials.map(m=>{const it=item(m.id);return {it,q:m.q};});
     $('content').innerHTML = `
-      ${d.status==='Расхождение'?`<div class="progress-note bad">⚠ Расхождение по количеству: получено ${d.planQty}, годных ${d.factQty} (брак: ${d.planQty-d.factQty}). Администратору отправлено push-уведомление. Закрыть акт может только администратор.</div>`
+      ${unresolved?`<div class="progress-note bad">⚠ Расхождение по количеству: получено ${d.planQty}, годных ${d.factQty} (брак: ${d.planQty-d.factQty}). Администратору отправлено push-уведомление. Закрыть акт может только администратор.${d.mismatchDecision==='rework'?' Акт возвращён на доработку, но остаётся заблокирован до решения администратора.':''}</div>`
         : closed?`<div class="progress-note ok">✓ Акт закрыт — материалы списаны, изделие возвращено на склад${d.mismatchReason?' (принято с расхождением: '+d.mismatchReason+')':''}</div>`
         : '<div class="progress-note">⚠ Черновик — при закрытии материалы спишутся с поста, изделие вернётся на склад</div>'}
       <div class="card static">
@@ -1514,7 +1522,7 @@ function renderWorkDoc(d){
         <button onclick="addMat('${d.no}')">＋</button>
       </div>
       <div class="s" style="margin:6px 2px 0">Или добавьте сканированием QR с этикетки материала</div>
-      ${d.status==='Расхождение'
+      ${unresolved
         ? (currentRole==='admin'
           ? `<div class="fld"><label>Причина расхождения <span class="req">*</span></label><textarea id="mm_reason" placeholder="Например, 3 изделия признаны неремонтопригодными" oninput="checkMismatch()">${d.mismatchReason||''}</textarea></div>
              <div class="fld"><label>Решение <span class="req">*</span></label>
@@ -1529,7 +1537,7 @@ function renderWorkDoc(d){
       <button class="btn ghost" onclick="printDoc('${d.no}')">⤓ Экспорт в PDF</button>
       <button class="btn ghost" onclick="exportWorkActExcel('${d.no}')">⤓ Экспорт акта в Excel</button>
     `;
-    if(d.status==='Расхождение' && currentRole==='admin') checkMismatch();
+    if(unresolved && currentRole==='admin') checkMismatch();
 }
 function checkMismatch(){
   const reason=$('mm_reason')?.value.trim();
@@ -1569,14 +1577,19 @@ function removeMat(no, index){
   renderWorkDoc(d);
 }
 
+function hasUnresolvedMismatch(d){
+  return d.planQty!=null && d.factQty!=null && d.planQty!==d.factQty && d.mismatchDecision!=='accept';
+}
 function closeWork(no){
   const d=docs.find(x=>x.no===no);
-  if(d.status==='Расхождение'){ toast('Сначала укажите причину расхождения и решение выше'); return; }
+  if(d.status==='Закрыт'){ toast('Акт уже закрыт'); return; }
+  if(hasUnresolvedMismatch(d)){ toast('Сначала укажите причину расхождения и решение выше'); return; }
   performWorkClose(d);
 }
 function resolveMismatch(no){
   if(currentRole!=='admin'){ toast('🔒 Закрыть акт с расхождением может только администратор'); return; }
   const d=docs.find(x=>x.no===no);
+  if(d.status==='Закрыт'){ toast('Акт уже закрыт'); return; }
   const reason=$('mm_reason').value.trim();
   const decision=$('mm_decision').value;
   if(!reason||!decision){ toast('Заполните причину и решение'); return; }
@@ -1584,13 +1597,14 @@ function resolveMismatch(no){
   if(decision==='rework'){
     d.status='Черновик';
     logAction('Акт возвращён на доработку', `${d.no}: ${reason}`, d.post);
-    toast('↩ Акт возвращён на доработку');
+    toast('↩ Акт возвращён на доработку — расхождение остаётся под контролем администратора');
     setTimeout(()=>go('docs'), 800);
   } else {
     performWorkClose(d, 'расхождение принято администратором — '+reason);
   }
 }
 function performWorkClose(d, note){
+  if(d.status==='Закрыт'){ toast('Акт уже закрыт'); return; }
   d.status='Закрыт';
   d.materials.forEach(m=>{
     const it=item(m.id);
@@ -1603,11 +1617,11 @@ function performWorkClose(d, note){
   if(p){ p.repairs=p.repairs.filter(r=>r.serial!==d.serial);
     d.materials.forEach(m=>{ p.stock=p.stock.map(s=>s.id===m.id?{...s,q:Math.max(0,s.q-m.q)}:s).filter(s=>s.q>0); });
   }
-  const ant=item('ant');
-  if(ant && d.serial==='000966'){
-    ant.stock+=1;
-    if(ant.posts[d.post]){ ant.posts[d.post]=Math.max(0,ant.posts[d.post]-1); if(!ant.posts[d.post]) delete ant.posts[d.post]; }
-    ant.history.push({d:'21.07.2026', type:'in', text:`№${d.serial} возвращена на склад после ремонта (${d.no})`, q:'+1 шт'});
+  const repaired = items.find(x=>x.name===d.item);
+  if(repaired){
+    repaired.stock += 1;
+    if(repaired.posts[d.post]){ repaired.posts[d.post]=Math.max(0,repaired.posts[d.post]-1); if(!repaired.posts[d.post]) delete repaired.posts[d.post]; }
+    repaired.history.push({d:'21.07.2026', type:'in', text:`№${d.serial} возвращена на склад после ремонта (${d.no})`, q:'+1 шт'});
   }
   logAction('Акт выполненных работ закрыт', `${d.no}: ${d.item}, списано ${d.materials.length} позиций материалов${note?' · '+note:''}`, d.post);
   toast('✓ Акт закрыт: материалы списаны');
