@@ -919,3 +919,72 @@ test('regression — rabotnik can no longer freely reassign their own bound post
   assert.equal(right, r.otherPost, 'the correct admin PIN must allow the post reassignment to go through');
   await ctx.close();
 });
+
+test('v1.3 — quantity input accepts decimal comma/dot and rejects letters, negatives, zero and exponent notation', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => ({
+    comma: parseQuantity('1,5'),
+    dot: parseQuantity('2.75'),
+    leadingDot: parseQuantity('.25'),
+    zeroAllowed: parseQuantity('0', true),
+    letters: parseQuantity('1abc'),
+    negative: parseQuantity('-1'),
+    zeroDenied: parseQuantity('0'),
+    exponent: parseQuantity('1e3'),
+    empty: parseQuantity(''),
+  }));
+  assert.equal(r.comma, 1.5, 'Russian decimal comma must not be truncated to an integer');
+  assert.equal(r.dot, 2.75, 'decimal point must remain supported');
+  assert.equal(r.leadingDot, 0.25, 'a fractional value below one must be accepted');
+  assert.equal(r.zeroAllowed, 0, 'zero is valid only in explicitly non-negative fields');
+  assert.equal(r.letters, null, 'letters mixed with a number must be rejected');
+  assert.equal(r.negative, null, 'negative quantities must be rejected');
+  assert.equal(r.zeroDenied, null, 'movement/write-off quantity must be strictly positive');
+  assert.equal(r.exponent, null, 'scientific notation must not bypass the strict input format');
+  assert.equal(r.empty, null, 'an empty value must be rejected');
+
+  const movement = await page.evaluate(() => {
+    currentRole = 'admin';
+    const i = items.find((x) => x.stock >= 2);
+    const post = posts[0].name;
+    const stockBefore = i.stock;
+    const postBefore = i.posts[post] || 0;
+    openQuickTransfer(i.id, 'toPost', post);
+    document.getElementById('qt_qty').value = '0,5';
+    submitQuickTransfer(i.id, 'toPost');
+    const afterFraction = { stock: i.stock, post: i.posts[post] || 0 };
+    openQuickTransfer(i.id, 'toPost', post);
+    document.getElementById('qt_qty').value = '-1';
+    submitQuickTransfer(i.id, 'toPost');
+    return { stockBefore, postBefore, afterFraction, afterInvalid: { stock: i.stock, post: i.posts[post] || 0 } };
+  });
+  assert.equal(movement.afterFraction.stock, movement.stockBefore - 0.5, 'fractional issue must decrement warehouse stock exactly');
+  assert.equal(movement.afterFraction.post, movement.postBefore + 0.5, 'fractional issue must increment post stock exactly');
+  assert.deepEqual(movement.afterInvalid, movement.afterFraction, 'invalid/negative issue must not mutate stock');
+  await ctx.close();
+});
+
+test('v1.3 — only an administrator can reassign a post responsible person', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    const idx = 0;
+    const before = posts[idx].curator;
+    currentRole = 'kladovshik';
+    openPost(idx);
+    const buttonForStorekeeper = [...document.querySelectorAll('#content button')].some((b) => b.textContent.includes('Переназначить ответственного'));
+    const storekeeperResult = updatePostResponsible(idx, 'НЕ ДОЛЖЕН СОХРАНИТЬСЯ');
+    const afterStorekeeper = posts[idx].curator;
+    currentRole = 'admin';
+    openPost(idx);
+    const buttonForAdmin = [...document.querySelectorAll('#content button')].some((b) => b.textContent.includes('Переназначить ответственного'));
+    const adminResult = updatePostResponsible(idx, 'Новый ответственный');
+    return { before, buttonForStorekeeper, storekeeperResult, afterStorekeeper, buttonForAdmin, adminResult, afterAdmin: posts[idx].curator };
+  });
+  assert.equal(r.buttonForStorekeeper, false, 'storekeeper must not see the reassignment control');
+  assert.equal(r.storekeeperResult, false, 'direct function invocation must also be denied for a storekeeper');
+  assert.equal(r.afterStorekeeper, r.before, 'denied reassignment must not alter stored data');
+  assert.equal(r.buttonForAdmin, true, 'administrator must see the reassignment control');
+  assert.equal(r.adminResult, true, 'administrator must be allowed to save a new responsible person');
+  assert.equal(r.afterAdmin, 'Новый ответственный');
+  await ctx.close();
+});

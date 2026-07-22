@@ -2861,9 +2861,9 @@ const extIssues = [
 
 /* ================= РОЛИ И АУДИТ ================= */
 const ROLES = {
-  admin:{label:'Администратор', desc:'Полный доступ ко всей системе', rights:['Создание и удаление карточек и категорий','Передача товаров между складом и постами','Проведение инвентаризации','Выгрузка отчётов и актов в Excel','Создание новых постов','Закрытие актов с расхождением по количеству'], restricted:[]},
-  kladovshik:{label:'Кладовщик', desc:'Складской учёт, акты и выгрузки', rights:['Создание акта дефектовки','Создание акта выполненных работ','Создание карточек и категорий','Выгрузка актов и инвентаризации в Excel'], restricted:['Создание постов недоступно','Закрытие актов с расхождением недоступно']},
-  rabotnik:{label:'Работник (старший на посту)', desc:'Доступ только к своему посту', rights:['Создание акта дефектовки на своём посту','Создание акта выполненных работ','Списание израсходованных материалов'], restricted:['Создание карточек и категорий недоступно','Создание постов недоступно','Закрытие актов с расхождением недоступно']},
+  admin:{label:'Администратор', desc:'Полный доступ ко всей системе', rights:['Создание и удаление карточек и категорий','Передача товаров между складом и постами','Проведение инвентаризации','Выгрузка отчётов и актов в Excel','Создание новых постов','Переназначение ответственных за посты','Закрытие актов с расхождением по количеству'], restricted:[]},
+  kladovshik:{label:'Кладовщик', desc:'Складской учёт, акты и выгрузки', rights:['Создание акта дефектовки','Создание акта выполненных работ','Создание карточек и категорий','Выгрузка актов и инвентаризации в Excel'], restricted:['Создание постов недоступно','Переназначение ответственных недоступно','Закрытие актов с расхождением недоступно']},
+  rabotnik:{label:'Работник (старший на посту)', desc:'Доступ только к своему посту', rights:['Создание акта дефектовки на своём посту','Создание акта выполненных работ','Списание израсходованных материалов'], restricted:['Создание карточек и категорий недоступно','Создание постов недоступно','Переназначение ответственных недоступно','Закрытие актов с расхождением недоступно']},
 };
 let currentRole = 'admin';
 let currentUserPost = 'ТЭЧ'; // пост, к которому привязан текущий пользователь с ролью «Работник»
@@ -2966,6 +2966,29 @@ function todayStr(){
 function nowTimeStr(){
   const d = new Date();
   return `${todayStr()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+// Единые правила количества: десятичная запятая и точка допустимы,
+// буквы, знаки, экспонента, отрицательные и бесконечные значения — нет.
+// Округление защищает остатки от двоичных хвостов вроде 0.30000000000000004.
+function roundQuantity(value){ return Math.round(Number(value) * 1000000) / 1000000; }
+function parseQuantity(raw, allowZero=false){
+  const normalized = String(raw??'').trim().replace(',', '.');
+  if(!/^(?:\d+|\d+\.\d+|\.\d+)$/.test(normalized)) return null;
+  const value = Number(normalized);
+  if(!Number.isFinite(value) || value<0 || (!allowZero && value===0)) return null;
+  return roundQuantity(value);
+}
+function normalizeQuantityInput(el){
+  const raw = String(el.value??'');
+  // Не превращаем случайно "-5" в положительные 5 — очищаем поле целиком.
+  if(/[+-]/.test(raw)){ el.value=''; return; }
+  let value = raw.replace(/\s/g,'').replace(/,/g,'.').replace(/[^\d.]/g,'');
+  const dot = value.indexOf('.');
+  if(dot>=0) value = value.slice(0,dot+1) + value.slice(dot+1).replace(/\./g,'');
+  el.value = value;
+}
+function quantityInputAttrs(){
+  return 'type="text" inputmode="decimal" autocomplete="off" oninput="normalizeQuantityInput(this)"';
 }
 function logAction(action, detail, post, itemId){
   auditLog.unshift({t:nowTimeStr(), user:ROLES[currentRole].label, action, detail, post:post||null, item:itemId||null});
@@ -3741,7 +3764,7 @@ issueExt(){
     <div class="fld"><label>Примечание</label><input id="ei_note" placeholder="Назначение выдачи"></div>
     <div class="fld"><label>Товар</label>
       <select id="ei_item">${items.map(i=>`<option value="${i.id}">${i.icon} ${esc(i.name)} (склад: ${i.stock} ${i.unit})</option>`).join('')}</select></div>
-    <div class="fld"><label>Количество</label><input id="ei_qty" type="number" value="1"></div>
+    <div class="fld"><label>Количество</label><input id="ei_qty" ${quantityInputAttrs()} value="1"></div>
     <div id="ei_list"></div>
     <button class="fbtn" style="width:100%;padding:11px;margin-bottom:10px" onclick="addExtLine()">＋ Добавить позицию в выдачу</button>
     <button class="btn primary" onclick="submitExtIssue()">Оформить выдачу на сторону</button>
@@ -3882,7 +3905,7 @@ inventory(){
         <div class="row">
           <div class="icbox">${i.icon}</div>
           <div class="grow"><div class="t">${esc(i.name)}</div><div class="s">${esc(i.sku)} · учёт: ${i.stock} ${i.unit}</div></div>
-          <input type="number" style="width:70px;text-align:right;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:8px 6px;font-weight:700"
+          <input ${quantityInputAttrs()} style="width:70px;text-align:right;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:8px 6px;font-weight:700"
             placeholder="${i.stock}" value="${counted??''}" onchange="setCount('${i.id}', this.value)">
         </div>
       </div>`;}).join('')}
@@ -4052,8 +4075,8 @@ function openAddItemForm(){
       <div class="fld"><label>Название товара <span class="req">*</span></label><input id="ni_name" placeholder="Например, Разъём XT60"></div>
       <div class="fld"><label>Артикул</label><input id="ni_sku" placeholder="Автоматически, если оставить пустым"></div>
       <div class="fld"><label>Единица измерения <span class="req">*</span></label><input id="ni_unit" placeholder="шт / г / м / компл" value="шт"></div>
-      <div class="fld"><label>Начальный остаток</label><input id="ni_stock" type="number" value="0"></div>
-      <div class="fld"><label>Минимальный остаток</label><input id="ni_min" type="number" value="1"></div>
+      <div class="fld"><label>Начальный остаток</label><input id="ni_stock" ${quantityInputAttrs()} value="0"></div>
+      <div class="fld"><label>Минимальный остаток</label><input id="ni_min" ${quantityInputAttrs()} value="1"></div>
       <div class="fld"><label>Описание</label><textarea id="ni_desc" placeholder="Краткое описание товара"></textarea></div>
       <button class="btn primary" onclick="submitNewItem()">Создать карточку</button>
     `;
@@ -4068,16 +4091,18 @@ function submitNewItem(){
   if(!name){ toast('Введите название товара'); return; }
   const topCat=$('ni_top').value;
   const subCat = topCat==='Комплектующие' ? $('ni_sub').value : undefined;
-  const stockVal=parseFloat($('ni_stock').value);
-  if(stockVal<0){ toast('Начальный остаток не может быть отрицательным'); return; }
+  const stockVal=parseQuantity($('ni_stock').value, true);
+  const minVal=parseQuantity($('ni_min').value, true);
+  if(stockVal===null){ toast('Начальный остаток: введите ноль или положительное число без букв'); return; }
+  if(minVal===null){ toast('Минимальный остаток: введите ноль или положительное число без букв'); return; }
   const sku = $('ni_sku').value.trim() || null;
   if(sku && items.some(x=>x.sku===sku)){ toast('Артикул «'+sku+'» уже используется другим товаром'); return; }
   itemSeq++;
   const finalSku = sku || `НВ-${itemSeq}`;
-  const stock = isNaN(stockVal)?0:stockVal;
+  const stock = stockVal;
   const unit = $('ni_unit').value.trim() || 'шт';
   const newItem = {id:'item'+itemSeq, icon:CAT_ICON[subCat||topCat]||'📦', name, sku:finalSku, topCat, unit,
-    stock, min:parseFloat($('ni_min').value)||1, abc:'C',
+    stock, min:minVal, abc:'C',
     desc:$('ni_desc').value||'', posts:{}, ext:0,
     history:[{d:todayStr(), type:'in', text:'Создание карточки товара', q:`+${stock} ${unit}`}]};
   if(subCat) newItem.subCat=subCat;
@@ -4097,7 +4122,7 @@ function openEditItemForm(id){
       <div class="fld"><label>Название товара</label><input id="ei_name" value="${esc(i.name)}"></div>
       <div class="fld"><label>Артикул</label><input id="ei_sku" value="${esc(i.sku)}"></div>
       <div class="fld"><label>Единица измерения</label><input id="ei_unit" value="${i.unit}"></div>
-      <div class="fld"><label>Минимальный остаток</label><input id="ei_min" type="number" value="${i.min}"></div>
+      <div class="fld"><label>Минимальный остаток</label><input id="ei_min" ${quantityInputAttrs()} value="${i.min}"></div>
       <div class="fld"><label>Описание</label><textarea id="ei_desc">${i.desc||''}</textarea></div>
       <button class="btn primary" onclick="submitEditItem('${id}')">Сохранить изменения</button>
     `;
@@ -4113,7 +4138,9 @@ function submitEditItem(id){
     i.sku=newSku;
   }
   i.unit=$('ei_unit').value.trim()||i.unit;
-  i.min=parseFloat($('ei_min').value)||i.min;
+  const minVal=parseQuantity($('ei_min').value, true);
+  if(minVal===null){ toast('Минимальный остаток: введите ноль или положительное число без букв'); return; }
+  i.min=minVal;
   i.desc=$('ei_desc').value;
   logAction('Карточка отредактирована', `${i.name} (${i.sku})`);
   toast('✓ Изменения сохранены');
@@ -4153,8 +4180,8 @@ function adjustLots(i, delta, breakdown){
       if(remaining<=0) break;
       const take = Math.min(lot.qty, remaining);
       if(take<=0) continue;
-      lot.qty -= take;
-      remaining -= take;
+      lot.qty = roundQuantity(lot.qty - take);
+      remaining = roundQuantity(remaining - take);
       consumed.push({lot:lot.lot, q:take, exp:lot.exp});
     }
     i.lots = i.lots.filter(l=>l.qty>0);
@@ -4163,10 +4190,10 @@ function adjustLots(i, delta, breakdown){
     if(breakdown && breakdown.length){
       breakdown.forEach(b=>{
         const lot = i.lots.find(l=>l.lot===b.lot);
-        if(lot) lot.qty += b.q; else i.lots.push({lot:b.lot, qty:b.q, exp:b.exp||'—'});
+        if(lot) lot.qty = roundQuantity(lot.qty + b.q); else i.lots.push({lot:b.lot, qty:b.q, exp:b.exp||'—'});
       });
     } else if(i.lots.length){
-      i.lots[i.lots.length-1].qty += delta;
+      i.lots[i.lots.length-1].qty = roundQuantity(i.lots[i.lots.length-1].qty + delta);
     } else {
       i.lots.push({lot:'Возврат', qty:delta, exp:'—'});
     }
@@ -4176,18 +4203,18 @@ function adjustLots(i, delta, breakdown){
 function transferToPost(i, postName, qty){
   qty = Math.min(qty, i.stock);
   if(qty<=0) return 0;
-  i.stock -= qty;
+  i.stock = roundQuantity(i.stock - qty);
   const consumed = adjustLots(i, -qty);
-  i.posts[postName] = (i.posts[postName]||0) + qty;
+  i.posts[postName] = roundQuantity((i.posts[postName]||0) + qty);
   i.history.push({d:todayStr(), type:'out', text:`Выдано на пост ${postName}`, q:`−${qty} ${i.unit}`});
   const p = posts.find(p=>p.name===postName);
   if(p){
     const existing = p.stock.find(s=>s.id===i.id);
     if(existing){
-      existing.q += qty;
+      existing.q = roundQuantity(existing.q + qty);
       if(consumed.length){
         existing.lots = existing.lots||[];
-        consumed.forEach(c=>{ const l=existing.lots.find(x=>x.lot===c.lot); if(l) l.q+=c.q; else existing.lots.push({...c}); });
+        consumed.forEach(c=>{ const l=existing.lots.find(x=>x.lot===c.lot); if(l) l.q=roundQuantity(l.q+c.q); else existing.lots.push({...c}); });
       }
     } else {
       p.stock.push({id:i.id, q:qty, lots: consumed.length?consumed.map(c=>({...c})):undefined});
@@ -4199,9 +4226,9 @@ function transferToSklad(i, postName, qty){
   const have = i.posts[postName]||0;
   qty = Math.min(qty, have);
   if(qty<=0) return 0;
-  i.posts[postName] = have - qty;
+  i.posts[postName] = roundQuantity(have - qty);
   if(!i.posts[postName]) delete i.posts[postName];
-  i.stock += qty;
+  i.stock = roundQuantity(i.stock + qty);
   const p = posts.find(p=>p.name===postName);
   let breakdown = null;
   if(p){
@@ -4214,12 +4241,12 @@ function transferToSklad(i, postName, qty){
           if(remaining<=0) break;
           const take = Math.min(l.q, remaining);
           if(take<=0) continue;
-          l.q -= take; remaining -= take;
+          l.q = roundQuantity(l.q - take); remaining = roundQuantity(remaining - take);
           breakdown.push({lot:l.lot, q:take, exp:l.exp});
         }
         existing.lots = existing.lots.filter(l=>l.q>0);
       }
-      existing.q -= qty; if(existing.q<=0) p.stock=p.stock.filter(s=>s.id!==i.id);
+      existing.q = roundQuantity(existing.q - qty); if(existing.q<=0) p.stock=p.stock.filter(s=>s.id!==i.id);
     }
   }
   adjustLots(i, qty, breakdown);
@@ -4238,7 +4265,7 @@ function openQuickTransfer(itemId, direction, presetPost){
       <div class="card static"><div class="row"><div class="icbox">${i.icon}</div><div class="grow"><div class="t">${esc(i.name)}</div><div class="s">${esc(i.sku)} · склад: ${i.stock} ${i.unit}</div></div></div></div>
       <div class="fld"><label>${direction==='toPost'?'Пост назначения':'Пост-источник'} <span class="req">*</span></label>
         <select id="qt_post">${postOptions.length? postOptions.map(p=>`<option ${p===presetPost?'selected':''}>${p}</option>`).join('') : '<option value="">Нет постов с остатком</option>'}</select></div>
-      <div class="fld"><label>Количество <span class="req">*</span></label><input id="qt_qty" type="number" placeholder="${i.unit}" value="1"></div>
+      <div class="fld"><label>Количество <span class="req">*</span></label><input id="qt_qty" ${quantityInputAttrs()} placeholder="${i.unit}" value="1"></div>
       <button class="btn primary" onclick="submitQuickTransfer('${itemId}','${direction}')">${direction==='toPost'?'Выдать':'Вернуть на склад'}</button>
     `;
   }});
@@ -4247,9 +4274,9 @@ function submitQuickTransfer(itemId, direction){
   if(currentRole==='rabotnik'){ toast('🔒 Выдачи недоступны для роли «Работник»'); return; }
   const i=item(itemId);
   const post=$('qt_post').value;
-  const qty=parseFloat($('qt_qty').value);
+  const qty=parseQuantity($('qt_qty').value);
   if(!post){ toast('Выберите пост'); return; }
-  if(!qty || qty<=0){ toast('Укажите количество'); return; }
+  if(qty===null){ toast('Введите положительное количество числом без букв'); return; }
   if(direction==='toPost'){
     if(qty>i.stock){ toast('Недостаточно на складе: '+i.stock+' '+i.unit); return; }
     transferToPost(i, post, qty);
@@ -4320,7 +4347,7 @@ function renderIssuePicker(mode){
           <div class="sel-check ${sel?'on':''}">${sel?'✓':''}</div>
           <div class="icbox">${i.icon}</div>
           <div class="grow"><div class="t">${esc(i.name)}</div><div class="s">${esc(i.sku)} · ${i.subCat||i.topCat} · ${mode==='post'?'склад':'на посту'}: ${avail} ${i.unit}</div>
-            ${sel?`<div class="qty-picker" onclick="event.stopPropagation()"><input type="number" min="0" max="${avail}" value="${issueSelected[i.id]}" onchange="setIssueQty('${i.id}', this.value, ${avail})"><span class="s">${i.unit}</span></div>`:''}
+            ${sel?`<div class="qty-picker" onclick="event.stopPropagation()"><input ${quantityInputAttrs()} value="${issueSelected[i.id]}" onchange="setIssueQty('${i.id}', this.value, ${avail})"><span class="s">${i.unit}</span></div>`:''}
           </div>
         </div>
       </div>`;}).join('') || '<div class="s" style="text-align:center;padding:30px">Ничего не найдено</div>'}
@@ -4340,8 +4367,8 @@ function toggleIssueItem(id, mode, avail){
   views[mode==='post'?'issueToPost':'issueToSklad']();
 }
 function setIssueQty(id, val, avail){
-  let v=parseFloat(val);
-  if(isNaN(v)||v<0) v=0;
+  let v=parseQuantity(val, true);
+  if(v===null){ toast('Введите количество числом без букв и знака минус'); v=0; }
   if(v>avail) v=avail;
   issueSelected[id]=v;
 }
@@ -4366,14 +4393,14 @@ function commitIssue(mode){
 let extDraftLines=[];
 function addExtLine(){
   if(currentRole==='rabotnik'){ toast('🔒 Выдачи недоступны для роли «Работник»'); return; }
-  const id=$('ei_item').value, q=parseFloat($('ei_qty').value);
-  if(!q||q<=0){ toast('Укажите количество'); return; }
+  const id=$('ei_item').value, q=parseQuantity($('ei_qty').value);
+  if(q===null){ toast('Введите положительное количество числом без букв'); return; }
   const i=item(id);
   const already = extDraftLines.filter(l=>l.id===id).reduce((s,l)=>s+l.q,0);
   const remaining = i.stock - already;
   if(q>remaining){ toast('Недостаточно на складе: доступно ещё '+remaining+' '+i.unit); return; }
   const existing = extDraftLines.find(l=>l.id===id);
-  if(existing) existing.q += q; else extDraftLines.push({id,q});
+  if(existing) existing.q = roundQuantity(existing.q + q); else extDraftLines.push({id,q});
   $('ei_list').innerHTML = extDraftLines.map((l,n)=>{const it=item(l.id); return `<div class="mat"><div class="grow"><div class="t">${it.icon} ${esc(it.name)}</div></div><div class="q">${l.q} ${it.unit}</div></div>`;}).join('');
   toast('Позиция добавлена в выдачу');
 }
@@ -4387,7 +4414,7 @@ function submitExtIssue(){
     const i=item(l.id);
     const q=Math.min(l.q, i.stock);
     if(q<=0) return;
-    i.stock -= q; i.ext += q;
+    i.stock = roundQuantity(i.stock - q); i.ext = roundQuantity(i.ext + q);
     adjustLots(i, -q);
     i.history.push({d:todayStr(), type:'out', text:`Выдача на сторону · ${to}`, q:`−${q} ${i.unit}`});
     finalLines.push({id:l.id, q});
@@ -4406,7 +4433,7 @@ function returnExtIssue(idx){
   if(e.status==='Возвращено'){ toast('Возврат по этой выдаче уже оформлен'); return; }
   e.items.forEach(l=>{
     const i=item(l.id);
-    i.stock += l.q; i.ext = Math.max(0, i.ext-l.q);
+    i.stock = roundQuantity(i.stock + l.q); i.ext = roundQuantity(Math.max(0, i.ext-l.q));
     adjustLots(i, l.q);
     i.history.push({d:todayStr(), type:'in', text:`Возврат по выдаче ${e.no} · ${e.to}`, q:`+${l.q} ${i.unit}`});
   });
@@ -4532,7 +4559,8 @@ function openPost(idx){
   render({fn(){
     setHdr(p.name, p.full, true, false);
     $('content').innerHTML = `
-      <div class="s" style="margin-bottom:10px">Куратор: <b style="color:var(--ink)">${esc(p.curator)}</b></div>
+      <div class="s" style="margin-bottom:10px">Ответственный: <b style="color:var(--ink)">${esc(p.curator)}</b></div>
+      ${currentRole==='admin'?`<button class="btn ghost" onclick="openReassignResponsible(${idx})">Переназначить ответственного</button>`:''}
       ${p.repairs.length?`<div class="sec">Изделия в ремонте</div>`+p.repairs.map(r=>`
         <div class="card" onclick="openDoc(${docs.findIndex(d=>d.no===r.doc)})">
           <div class="row">
@@ -4558,6 +4586,36 @@ function openPost(idx){
       <button class="btn primary" onclick="exportPostExcel(${idx})">⤓ Выгрузить акт по посту в Excel</button>
     `;
   }});
+}
+
+function openReassignResponsible(idx){
+  if(currentRole!=='admin'){ toast('🔒 Переназначать ответственных может только администратор'); return; }
+  const p=posts[idx];
+  if(!p){ toast('Пост не найден'); return; }
+  const layer=$('sheetLayer');
+  layer.innerHTML=`
+    <div class="sheet-backdrop" onclick="if(event.target===this) closeSheet()">
+      <div class="sheet">
+        <div class="handle"></div>
+        <div class="sec" style="margin-top:0">Ответственный за пост «${esc(p.name)}»</div>
+        <div class="fld"><label>ФИО или позывной <span class="req">*</span></label><input id="responsibleInput" value="${esc(p.curator==='—'?'':p.curator)}" autofocus></div>
+        <button class="btn primary" onclick="updatePostResponsible(${idx}, $('responsibleInput').value)">Сохранить</button>
+      </div>
+    </div>`;
+}
+function updatePostResponsible(idx, responsible){
+  // Проверка здесь обязательна: скрытая кнопка сама по себе не является защитой.
+  if(currentRole!=='admin'){ toast('🔒 Переназначать ответственных может только администратор'); return false; }
+  const p=posts[idx];
+  const value=String(responsible??'').trim();
+  if(!p || !value){ toast('Укажите ответственного'); return false; }
+  const previous=p.curator||'—';
+  p.curator=value;
+  logAction('Переназначение ответственного', `${p.name}: ${previous} → ${value}`, p.name);
+  closeSheet();
+  toast('✓ Ответственный назначен');
+  openPost(idx);
+  return true;
 }
 
 function openDoc(idx){
@@ -4639,7 +4697,7 @@ function renderWorkDoc(d){
           ${WORK_TYPE_PRESETS.map(t=>`<option value="${esc(t)}">${esc(t)}</option>`).join('')}
           <option value="__custom">Другое (ввести вручную)…</option>
         </select>
-        <input id="addWorkQty" type="number" placeholder="Кол-во" min="0">
+        <input id="addWorkQty" ${quantityInputAttrs()} placeholder="Кол-во">
         <button onclick="addWork('${d.no}')">＋</button>
       </div>
       <div id="addWorkCustomWrap" style="display:none;margin-top:6px">
@@ -4662,7 +4720,7 @@ function renderWorkDoc(d){
       ${closed?'':`
       <div class="addmat addmat-materials">
         <select id="addSel">${items.map(i=>`<option value="${i.id}">${i.icon} ${esc(i.name)}</option>`).join('')}</select>
-        <input id="addQty" type="number" placeholder="Кол-во" min="0">
+        <input id="addQty" ${quantityInputAttrs()} placeholder="Кол-во">
         <button onclick="addMat('${d.no}')">＋</button>
       </div>
       <div class="s" style="margin:6px 2px 0">Или добавьте сканированием QR с этикетки материала</div>`}
@@ -4806,15 +4864,15 @@ function printDoc(no){
 }
 
 function addMat(no){
-  const id=$('addSel').value, q=parseFloat($('addQty').value);
-  if(!q||q<=0){ toast('Укажите количество'); return; }
+  const id=$('addSel').value, q=parseQuantity($('addQty').value);
+  if(q===null){ toast('Введите положительное количество числом без букв'); return; }
   const d=docs.find(x=>x.no===no);
   const it=item(id);
   const existing=d.materials.find(m=>m.id===id);
   const already=existing?existing.q:0;
   const avail=(it.posts[d.post]||0);
   if(already+q>avail){ toast('На посту доступно ещё только '+Math.max(0,avail-already)+' '+it.unit); return; }
-  if(existing) existing.q += q; else d.materials.push({id,q});
+  if(existing) existing.q = roundQuantity(existing.q + q); else d.materials.push({id,q});
   toast('Материал добавлен в акт');
   renderWorkDoc(d);
 }
@@ -4835,9 +4893,9 @@ function toggleActionType(no, type){
 function addWork(no){
   const sel=$('addWorkType').value;
   const type = sel==='__custom' ? ($('addWorkCustom')?.value||'').trim() : sel;
-  const qty = parseFloat($('addWorkQty').value);
+  const qty = parseQuantity($('addWorkQty').value);
   if(!type){ toast('Укажите вид работы'); return; }
-  if(!qty || qty<=0){ toast('Укажите количество'); return; }
+  if(qty===null){ toast('Введите положительное количество числом без букв'); return; }
   const d=docs.find(x=>x.no===no);
   d.works.push({type, qty});
   toast('✓ Работа добавлена в акт');
@@ -4923,8 +4981,8 @@ function consumePostLotsFifo(lotsArr, qty){
   for(const l of lotsArr){
     if(remaining<=0) break;
     const take = Math.min(l.q, remaining);
-    l.q -= take;
-    remaining -= take;
+    l.q = roundQuantity(l.q - take);
+    remaining = roundQuantity(remaining - take);
   }
   return lotsArr.filter(l=>l.q>0);
 }
@@ -4934,7 +4992,7 @@ function performWorkClose(d, note){
   d.materials.forEach(m=>{
     const it=item(m.id);
     const postQ=it.posts[d.post]||0;
-    it.posts[d.post]=Math.max(0,postQ-m.q);
+    it.posts[d.post]=roundQuantity(Math.max(0,postQ-m.q));
     if(!it.posts[d.post]) delete it.posts[d.post];
     it.history.push({d:todayStr(), type:'off', text:`Списано по ${d.no} (${d.item.toLowerCase()})`, q:`−${m.q} ${it.unit}`});
   });
@@ -5053,9 +5111,8 @@ function startCycleCount(){
   render({fn:views.inventory}, false);
 }
 function setCount(id, val){
-  const v = parseFloat(val);
-  if(isNaN(v)){ delete cycleCount.counts[id]; return; }
-  if(v<0){ toast('Остаток не может быть отрицательным'); delete cycleCount.counts[id]; return; }
+  const v = parseQuantity(val, true);
+  if(v===null){ toast('Введите ноль или положительное число без букв'); delete cycleCount.counts[id]; return; }
   cycleCount.counts[id] = v;
 }
 function finishCycleCount(){
