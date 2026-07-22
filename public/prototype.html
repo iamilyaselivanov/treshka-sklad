@@ -78,6 +78,9 @@
   .photo-box img{width:100%; height:100%; object-fit:cover; display:block;}
   .photo-placeholder{width:100%; height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; border:1.5px dashed var(--line); border-radius:14px; box-sizing:border-box; color:var(--muted);}
   .photo-placeholder .s{font-size:9.5px; text-align:center; padding:0 6px; line-height:1.2;}
+  .doc-photo{overflow:hidden;border-radius:14px;border:1px solid var(--line);background:var(--card);margin-bottom:12px}
+  .doc-photo img{display:block;width:100%;max-height:360px;object-fit:contain;background:#111}
+  .doc-photo .caption{padding:9px 12px;font-size:12px;color:var(--muted);font-weight:700}
   .kv{display:flex; justify-content:space-between; padding:9px 0; border-bottom:1px solid var(--line); font-size:13px;}
   .kv:last-child{border-bottom:none;}
   .kv .k{color:var(--muted);}
@@ -2978,14 +2981,14 @@ function logAction(action, detail, post, itemId){
    Если мост недоступен (предпросмотр в обычном браузере вне приложения) —
    используется localStorage, но ТОЛЬКО как временная заглушка прототипа,
    а не как финальное хранилище складского учёта. */
-const APP_SCHEMA_VERSION = 2;
+const APP_SCHEMA_VERSION = 3;
 const STORAGE_FALLBACK_KEY = 'treshka_sklad_state_v1';
 
 /* Версия приложения (отображается в верхней плашке-шапке на каждом экране и
    дублируется на экране "Ещё"). Держим синхронно с android/app/build.gradle →
    defaultConfig.versionName; отдельно от APP_SCHEMA_VERSION, который
    версионирует структуру данных, а не саму сборку приложения. */
-const APP_VERSION = '1.2';
+const APP_VERSION = '1.3';
 
 function nativeStorageBridge(){
   return (typeof window!=='undefined' && window.AndroidStorage && typeof window.AndroidStorage.saveState==='function')
@@ -3019,6 +3022,19 @@ STATE_MIGRATIONS[1] = function(s){
     d.works = (d.works||[]).map(w => typeof w==='string' ? {type:w, qty:1} : w);
   });
   s.schemaVersion = 2;
+  return s;
+};
+
+// v2 → v3: фото заявки хранится один раз в карточке дефектовки. Связанный акт
+// выполненных работ содержит ссылку на дефектовку, а не вторую копию Base64 —
+// это не раздувает SQLite/резервную копию и всё равно автоматически показывает
+// вложение в обоих документах.
+STATE_MIGRATIONS[2] = function(s){
+  (s.docs||[]).forEach(d=>{
+    if(d.kind==='defekt' && typeof d.applicationPhoto !== 'string') d.applicationPhoto = null;
+    if(d.kind==='work' && !d.applicationPhotoSource) d.applicationPhotoSource = d.defektDoc || null;
+  });
+  s.schemaVersion = 3;
   return s;
 };
 
@@ -3444,32 +3460,68 @@ function nativePhotoBridge(){
   return (typeof window!=='undefined' && window.AndroidPhoto && typeof window.AndroidPhoto.pickPhoto==='function')
     ? window.AndroidPhoto : null;
 }
-function requestItemPhoto(id){
-  if(!canManageCatalog()){ toast('🔒 Добавлять фото может только Кладовщик или Администратор'); return; }
+const DEFECT_PHOTO_PICK_TARGET = '__defekt_application_photo__';
+let draftDefektPhoto = null;
+
+function requestPhotoFromDevice(target){
   const bridge = nativePhotoBridge();
   if(bridge){
-    try{ bridge.pickPhoto(id); }
+    try{ bridge.pickPhoto(target); }
     catch(e){ toast('⚠ Не удалось открыть камеру/галерею: '+(e.message||e)); }
     return;
   }
-  // Вне Android-приложения (браузерный предпросмотр) — обычный file input,
-  // чтобы фичу можно было проверить без сборки APK.
   const input = document.createElement('input');
   input.type = 'file'; input.accept = 'image/*';
   input.onchange = () => {
     const file = input.files && input.files[0];
     if(!file) return;
     const reader = new FileReader();
-    reader.onload = () => window.onPhotoPicked(id, reader.result, null);
-    reader.onerror = () => window.onPhotoPicked(id, null, 'Не удалось прочитать файл');
+    reader.onload = () => window.onPhotoPicked(target, reader.result, null);
+    reader.onerror = () => window.onPhotoPicked(target, null, 'Не удалось прочитать файл');
     reader.readAsDataURL(file);
   };
   input.click();
+}
+function requestItemPhoto(id){
+  if(!canManageCatalog()){ toast('🔒 Добавлять фото может только Кладовщик или Администратор'); return; }
+  requestPhotoFromDevice(id);
+}
+function requestDefektApplicationPhoto(){ requestPhotoFromDevice(DEFECT_PHOTO_PICK_TARGET); }
+function renderDefektPhotoDraft(){
+  const box = $('defektPhotoBox');
+  if(!box) return;
+  box.innerHTML = draftDefektPhoto
+    ? `<div class="doc-photo"><img src="${draftDefektPhoto}" alt="Фото заявки"><div class="caption">Фото заявки прикреплено</div></div>
+       <button class="fbtn" style="width:100%;padding:11px" onclick="requestDefektApplicationPhoto()">📷 Заменить фото заявки</button>
+       <button class="fbtn" style="width:100%;padding:11px;margin-top:6px;color:var(--red)" onclick="removeDefektApplicationPhoto()">Удалить фото</button>`
+    : `<button class="fbtn" style="width:100%;padding:11px" onclick="requestDefektApplicationPhoto()">📷 Прикрепить фото заявки</button>`;
+}
+function removeDefektApplicationPhoto(){
+  draftDefektPhoto = null;
+  renderDefektPhotoDraft();
+  toast('Фото заявки удалено из черновика');
+}
+function documentPhotoHtml(photo, caption){
+  return photo ? `<div class="sec">${esc(caption)}</div><div class="doc-photo"><img src="${photo}" alt="${esc(caption)}"><div class="caption">${esc(caption)}</div></div>` : '';
+}
+function workApplicationPhoto(d){
+  if(d.applicationPhoto) return d.applicationPhoto; // совместимость с ранними/ручными данными
+  const sourceNo = d.applicationPhotoSource || d.defektDoc;
+  const source = docs.find(x=>x.kind==='defekt' && x.no===sourceNo);
+  return source && source.applicationPhoto ? source.applicationPhoto : null;
 }
 // Вызывается из Android (см. PhotoBridge.deliverPhoto/deliverPhotoError) либо из
 // браузерного fallback выше. dataUrl — "data:image/jpeg;base64,...", либо null при
 // ошибке/отмене (тогда error содержит текст для пользователя).
 window.onPhotoPicked = function(itemId, dataUrl, error){
+  if(itemId===DEFECT_PHOTO_PICK_TARGET){
+    if(error){ toast('⚠ '+error); return; }
+    if(!dataUrl) return;
+    draftDefektPhoto = dataUrl;
+    renderDefektPhotoDraft();
+    toast('✓ Фото заявки добавлено в дефектовку');
+    return;
+  }
   const i = item(itemId);
   if(!i) return;
   if(error){ toast('⚠ '+error); return; }
@@ -3697,6 +3749,7 @@ issueExt(){
 },
 
 newDefekt(){
+  draftDefektPhoto = null;
   const scoped = isRabotnikRestrictedToPost();
   setHdr('Новый акт дефектовки', scoped?`Пост «${currentUserPost}»`:'Все поля обязательны', true, false);
   $('content').innerHTML = `
@@ -3731,7 +3784,7 @@ newDefekt(){
         <option>Не подлежит ремонту (списание)</option>
         <option>Требуется замена узлов</option>
       </select></div>
-    <div class="fld"><label>Фото дефектов</label><button class="fbtn" style="width:100%;padding:11px" onclick="toast('Демо: камера — фото прикрепится к акту')">📷 Прикрепить фото</button></div>
+    <div class="fld"><label>Фото заявки</label><div id="defektPhotoBox"><button class="fbtn" style="width:100%;padding:11px" onclick="requestDefektApplicationPhoto()">📷 Прикрепить фото заявки</button></div></div>
     <button class="btn primary" id="defSubmit" disabled onclick="submitDefekt()">Закрыть акт дефектовки</button>
   `;
 },
@@ -4533,6 +4586,7 @@ function openDefekt(d){
       <div class="card static"><div class="s" style="font-size:13px;color:var(--ink)">${esc(d.fault)||'—'}</div></div>
       <div class="sec">Выявленные дефекты</div>
       <div class="card static">${(d.defects||[]).map((x,n)=>`<div class="kv"><span class="k">${n+1}.</span><span class="v" style="text-align:left;flex:1;margin-left:8px;font-weight:500">${esc(x)}</span></div>`).join('')}</div>
+      ${documentPhotoHtml(d.applicationPhoto, 'Фото заявки')}
       ${work?`<button class="btn primary" onclick="openDoc(${docs.indexOf(work)})">Открыть ${d.workDoc} →</button>`
             :`<button class="btn primary" onclick="createWorkFromDefekt('${d.no}')">Создать акт выполненных работ</button>`}
       <button class="btn ghost" onclick="printDoc('${d.no}')">⤓ Экспорт в PDF</button>
@@ -4560,6 +4614,7 @@ function renderWorkDoc(d){
         <div class="kv"><span class="k">Дата</span><span class="v">${d.date}</span></div>
         ${d.planQty!=null?`<div class="kv"><span class="k">Получено / годных</span><span class="v" style="${mismatch?'color:var(--red)':''}">${d.planQty} / ${d.factQty??'—'}</span></div>`:''}
       </div>
+      ${documentPhotoHtml(workApplicationPhoto(d), 'Фото заявки · из '+d.defektDoc)}
       <div class="sec">Тип действия <span class="req">*</span></div>
       <div class="card static">
         ${ACT_ACTION_TYPES.map(t=>`
@@ -4949,7 +5004,7 @@ function submitDefekt(){
     serial:serial, item:itemLabel, itemId,
     from:$('f_from').value, callsign:$('f_callsign').value, post:postName,
     fault:$('f_fault').value, defects:$('f_defects').value.split('\n').filter(Boolean),
-    verdict:verdict, workDoc:null});
+    verdict:verdict, applicationPhoto:draftDefektPhoto, workDoc:null});
   if(!verdict.includes('Не подлежит')){
     const p = posts.find(pp=>pp.name===postName);
     if(p) p.repairs.push({serial, item:itemLabel, status:'В ремонте', doc:newNo});
@@ -4976,7 +5031,7 @@ function createWorkFromDefekt(defektNo){
   if(d.workDoc){ toast('Акт выполненных работ уже создан: '+d.workDoc); setTimeout(()=>openDoc(docs.indexOf(docs.find(x=>x.no===d.workDoc))), 300); return; }
   const newNo = 'АВР-'+(200+docs.filter(x=>x.kind==='work').length);
   docs.unshift({no:newNo, kind:'work', status:'Черновик', date:todayStr(), orderNo:d.orderNo,
-    serial:d.serial, item:d.item, itemId:d.itemId, defektDoc:defektNo, post:d.post, planQty:null, factQty:null,
+    serial:d.serial, item:d.item, itemId:d.itemId, defektDoc:defektNo, applicationPhotoSource:defektNo, post:d.post, planQty:null, factQty:null,
     participants:[], works:[], materials:[], actionTypes:[], resultText:'', otkPassed:false});
   d.workDoc = newNo;
   toast('✓ Акт '+newNo+' создан, привязан к '+defektNo);

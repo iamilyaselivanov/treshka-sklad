@@ -439,15 +439,15 @@ test('regression — app version is shown to the user on the "Ещё" screen', a
     render({ fn: views.more });
     return { version: APP_VERSION, html: document.getElementById('content').innerHTML };
   });
-  assert.equal(r.version, '1.1');
-  assert.ok(r.html.includes('версия 1.1'), 'more() screen must render the current app version');
+  assert.equal(r.version, '1.3');
+  assert.ok(r.html.includes('версия 1.3'), 'more() screen must render the current app version');
   await ctx.close();
 });
 
 test('regression — app version is also shown in the persistent top masthead on every screen', async () => {
   const { ctx, page } = await newPage();
   const text = await page.evaluate(() => document.getElementById('mastVersion').textContent);
-  assert.equal(text, 'v1.1');
+  assert.equal(text, 'v1.3');
   await ctx.close();
 });
 
@@ -602,7 +602,7 @@ test('regression — closing a work act requires at least one "Тип дейст
   await ctx.close();
 });
 
-test('regression — schema migration v1→v2 backfills work-act fields and upgrades legacy string works to {type,qty}', async () => {
+test('regression — schema migration v1→v3 preserves old data and backfills work/photo fields', async () => {
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => {
     const base = JSON.parse(JSON.stringify(serializeAppState()));
@@ -625,11 +625,64 @@ test('regression — schema migration v1→v2 backfills work-act fields and upgr
     };
   });
   assert.equal(r.migratedOk, true, 'v1 data must migrate cleanly to the current schema');
-  assert.equal(r.schemaVersion, 2);
+  assert.equal(r.schemaVersion, 3);
   assert.equal(r.hasActionTypes, true, 'migration must backfill actionTypes:[] where missing');
   assert.equal(r.resultTextIsString, true, 'migration must backfill resultText:\'\' where missing');
   assert.equal(r.otkPassedIsBool, true, 'migration must backfill otkPassed:false where missing');
   assert.equal(r.firstWorkIsObject, true, 'migration must convert legacy string work entries to {type, qty:1} objects');
+  await ctx.close();
+});
+
+test('v1.3 — application photo is stored in the defect card and automatically attached to the work act by reference', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.__photoBridgeCalls = [];
+    window.AndroidPhoto = { pickPhoto: (target) => window.__photoBridgeCalls.push(target) };
+  });
+  const r = await page.evaluate(() => {
+    currentRole = 'admin';
+    views.newDefekt();
+    requestDefektApplicationPhoto();
+    const target = window.__photoBridgeCalls[0];
+    const photo = 'data:image/jpeg;base64,ZmFrZS1hcHBsaWNhdGlvbi1waG90bw==';
+    window.onPhotoPicked(target, photo, null);
+    const previewShown = !!document.querySelector('#defektPhotoBox img');
+
+    document.getElementById('f_order').value = 'З-TEST-PHOTO';
+    document.getElementById('f_serial').value = 'Тестовое изделие №123456';
+    document.getElementById('f_date').value = '22.07.2026';
+    document.getElementById('f_from').value = 'Тестовое подразделение';
+    document.getElementById('f_post').value = posts[0].name;
+    document.getElementById('f_callsign').value = 'Тест';
+    document.getElementById('f_fault').value = 'Тестовая неисправность';
+    document.getElementById('f_defects').value = 'Тестовый дефект';
+    document.getElementById('f_verdict').value = 'Ремонтопригодно';
+    submitDefekt();
+
+    const defekt = docs.find((d) => d.kind === 'defekt' && d.orderNo === 'З-TEST-PHOTO');
+    createWorkFromDefekt(defekt.no);
+    const work = docs.find((d) => d.kind === 'work' && d.defektDoc === defekt.no);
+    renderWorkDoc(work);
+    const attachedInWorkCard = !!document.querySelector('.doc-photo img[src^="data:image/jpeg"]');
+    const serialized = JSON.stringify(serializeAppState());
+    const encodedPayload = 'ZmFrZS1hcHBsaWNhdGlvbi1waG90bw==';
+    const storedCopies = serialized.split(encodedPayload).length - 1;
+    return {
+      target,
+      previewShown,
+      defektHasPhoto: defekt.applicationPhoto === photo,
+      workSource: work.applicationPhotoSource,
+      resolvedPhoto: workApplicationPhoto(work),
+      attachedInWorkCard,
+      storedCopies,
+    };
+  });
+  assert.equal(r.target, '__defekt_application_photo__', 'photo picker must receive the dedicated defect-draft target');
+  assert.equal(r.previewShown, true, 'selected application photo must be previewed before the defect is submitted');
+  assert.equal(r.defektHasPhoto, true, 'the photo must be stored in the created defect card');
+  assert.ok(r.workSource && r.workSource.startsWith('ДФ-'), 'work act must retain an explicit reference to the source defect photo');
+  assert.ok(r.resolvedPhoto.startsWith('data:image/jpeg'), 'work act must resolve the photo through its linked defect');
+  assert.equal(r.attachedInWorkCard, true, 'work-act card must visibly render the inherited application photo');
+  assert.equal(r.storedCopies, 1, 'Base64 photo payload must be stored once, not duplicated into the work act');
   await ctx.close();
 });
 
