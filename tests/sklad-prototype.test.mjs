@@ -437,3 +437,37 @@ test('regression — app version is also shown in the persistent top masthead on
   assert.equal(text, 'v1.1');
   await ctx.close();
 });
+
+// Раньше каждое поле поиска на каждый ввод перерисовывало ВЕСЬ экран
+// ($('content').innerHTML = ...), что уничтожало старый <input> — включая
+// тот, на который указывает `this` внутри oninput. this.focus() после этого
+// выполнялся на уже отсоединённом от DOM узле — молча ничего не делал, и
+// клавиатура закрывалась сразу после первого введённого символа (дописать
+// слово было невозможно). Тест дублирует реальный ввод посимвольно через
+// page.type(), а не устанавливает значение целиком — иначе баг не
+// воспроизвести: физический ввод на реальном устройстве и есть посимвольный.
+for (const [screen, inputId, text] of [
+  ['posts', 'postsSearchInput', 'ТЭЧ'],
+  ['docs', 'docsSearchInput', 'ДР-01'],
+  ['ext', 'extSearchInput', 'Иванов'],
+]) {
+  test(`regression — "${screen}" search input keeps focus while typing (was closing the keyboard after 1 char)`, async () => {
+    const { ctx, page } = await newPage();
+    await page.evaluate((s) => go(s), screen);
+    await page.click('#' + inputId);
+    await page.type('#' + inputId, text, { delay: 25 });
+    const value = await page.inputValue('#' + inputId);
+    assert.equal(value, text, `expected full string to be typed into #${inputId}, got "${value}"`);
+    await ctx.close();
+  });
+}
+
+test('regression — sklad-wide search input keeps focus while typing (was closing the keyboard after 1 char)', async () => {
+  const { ctx, page } = await newPage();
+  await page.evaluate(() => go('sklad'));
+  await page.click('#globalSearchInput');
+  await page.type('#globalSearchInput', 'флюс', { delay: 25 });
+  const value = await page.inputValue('#globalSearchInput');
+  assert.equal(value, 'флюс');
+  await ctx.close();
+});

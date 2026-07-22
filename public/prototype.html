@@ -3082,6 +3082,18 @@ let cycleCount = null;
 const stack = [];
 let current = null;
 const $ = id => document.getElementById(id);
+// Баг из ревью: все поля поиска перерисовывают весь экран на каждый ввод
+// (`$('content').innerHTML = ...`), что уничтожает СТАРЫЙ <input> — включая
+// тот, на который указывает `this` внутри oninput-обработчика. Раньше после
+// перерисовки вызывалось `this.focus()` — операция на уже отсоединённом от
+// DOM узле, которая в браузере/WebView молча ничего не делает. Из-за этого
+// клавиатура закрывалась сразу после первого введённого символа: набрать
+// слово целиком было невозможно. Фикс — фокусироваться не на `this`, а на
+// СВЕЖЕМ input, найденном по id уже после перерисовки.
+function refocusSearchInput(id){
+  const el = $(id);
+  if(el){ el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+}
 function esc(s){
   return String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -3421,8 +3433,8 @@ posts(){
   ) : posts.map((p,idx)=>({p,idx}));
   $('content').innerHTML = `
     <div class="fld" style="margin-bottom:12px">
-      <input placeholder="🔍 Поиск по названию, объекту, куратору" value="${esc(postsSearchQ)}"
-        oninput="postsSearchQ=this.value; views.posts(); this.focus(); this.setSelectionRange(this.value.length,this.value.length)">
+      <input id="postsSearchInput" placeholder="🔍 Поиск по названию, объекту, куратору" value="${esc(postsSearchQ)}"
+        oninput="postsSearchQ=this.value; views.posts(); refocusSearchInput('postsSearchInput')">
     </div>
     ${filtered.length?filtered.map(({p,idx})=>`
     <div class="card" onclick="openPost(${idx})">
@@ -3466,8 +3478,8 @@ docs(){
       <button class="btn ghost" style="margin-top:0" onclick="exportInventoryExcel()">⤓ Экспорт инвентаризации</button>
     </div>`}
     <div class="fld" style="margin-bottom:12px">
-      <input placeholder="🔍 Поиск по номеру, изделию, посту, серийному №" value="${esc(docsSearchQ)}"
-        oninput="docsSearchQ=this.value; views.docs(); this.focus(); this.setSelectionRange(this.value.length,this.value.length)">
+      <input id="docsSearchInput" placeholder="🔍 Поиск по номеру, изделию, посту, серийному №" value="${esc(docsSearchQ)}"
+        oninput="docsSearchQ=this.value; views.docs(); refocusSearchInput('docsSearchInput')">
     </div>
     <div class="stats">
       <div class="stat"><div class="n">${nDefekt}</div><div class="l">Дефектовка</div></div>
@@ -3521,8 +3533,8 @@ ext(){
     <div class="sec">Выдачи на сторону</div>
     <button class="btn primary" style="margin:0 0 10px" onclick="extDraftLines=[]; render({fn:views.issueExt})">＋ Новая выдача на сторону</button>
     <div class="fld" style="margin-bottom:12px">
-      <input placeholder="🔍 Поиск по номеру, получателю, примечанию, товару" value="${esc(extSearchQ)}"
-        oninput="extSearchQ=this.value; views.ext(); this.focus(); this.setSelectionRange(this.value.length,this.value.length)">
+      <input id="extSearchInput" placeholder="🔍 Поиск по номеру, получателю, примечанию, товару" value="${esc(extSearchQ)}"
+        oninput="extSearchQ=this.value; views.ext(); refocusSearchInput('extSearchInput')">
     </div>
     ${!visibleExt.length?'<div class="s" style="padding:20px;text-align:center">Ничего не найдено</div>':''}
     ${visibleExt.map(({e,ei})=>`
@@ -3722,8 +3734,8 @@ function renderSkladRoot(){
       <div class="stat"><div class="n">${onPosts}</div><div class="l">Позиций на постах</div></div>
     </div>
     <div class="toolbar">
-      <input class="search" placeholder="🔍 Поиск по всему складу…" value="${globalSearchQ}"
-        oninput="globalSearchQ=this.value; views.sklad(); this.focus(); this.setSelectionRange(this.value.length,this.value.length)">
+      <input id="globalSearchInput" class="search" placeholder="🔍 Поиск по всему складу…" value="${globalSearchQ}"
+        oninput="globalSearchQ=this.value; views.sklad(); refocusSearchInput('globalSearchInput')">
     </div>
     ${categoriesList.map(c=>{
       const st=catStats(c);
@@ -3773,8 +3785,8 @@ function renderSkladList(topCat, subCat){
       <button class="fbtn" onclick="goSklad(${subCat?"['Комплектующие']":'[]'}, true, true)">← ${subCat?'Комплектующие':'Все разделы'}</button>
     </div>
     <div class="toolbar">
-      <input class="search" placeholder="🔍 Поиск в разделе «${title}»…" value="${searchQ}"
-        oninput="searchQ=this.value; views.sklad(); this.focus(); this.setSelectionRange(this.value.length,this.value.length)">
+      <input id="skladListSearchInput" class="search" placeholder="🔍 Поиск в разделе «${title}»…" value="${searchQ}"
+        oninput="searchQ=this.value; views.sklad(); refocusSearchInput('skladListSearchInput')">
       <select class="sort" onchange="sortMode=this.value; views.sklad()">
         <option value="name" ${sortMode==='name'?'selected':''}>По названию</option>
         <option value="qty" ${sortMode==='qty'?'selected':''}>Остаток ↑</option>
@@ -3795,8 +3807,8 @@ function renderSkladSearch(){
   const list=items.filter(i=>(i.name+i.sku).toLowerCase().includes(q));
   $('content').innerHTML = `
     <div class="toolbar">
-      <input class="search" placeholder="🔍 Поиск по всему складу…" value="${globalSearchQ}"
-        oninput="globalSearchQ=this.value; views.sklad(); this.focus(); this.setSelectionRange(this.value.length,this.value.length)">
+      <input id="globalSearchInput" class="search" placeholder="🔍 Поиск по всему складу…" value="${globalSearchQ}"
+        oninput="globalSearchQ=this.value; views.sklad(); refocusSearchInput('globalSearchInput')">
     </div>
     <div class="filters" style="margin-bottom:10px">
       <button class="fbtn" onclick="globalSearchQ=''; views.sklad()">✕ Очистить поиск</button>
@@ -4119,8 +4131,8 @@ function renderIssuePicker(mode){
         ${destOptions.map(p=>`<option ${p===issueDest?'selected':''}>${p}</option>`).join('')}
       </select></div>
     <div class="toolbar">
-      <input class="search" placeholder="🔍 Поиск по всей базе…" value="${issueSearchQ}"
-        oninput="issueSearchQ=this.value; views.${viewFn}(); this.focus(); this.setSelectionRange(this.value.length,this.value.length)">
+      <input id="issueSearchInput" class="search" placeholder="🔍 Поиск по всей базе…" value="${issueSearchQ}"
+        oninput="issueSearchQ=this.value; views.${viewFn}(); refocusSearchInput('issueSearchInput')">
       <select class="sort" onchange="issueSort=this.value; views.${viewFn}()">
         <option value="name" ${issueSort==='name'?'selected':''}>По названию</option>
         <option value="cat" ${issueSort==='cat'?'selected':''}>По категории</option>
