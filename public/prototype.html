@@ -140,9 +140,15 @@
   .mat .q{font-weight:700; color:var(--ink); white-space:nowrap;}
   .mat .del{background:var(--red-soft); color:var(--red); border:none; width:26px; height:26px; border-radius:8px; cursor:pointer; font-size:13px;}
   .addmat{display:flex; gap:6px; margin-top:10px;}
-  .addmat select{flex:1;}
-  .addmat input{width:70px;}
-  .addmat button{background:var(--accent-soft); color:var(--accent); border:none; border-radius:11px; padding:0 14px; font-weight:700; cursor:pointer; font-size:18px;}
+  /* Баг: <select> в flex-строке по умолчанию не сжимается уже длиннее своего
+     содержимого (min-width:auto), даже с flex:1 — длинные названия товаров
+     ("Аттенюатор 10 дБ SMA" и т.п.) раздвигали всю строку .addmat шире экрана.
+     .content/.phone/body растягивают через overflow:hidden по горизонтали,
+     так что кнопка "＋" уезжала за пределы экрана и становилась недоступна —
+     ввести количество можно было, а подтвердить (сохранить) нечем. */
+  .addmat select{flex:1; min-width:0;}
+  .addmat input{width:70px; flex:none; min-width:0;}
+  .addmat button{background:var(--accent-soft); color:var(--accent); border:none; border-radius:11px; padding:0 14px; font-weight:700; cursor:pointer; font-size:18px; flex:none;}
   /* toast */
   .toast{position:absolute; bottom:150px; left:50%; transform:translateX(-50%) translateY(20px); background:#fff; color:#111; padding:11px 18px; border-radius:12px; font-size:12.5px; opacity:0; transition:all .25s; z-index:50; white-space:nowrap; pointer-events:none; max-width:90%; font-weight:600;}
   .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}

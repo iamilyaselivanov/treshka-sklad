@@ -471,3 +471,48 @@ test('regression — sklad-wide search input keeps focus while typing (was closi
   assert.equal(value, 'флюс');
   await ctx.close();
 });
+
+test('regression — "add material" button in an open work act stays on-screen and works (was clipped off-screen)', async () => {
+  // Раньше <select> внутри .addmat (flex-строка: выбор товара + количество +
+  // кнопка "＋") не сжимался уже длиннее своего содержимого — длинное
+  // название товара раздвигало всю строку шире экрана, а .content/.phone/body
+  // обрезают переполнение по горизонтали (overflow:hidden), так что кнопка
+  // "＋" уезжала за пределы видимой области: количество ввести можно было,
+  // подтвердить — нечем. Тест на узком экране (как на реальном телефоне)
+  // проверяет, что кнопка физически видна В ПРЕДЕЛАХ вьюпорта, а не просто
+  // существует в DOM, и что клик по ней реально добавляет материал в акт.
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto(PROTOTYPE_URL);
+  await page.waitForTimeout(250);
+  await page.evaluate(() => {
+    const idx = docs.findIndex((d) => d.no === 'АВР-145');
+    openDoc(idx);
+  });
+  await page.waitForTimeout(150);
+  const before = await page.evaluate(() => docs.find((d) => d.no === 'АВР-145').materials.length);
+  const buttonBox = await page.evaluate(() => {
+    const btn = [...document.querySelectorAll('.addmat button')][0];
+    const r = btn.getBoundingClientRect();
+    return { right: r.right, viewportW: window.innerWidth, visible: r.width > 0 && r.height > 0 };
+  });
+  assert.ok(buttonBox.visible, '"＋" button must actually be rendered with non-zero size');
+  assert.ok(
+    buttonBox.right <= buttonBox.viewportW + 1,
+    `"＋" button must stay within the ${buttonBox.viewportW}px viewport, was at right=${buttonBox.right}`,
+  );
+  // 'battnrtk' (Аккумулятор тяговый НРТК) ещё НЕ в списке материалов этого
+  // акта, но 2 шт доступны на посту "НРТК" (см. posts.stock в демо-данных) —
+  // addMat() добавит НОВУЮ строку в materials[], что и проверяем ниже по
+  // росту длины массива. Если бы товар уже был в акте, addMat() просто
+  // увеличил бы q существующей строки, не меняя длину массива, — поэтому
+  // важно взять товар, которого в акте ещё нет.
+  await page.selectOption('#addSel', 'battnrtk');
+  await page.fill('#addQty', '1');
+  await page.click('.addmat button');
+  await page.waitForTimeout(150);
+  const after = await page.evaluate(() => docs.find((d) => d.no === 'АВР-145').materials.length);
+  assert.equal(after, before + 1, 'clicking the on-screen "＋" button must actually add the material to the act');
+  await ctx.close();
+});
