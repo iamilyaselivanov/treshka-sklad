@@ -178,15 +178,27 @@ test('#7 — schema migration refuses newer-than-known or unmigratable-older dat
   const r = await page.evaluate(() => {
     const base = JSON.parse(JSON.stringify(serializeAppState()));
     const okNewer = applyAppState({ ...base, schemaVersion: APP_SCHEMA_VERSION + 1 });
-    const okOlderNoMigration = APP_SCHEMA_VERSION > 0
+    // Версия, для которой заведомо НЕТ зарегистрированной миграции (ниже самой
+    // старой ступени STATE_MIGRATIONS) — должна быть отвергнута целиком.
+    const okNoMigrationPath = APP_SCHEMA_VERSION > 1
+      ? applyAppState({ ...base, schemaVersion: 0 })
+      : null;
+    // Версия на одну ступень старше текущей ДОЛЖНА успешно мигрировать, если
+    // для неё зарегистрирован шаг в STATE_MIGRATIONS (сейчас это v1 → v2) —
+    // это не "неизвестная" версия, а ровно тот путь обновления, который
+    // STATE_MIGRATIONS/migrateAppState обязаны поддерживать.
+    const okOlderWithMigration = APP_SCHEMA_VERSION > 0
       ? applyAppState({ ...base, schemaVersion: APP_SCHEMA_VERSION - 1 })
       : null;
     const okExact = applyAppState({ ...base });
-    return { okNewer, okOlderNoMigration, okExact };
+    return { okNewer, okNoMigrationPath, okOlderWithMigration, okExact };
   });
   assert.equal(r.okNewer, false, 'must refuse data from a schema version newer than this app understands');
-  if (r.okOlderNoMigration !== null) {
-    assert.equal(r.okOlderNoMigration, false, 'must refuse older data with no registered migration path');
+  if (r.okNoMigrationPath !== null) {
+    assert.equal(r.okNoMigrationPath, false, 'must refuse older data with no registered migration path');
+  }
+  if (r.okOlderWithMigration !== null) {
+    assert.equal(r.okOlderWithMigration, true, 'must successfully migrate older data when a migration step is registered for it');
   }
   assert.equal(r.okExact, true, 'exact schema version match must still apply normally');
   await ctx.close();
@@ -493,7 +505,10 @@ test('regression — "add material" button in an open work act stays on-screen a
   await page.waitForTimeout(150);
   const before = await page.evaluate(() => docs.find((d) => d.no === 'АВР-145').materials.length);
   const buttonBox = await page.evaluate(() => {
-    const btn = [...document.querySelectorAll('.addmat button')][0];
+    // Акт теперь содержит ДВЕ строки .addmat (типовые работы + материалы) —
+    // явно берём материальную (.addmat-materials), иначе тест может
+    // случайно проверить/кликнуть по кнопке добавления работы.
+    const btn = document.querySelector('.addmat-materials button');
     const r = btn.getBoundingClientRect();
     return { right: r.right, viewportW: window.innerWidth, visible: r.width > 0 && r.height > 0 };
   });
@@ -510,9 +525,199 @@ test('regression — "add material" button in an open work act stays on-screen a
   // важно взять товар, которого в акте ещё нет.
   await page.selectOption('#addSel', 'battnrtk');
   await page.fill('#addQty', '1');
-  await page.click('.addmat button');
+  await page.click('.addmat-materials button');
   await page.waitForTimeout(150);
   const after = await page.evaluate(() => docs.find((d) => d.no === 'АВР-145').materials.length);
   assert.equal(after, before + 1, 'clicking the on-screen "＋" button must actually add the material to the act');
+  await ctx.close();
+});
+
+test('regression — exported act filename is human-readable (act number, date, action type), not the bare doc code', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.__savedFiles = [];
+    window.AndroidFiles = {
+      saveExportedFile: (base64, filename, mime) => { window.__savedFiles.push(filename); return true; },
+    };
+    window.__printCalls = [];
+    window.AndroidPrint = { printHtml: (html, job) => { window.__printCalls.push(job); } };
+  });
+  const r = await page.evaluate(() => {
+    exportWorkActExcel('АВР-145');
+    printDoc('АВР-145');
+    printDoc('ДФ-041'); // акт дефектовки — тоже должен получить читаемое имя, без типа действия
+    return { xlsxName: window.__savedFiles[0], pdfJob: window.__printCalls[0], defektJob: window.__printCalls[1] };
+  });
+  assert.equal(r.xlsxName, 'Акт выполненных работ №145 от 17.07.2026 ремонт.xlsx',
+    'xlsx filename must be derived from the act number/date/action type, not just "АВР-145.xlsx"');
+  assert.equal(r.pdfJob, 'Акт выполненных работ №145 от 17.07.2026 ремонт',
+    'print job name (used as the suggested PDF filename) must be human-readable');
+  assert.equal(r.defektJob, 'Акт дефектовки №041 от 16.07.2026',
+    'дефектовочный акт has no action type and must not have one appended to its filename');
+  await ctx.close();
+});
+
+test('regression — work-act "Тип действия"/"Наименование работ"/"Результат"/"ОТК" fields are wired end-to-end', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    const d = docs.find((x) => x.no === 'АВР-147'); // черновик с одним типом действия, ещё не закрыт
+    const beforeStatus = actResultStatus(d.actionTypes);
+    toggleActionType(d.no, 'Модернизация'); // теперь два типа: Диагностика + Модернизация
+    const afterStatus = actResultStatus(d.actionTypes);
+    const worksBefore = d.works.length;
+    d.works.push({ type: 'test-op', qty: 3 });
+    removeWork(d.no, d.works.length - 1);
+    const worksAfterRemove = d.works.length;
+    setResultText(d.no, 'проверка результата');
+    const otkBefore = d.otkPassed;
+    toggleOtk(d.no);
+    const otkAfter = d.otkPassed;
+    return { beforeStatus, afterStatus, worksBefore, worksAfterRemove, resultText: d.resultText, otkBefore, otkAfter };
+  });
+  assert.equal(r.beforeStatus, 'проведена диагностика');
+  assert.equal(r.afterStatus, 'проведена диагностика и модернизировано',
+    'multiple action types must combine their statuses joined by "и"');
+  assert.equal(r.worksAfterRemove, r.worksBefore, 'removeWork must remove exactly the row that addWork/push added');
+  assert.equal(r.resultText, 'проверка результата', 'setResultText must persist the manually-typed result line');
+  assert.notEqual(r.otkAfter, r.otkBefore, 'toggleOtk must flip otkPassed');
+  await ctx.close();
+});
+
+test('regression — closing a work act requires at least one "Тип действия" to be selected', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.__toasts = [];
+  });
+  const r = await page.evaluate(() => {
+    const d = docs.find((x) => x.no === 'АВР-144'); // уже закрыт в демо-данных — берём его форму как рабочий акт
+    const clone = { ...JSON.parse(JSON.stringify(d)), no: 'АВР-TEST-NOACTION', status: 'Черновик', actionTypes: [] };
+    docs.push(clone);
+    closeWork('АВР-TEST-NOACTION');
+    const stillDraft = docs.find((x) => x.no === 'АВР-TEST-NOACTION').status === 'Черновик';
+    const toastMsg = document.getElementById('toast').textContent;
+    docs.pop();
+    return { stillDraft, toastMsg };
+  });
+  assert.equal(r.stillDraft, true, 'closeWork must refuse to close an act with no action type selected');
+  assert.ok(r.toastMsg.includes('тип действия'), 'must explain via toast that an action type is required');
+  await ctx.close();
+});
+
+test('regression — schema migration v1→v2 backfills work-act fields and upgrades legacy string works to {type,qty}', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    const base = JSON.parse(JSON.stringify(serializeAppState()));
+    const legacy = JSON.parse(JSON.stringify(base));
+    legacy.schemaVersion = 1;
+    legacy.docs = legacy.docs.map((d) => {
+      if (d.kind !== 'work') return d;
+      const { actionTypes, resultText, otkPassed, ...rest } = d;
+      return { ...rest, works: (d.works || []).map((w) => w.type) }; // старый формат: works — массив строк
+    });
+    const migrated = migrateAppState(legacy);
+    const workDoc = migrated && migrated.docs.find((d) => d.kind === 'work');
+    return {
+      migratedOk: migrated !== null,
+      schemaVersion: migrated && migrated.schemaVersion,
+      hasActionTypes: Array.isArray(workDoc && workDoc.actionTypes),
+      resultTextIsString: typeof (workDoc && workDoc.resultText) === 'string',
+      otkPassedIsBool: typeof (workDoc && workDoc.otkPassed) === 'boolean',
+      firstWorkIsObject: workDoc && typeof workDoc.works[0] === 'object' && 'type' in workDoc.works[0] && 'qty' in workDoc.works[0],
+    };
+  });
+  assert.equal(r.migratedOk, true, 'v1 data must migrate cleanly to the current schema');
+  assert.equal(r.schemaVersion, 2);
+  assert.equal(r.hasActionTypes, true, 'migration must backfill actionTypes:[] where missing');
+  assert.equal(r.resultTextIsString, true, 'migration must backfill resultText:\'\' where missing');
+  assert.equal(r.otkPassedIsBool, true, 'migration must backfill otkPassed:false where missing');
+  assert.equal(r.firstWorkIsObject, true, 'migration must convert legacy string work entries to {type, qty:1} objects');
+  await ctx.close();
+});
+
+// Читает записи из ZIP, собранного buildZipStore() (метод STORE — без сжатия),
+// без внешних зависимостей: раз данные не сжаты, можно просто пройти по
+// локальным заголовкам и вырезать байты содержимого напрямую.
+function readStoreZipEntries(buf) {
+  const entries = {};
+  let pos = 0;
+  while (pos + 4 <= buf.length && buf.readUInt32LE(pos) === 0x04034b50) {
+    const compression = buf.readUInt16LE(pos + 8);
+    const compSize = buf.readUInt32LE(pos + 18);
+    const nameLen = buf.readUInt16LE(pos + 26);
+    const extraLen = buf.readUInt16LE(pos + 28);
+    const nameStart = pos + 30;
+    const name = buf.toString('utf8', nameStart, nameStart + nameLen);
+    const dataStart = nameStart + nameLen + extraLen;
+    entries[name] = { compression, data: buf.subarray(dataStart, dataStart + compSize) };
+    pos = dataStart + compSize;
+  }
+  return entries;
+}
+
+test('regression — exportWorkActDocx() produces a real, valid, parseable .docx (not a fake/renamed file)', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.AndroidFiles = {
+      saveExportedFile: (base64, filename, mime) => {
+        window.__docxBase64 = base64;
+        window.__docxFilename = filename;
+        window.__docxMime = mime;
+        return true;
+      },
+    };
+  });
+  const r = await page.evaluate(() => {
+    const ok = exportWorkActDocx('АВР-145');
+    return { ok, base64: window.__docxBase64, filename: window.__docxFilename, mime: window.__docxMime };
+  });
+  assert.equal(r.ok, true, 'exportWorkActDocx must report success when the native save bridge accepts the file');
+  assert.equal(r.mime, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+  assert.equal(r.filename, 'Акт выполненных работ №145 от 17.07.2026 ремонт.docx');
+
+  const buf = Buffer.from(r.base64, 'base64');
+  // Валидный ZIP заканчивается записью "End Of Central Directory" (PK\x05\x06).
+  assert.ok(buf.includes(Buffer.from([0x50, 0x4b, 0x05, 0x06])), 'must be a real ZIP container with a valid End-Of-Central-Directory record');
+
+  const entries = readStoreZipEntries(buf);
+  assert.ok(entries['[Content_Types].xml'], 'ZIP must contain [Content_Types].xml');
+  assert.ok(entries['_rels/.rels'], 'ZIP must contain _rels/.rels');
+  assert.ok(entries['word/document.xml'], 'ZIP must contain word/document.xml');
+  Object.values(entries).forEach(e => assert.equal(e.compression, 0, 'all entries must use STORE (no compression), matching what the ZIP writer claims'));
+
+  const docXml = entries['word/document.xml'].data.toString('utf8');
+  assert.ok(docXml.includes('АКТ ВЫПОЛНЕННЫХ РАБОТ №145'), 'document.xml must contain the act title with its number');
+  assert.ok(docXml.includes('«17» июля 2026 г.'), 'document.xml must contain the long-form Russian date');
+  assert.ok(docXml.includes('Ремонт'), 'document.xml must contain the selected action type');
+  assert.ok(docXml.includes('отремонтировано'), 'document.xml must contain the auto-derived result status');
+  assert.ok(docXml.includes('Герасимчук'), 'document.xml must contain the fixed "Передал" signer');
+  assert.ok(docXml.includes('ОТК пройдено ответственный командир отделения ремонтного поста'), 'document.xml must contain the fixed blank OTK signature line');
+  assert.ok(docXml.includes('Флюс паяльный ТТ'), 'document.xml must list the act\'s materials table (from d.materials)');
+  await ctx.close();
+});
+
+test('regression — the updated PDF/print form for a work act matches the new template (not the old bare materials-only layout)', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.__printCalls = [];
+    window.AndroidPrint = { printHtml: (html, job) => { window.__printCalls.push({ job, html }); } };
+  });
+  const r = await page.evaluate(() => { printDoc('АВР-145'); return window.__printCalls[0]; });
+  assert.equal(r.job, 'Акт выполненных работ №145 от 17.07.2026 ремонт');
+  assert.ok(r.html.includes('АКТ ВЫПОЛНЕННЫХ РАБОТ №145'), 'print form must show the new title with act number');
+  assert.ok(r.html.includes('«17» июля 2026 г.'), 'print form must show the long-form Russian date');
+  assert.ok(r.html.includes('Вид действия: Ремонт'), 'print form must show the selected action type(s)');
+  assert.ok(r.html.includes('Наименование работ'), 'print form must include the "Наименование работ" table');
+  assert.ok(r.html.includes('Сборочные работы'), 'print form must list the act\'s works (from d.works)');
+  assert.ok(r.html.includes('отремонтировано'), 'print form must show the auto-derived result status');
+  assert.ok(r.html.includes('ОТК пройдено ответственный командир отделения ремонтного поста'), 'print form must include the fixed blank OTK signature line');
+  assert.ok(r.html.includes('Герасимчук'), 'print form must include the fixed "Передал" signer');
+  await ctx.close();
+});
+
+test('regression — the PDF/print form for a дефектовка act stays on its own simple layout (unaffected by the work-act template change)', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.__printCalls = [];
+    window.AndroidPrint = { printHtml: (html, job) => { window.__printCalls.push({ job, html }); } };
+  });
+  const r = await page.evaluate(() => { printDoc('ДФ-041'); return window.__printCalls[0]; });
+  assert.equal(r.job, 'Акт дефектовки №041 от 16.07.2026');
+  assert.ok(r.html.includes('Акт дефектовки ДФ-041'), 'defekt print form must keep its own simple title');
+  assert.ok(!r.html.includes('Наименование работ'), 'defekt acts have no works table and must not show the work-act template section');
   await ctx.close();
 });

@@ -2569,6 +2569,35 @@ const CAT_ICON = {'ФПВ':'🚁','НРТК':'🤖','НСУ':'🖥','Компл�
   'Комплектующие для НСУ':'📡','Платы программирования':'💾','Расходники':'🧴','Кабели':'〰️','Антенны':'📶','Приёмники управления':'📥','Передатчики управления':'📤'};
 const ABC_INFO = {A:'высокий оборот, критично для остатков', B:'средний оборот', C:'редко расходуется, можно закупать реже'};
 
+/* ================= АКТ ВЫПОЛНЕННЫХ РАБОТ: типовые справочники под бланк =================
+   Поля ниже (actionTypes/works/resultText/otkPassed) — расширение схемы под
+   реальный бумажный бланк «Акт выполненных работ» (см. ревью с образцом .docx):
+   таблица "Наименование работ / Кол-во" с шапкой "Ремонт/Модернизация/.../Изделие/
+   № заявки/Дата", таблица материалов (уже была), строка результата и отметка ОТК. */
+// Тип действия — шапка над таблицей работ, можно выбрать несколько одновременно
+// (например "Ремонт" + "Обслуживание" одного и того же изделия за один заход).
+const ACT_ACTION_TYPES = ['Ремонт','Модернизация','Обслуживание','Изготовление','Диагностика'];
+// Статус для строки результата — автоматически подставляется по выбранным типам
+// действия; при нескольких выбранных типах статусы соединяются через "и"
+// (например "отремонтировано и обслужено"), остальной текст результата
+// (что именно, количество) заполняющий акт вписывает вручную — формулировка
+// каждый раз своя и не сводится к шаблону "название + количество".
+const ACT_ACTION_STATUS = {
+  'Ремонт':'отремонтировано', 'Модернизация':'модернизировано', 'Обслуживание':'обслужено',
+  'Изготовление':'изготовлено', 'Диагностика':'проведена диагностика',
+};
+function actResultStatus(actionTypes){
+  return (actionTypes||[]).map(t=>ACT_ACTION_STATUS[t]).filter(Boolean).join(' и ');
+}
+// Типовые виды работ для таблицы "Наименование работ" — можно добавить и свой
+// вариант текстом (см. addWork()/UI ниже), это лишь подсказки для быстрого выбора.
+const WORK_TYPE_PRESETS = ['Сборочные работы','Регулировочные работы','Монтажные работы','Контрольный облёт'];
+// «Передал» — ПОСТОЯННЫЙ подписант для всех актов выполненных работ (не меняется
+// от акта к акту, поэтому не поле в данных акта, а константа шаблона). «Принял» —
+// сознательно НЕ заполняется данными приложения: в бланке это пустые строки
+// под подпись и ФИО от руки — печатаются как есть, без подстановки.
+const ACT_HANDOVER_SIGNER = { title:'Командир ремонтного взвода БпС оБпС «ВЕГА»', name:'Герасимчук И.А.' };
+
 /* ================= ДАННЫЕ (в памяти, демо) ================= */
 let itemSeq = 1000;
 const items = [
@@ -2798,7 +2827,8 @@ const docs = [
    defektDoc:'ДФ-041', post:'НРТК',
    planQty:1, factQty:null,
    participants:[{worker:'Петров С.', work:'Замена усилителя ACASOM 20W'},{worker:'Петров С.', work:'Замена участка кабеля питания 7 м'}],
-   works:['Замена усилителя ACASOM 20W','Замена участка кабеля питания 7 м','Чистка и пропайка контактов аттенюатора'],
+   actionTypes:['Ремонт'], resultText:'', otkPassed:false,
+   works:[{type:'Сборочные работы',qty:4},{type:'Регулировочные работы',qty:2},{type:'Монтажные работы',qty:1},{type:'Контрольный облёт',qty:4}],
    materials:[{id:'flux',q:10},{id:'solder',q:20},{id:'wire',q:7},{id:'amp',q:1},{id:'att',q:1}]},
   {no:'ДФ-040', kind:'defekt', status:'Закрыт', date:'12.07.2026', orderNo:'З-2198', serial:'000871', item:'Антенна направленная АН-9', itemId:'ant',
    from:'Возврат с объекта «Ретранслятор-3»', callsign:'Игла', post:'ТЭЧ',
@@ -2807,12 +2837,14 @@ const docs = [
   {no:'АВР-144', kind:'work', status:'Закрыт', date:'18.07.2026', orderNo:'З-2198', serial:'000871', item:'Антенна направленная АН-9', itemId:'ant',
    defektDoc:'ДФ-040', post:'ТЭЧ', planQty:1, factQty:1,
    participants:[{worker:'Иванов А.', work:'Замена кронштейна, пропайка разъёма'}],
-   works:['Замена кронштейна, пропайка разъёма'],
+   actionTypes:['Ремонт'], resultText:'антенна направленная АН-9 №000871 в количестве 1 шт', otkPassed:true,
+   works:[{type:'Монтажные работы',qty:1}],
    materials:[{id:'flux',q:15},{id:'solder',q:20}]},
   {no:'АВР-147', kind:'work', status:'Расхождение', date:'19.07.2026', orderNo:'З-2214', serial:'—', item:'Приёмник управления FrSky R-XSR (партия 150 шт)', itemId:null,
    defektDoc:'ДФ-039', post:'ТЭЧ', planQty:150, factQty:147,
    participants:[{worker:'Иванов А.', work:'Входной контроль и настройка партии приёмников'}],
-   works:['Входной контроль партии 150 шт', 'Настройка и биндинг приёмников'],
+   actionTypes:['Диагностика'], resultText:'', otkPassed:false,
+   works:[{type:'Входной контроль партии',qty:150}, {type:'Настройка и биндинг приёмников',qty:147}],
    materials:[{id:'heatshrink',q:2}]},
 ];
 
@@ -2906,7 +2938,7 @@ function logAction(action, detail, post, itemId){
    Если мост недоступен (предпросмотр в обычном браузере вне приложения) —
    используется localStorage, но ТОЛЬКО как временная заглушка прототипа,
    а не как финальное хранилище складского учёта. */
-const APP_SCHEMA_VERSION = 1;
+const APP_SCHEMA_VERSION = 2;
 const STORAGE_FALLBACK_KEY = 'treshka_sklad_state_v1';
 
 /* Версия приложения (отображается в верхней плашке-шапке на каждом экране и
@@ -2932,8 +2964,23 @@ function serializeAppState(){
 // Миграции применяются последовательно от сохранённой версии схемы до текущей,
 // каждая переводит объект строго на следующую версию. Ни одна миграция не должна
 // удалять бизнес-данные — только дополнять недостающие поля значениями по умолчанию.
-// Пример на будущее: STATE_MIGRATIONS[1] = function(s){ s.newField = s.newField ?? default; s.schemaVersion = 2; return s; };
 const STATE_MIGRATIONS = {};
+// v1 → v2: расширение "Акта выполненных работ" под реальный бумажный бланк —
+// тип действия (actionTypes), типовые работы с количеством вместо свободного
+// текста (works: {type,qty} вместо простых строк), текст результата и отметка
+// ОТК. Старые сохранённые данные не теряют works — строки просто оборачиваются
+// в {type, qty:1}, чтобы таблица "Наименование работ" не осталась пустой.
+STATE_MIGRATIONS[1] = function(s){
+  (s.docs||[]).forEach(d=>{
+    if(d.kind!=='work') return;
+    if(!Array.isArray(d.actionTypes)) d.actionTypes = [];
+    if(typeof d.resultText !== 'string') d.resultText = '';
+    if(typeof d.otkPassed !== 'boolean') d.otkPassed = false;
+    d.works = (d.works||[]).map(w => typeof w==='string' ? {type:w, qty:1} : w);
+  });
+  s.schemaVersion = 2;
+  return s;
+};
 
 // Возвращает мигрированный объект СТРОГО на текущей версии схемы, либо null,
 // если безопасно довести данные до текущей версии не удалось (нет миграции для
@@ -4447,6 +4494,36 @@ function renderWorkDoc(d){
         <div class="kv"><span class="k">Дата</span><span class="v">${d.date}</span></div>
         ${d.planQty!=null?`<div class="kv"><span class="k">Получено / годных</span><span class="v" style="${mismatch?'color:var(--red)':''}">${d.planQty} / ${d.factQty??'—'}</span></div>`:''}
       </div>
+      <div class="sec">Тип действия <span class="req">*</span></div>
+      <div class="card static">
+        ${ACT_ACTION_TYPES.map(t=>`
+          <label style="display:flex;align-items:center;gap:10px;padding:6px 0;${closed?'':'cursor:pointer'}">
+            <input type="checkbox" ${d.actionTypes.includes(t)?'checked':''} ${closed?'disabled':''} onchange="toggleActionType('${d.no}','${t}')">
+            <span>${t}</span>
+          </label>`).join('')}
+      </div>
+      <div class="sec">Наименование работ</div>
+      <div class="card static" id="workList">
+        ${d.works.map((w,n)=>`
+          <div class="mat">
+            <div class="icbox" style="width:34px;height:34px;font-size:16px">🔧</div>
+            <div class="grow"><div class="t">${esc(w.type)}</div></div>
+            <div class="q">${w.qty}</div>
+            ${closed?'':`<button class="del" onclick="event.stopPropagation(); removeWork('${d.no}', ${n})">✕</button>`}
+          </div>`).join('') || '<div class="s" style="padding:6px 0">Работы ещё не добавлены</div>'}
+      </div>
+      ${closed?'':`
+      <div class="addmat addmat-works">
+        <select id="addWorkType" onchange="$('addWorkCustomWrap').style.display = this.value==='__custom' ? 'block' : 'none'">
+          ${WORK_TYPE_PRESETS.map(t=>`<option value="${esc(t)}">${esc(t)}</option>`).join('')}
+          <option value="__custom">Другое (ввести вручную)…</option>
+        </select>
+        <input id="addWorkQty" type="number" placeholder="Кол-во" min="0">
+        <button onclick="addWork('${d.no}')">＋</button>
+      </div>
+      <div id="addWorkCustomWrap" style="display:none;margin-top:6px">
+        <input id="addWorkCustom" placeholder="Название вида работ">
+      </div>`}
       <div class="sec">Участники и выполненные работы</div>
       <div class="card static">
         ${(d.participants||[]).map(p=>`<div class="kv"><span class="k">${esc(p.worker)}</span><span class="v" style="text-align:left;flex:1;margin-left:8px;font-weight:500">${esc(p.work)}</span></div>`).join('') || '<div class="s">Не указаны</div>'}
@@ -4462,12 +4539,25 @@ function renderWorkDoc(d){
           </div>`).join('')}
       </div>
       ${closed?'':`
-      <div class="addmat">
+      <div class="addmat addmat-materials">
         <select id="addSel">${items.map(i=>`<option value="${i.id}">${i.icon} ${esc(i.name)}</option>`).join('')}</select>
         <input id="addQty" type="number" placeholder="Кол-во" min="0">
         <button onclick="addMat('${d.no}')">＋</button>
       </div>
-      <div class="s" style="margin:6px 2px 0">Или добавьте сканированием QR с этикетки материала</div>
+      <div class="s" style="margin:6px 2px 0">Или добавьте сканированием QR с этикетки материала</div>`}
+      <div class="sec">Результат выполненных работ</div>
+      <div class="card static">
+        <div class="s" style="margin-bottom:8px">Статус (по типу действия выше): <b style="color:var(--ink)">${esc(actResultStatus(d.actionTypes)) || '— выберите тип действия —'}</b></div>
+        ${closed
+          ? `<div class="s" style="color:var(--ink)">${d.resultText?esc(d.resultText):'Не заполнено'}</div>`
+          : `<textarea id="resultTextInput" placeholder='Например: сброс «Яблоня» в количестве 1 ед.' onchange="setResultText('${d.no}', this.value)">${esc(d.resultText)}</textarea>`}
+      </div>
+      <div class="card static">
+        <label style="display:flex;align-items:center;gap:10px;${closed?'':'cursor:pointer'}">
+          <input type="checkbox" ${d.otkPassed?'checked':''} ${closed?'disabled':''} onchange="toggleOtk('${d.no}')">
+          <span>ОТК пройдено</span>
+        </label>
+      </div>
       ${unresolved
         ? (currentRole==='admin'
           ? `<div class="fld"><label>Причина расхождения <span class="req">*</span></label><textarea id="mm_reason" placeholder="Например, 3 изделия признаны неремонтопригодными" oninput="checkMismatch()">${esc(d.mismatchReason)||''}</textarea></div>
@@ -4479,8 +4569,9 @@ function renderWorkDoc(d){
                </select></div>
              <button class="btn red" id="mm_submit" disabled onclick="resolveMismatch('${d.no}')">Подтвердить решение администратора</button>`
           : `<button class="btn red" disabled>🔒 Закрыть может только администратор</button>`)
-        : `<button class="btn green" onclick="closeWork('${d.no}')">Закрыть акт · списать материалы</button>`}`}
+        : (closed ? '' : `<button class="btn green" onclick="closeWork('${d.no}')">Закрыть акт · списать материалы</button>`)}
       <button class="btn ghost" onclick="printDoc('${d.no}')">⤓ Экспорт в PDF</button>
+      <button class="btn ghost" onclick="exportWorkActDocx('${d.no}')">⤓ Экспорт акта в Word</button>
       <button class="btn ghost" onclick="exportWorkActExcel('${d.no}')">⤓ Экспорт акта в Excel</button>
     `;
     if(unresolved && currentRole==='admin') checkMismatch();
@@ -4490,15 +4581,70 @@ function checkMismatch(){
   const decision=$('mm_decision')?.value;
   if($('mm_submit')) $('mm_submit').disabled = !(reason && decision);
 }
-function printDoc(no){
-  const d=docs.find(x=>x.no===no);
-  const html = `<html><head><title>${no}</title><style>body{font-family:Arial,sans-serif;padding:24px;font-size:13px}h1{font-size:16px}table{width:100%;border-collapse:collapse;margin-top:10px}td{border:1px solid #ccc;padding:6px;font-size:12px}</style></head><body>
-    <h1>${d.kind==='defekt'?'Акт дефектовки':'Акт выполненных работ'} ${d.no}</h1>
-    <p>Изделие: ${esc(d.item)} ${d.serial&&d.serial!=='—'?'№'+d.serial:''}<br>Дата: ${d.date}<br>Пост: ${d.post}</p>
-    ${d.materials?`<table>${d.materials.map(m=>{const it=item(m.id);return `<tr><td>${esc(it.name)}</td><td>${m.q} ${it.unit}</td></tr>`;}).join('')}</table>`:''}
+// Человекочитаемое имя файла для экспортов акта/заявки — вместо голого номера
+// документа (АВР-145.xlsx) формируем "Акт выполненных работ №145 от 17.07.2026
+// ремонт", чтобы файл можно было опознать в проводнике/почте без открытия.
+function sanitizeFilename(s){
+  return String(s||'').replace(/[\\/:*?"<>|]/g,'_').replace(/\s+/g,' ').trim();
+}
+function actFileTitle(d){
+  const numMatch = /(\d+)\s*$/.exec(String(d.no||''));
+  const num = numMatch ? numMatch[1] : (d.no||'');
+  let title = d.kind==='defekt' ? `Акт дефектовки №${num} от ${d.date}` : `Акт выполненных работ №${num} от ${d.date}`;
+  if(d.kind!=='defekt' && d.actionTypes && d.actionTypes.length){
+    title += ' ' + d.actionTypes.map(t=>t.toLowerCase()).join(' и ');
+  }
+  return title;
+}
+const PRINT_DOC_STYLE = `body{font-family:Arial,sans-serif;padding:24px;font-size:13px}
+  h1{font-size:16px;margin-bottom:2px} .sub{font-size:13px;font-weight:normal;margin-bottom:14px}
+  table{width:100%;border-collapse:collapse;margin-top:10px} td,th{border:1px solid #ccc;padding:6px;font-size:12px;text-align:left}
+  .sec{font-weight:bold;margin-top:16px;margin-bottom:4px} .blank{margin-top:18px}
+  .sigrow{display:flex;justify-content:space-between;margin-top:6px}`;
+
+// Печатная форма акта выполненных работ — повторяет структуру .docx-экспорта
+// (см. exportWorkActDocx()/buildWorkActDocumentXml()), чтобы печатная и
+// docx-версии акта не расходились: тип действия, обе таблицы, результат
+// (авто-статус + вручную введённый текст), строка ОТК и подписи.
+function buildWorkActPrintHtml(d, title){
+  const workRows = (d.works||[]).map(w=>`<tr><td>${esc(w.type)}</td><td>${esc(String(w.qty))}</td></tr>`).join('')
+    || '<tr><td colspan="2">— не указаны —</td></tr>';
+  const matRows = (d.materials||[]).map(m=>{const it=item(m.id); return `<tr><td>${it?esc(it.name):esc(m.id)}</td><td>${it?esc(it.sku):''}</td><td>${it?`${m.q} ${it.unit}`:m.q}</td></tr>`;}).join('')
+    || '<tr><td colspan="3">— не использовались —</td></tr>';
+  const statusLine = actResultStatus(d.actionTypes);
+  const resultLine = [statusLine, (d.resultText||'').trim()].filter(Boolean).join(' — ') || '—';
+  return `<html><head><title>${esc(title)}</title><style>${PRINT_DOC_STYLE}</style></head><body>
+    <h1>АКТ ВЫПОЛНЕННЫХ РАБОТ №${esc((/(\d+)\s*$/.exec(d.no||'')||[])[1]||d.no)}</h1>
+    <div class="sub">от ${esc(formatActDateLong(d.date))}</div>
+    <p>Изделие: ${esc(d.item)}${d.serial&&d.serial!=='—'?' № '+esc(d.serial):''}<br>
+    ${d.orderNo?`Наряд-задание: ${esc(d.orderNo)}<br>`:''}${d.defektDoc?`Акт дефектовки: ${esc(d.defektDoc)}<br>`:''}
+    Пост: ${esc(d.post)}<br>Вид действия: ${esc((d.actionTypes||[]).join(', ')||'—')}</p>
+    <div class="sec">Наименование работ</div>
+    <table><tr><th>Наименование работы</th><th>Кол-во</th></tr>${workRows}</table>
+    <div class="sec">Израсходованные материалы</div>
+    <table><tr><th>Материал</th><th>Артикул</th><th>Кол-во</th></tr>${matRows}</table>
+    <div class="sec">Результат выполненных работ</div>
+    <p>${esc(resultLine)}</p>
+    <p class="blank">ОТК пройдено ответственный командир отделения ремонтного поста __________________________ (ФИО, подпись)</p>
+    <div class="sigrow"><span>Передал: ${esc(ACT_HANDOVER_SIGNER.title)} _________________ ${esc(ACT_HANDOVER_SIGNER.name)}</span></div>
+    <div class="sigrow"><span>Принял: _________________________________________ (ФИО, подпись)</span></div>
     <script>window.onload=()=>window.print();<\/script>
   </body></html>`;
-  printHtmlDocument(html, 'Акт '+no);
+}
+function buildDefektPrintHtml(d, title){
+  const matRows = d.materials ? `<table>${d.materials.map(m=>{const it=item(m.id);return `<tr><td>${esc(it.name)}</td><td>${m.q} ${it.unit}</td></tr>`;}).join('')}</table>` : '';
+  return `<html><head><title>${esc(title)}</title><style>${PRINT_DOC_STYLE}</style></head><body>
+    <h1>Акт дефектовки ${esc(d.no)}</h1>
+    <p>Изделие: ${esc(d.item)} ${d.serial&&d.serial!=='—'?'№'+esc(d.serial):''}<br>Дата: ${esc(d.date)}<br>Пост: ${esc(d.post)}</p>
+    ${matRows}
+    <script>window.onload=()=>window.print();<\/script>
+  </body></html>`;
+}
+function printDoc(no){
+  const d=docs.find(x=>x.no===no);
+  const title = actFileTitle(d);
+  const html = d.kind==='defekt' ? buildDefektPrintHtml(d, title) : buildWorkActPrintHtml(d, title);
+  printHtmlDocument(html, sanitizeFilename(title));
 }
 
 function addMat(no){
@@ -4521,6 +4667,46 @@ function removeMat(no, index){
   renderWorkDoc(d);
 }
 
+/* ---- Тип действия / Наименование работ (таблица бланка "Акт выполненных работ") ---- */
+function toggleActionType(no, type){
+  const d=docs.find(x=>x.no===no);
+  const idx=d.actionTypes.indexOf(type);
+  if(idx>=0) d.actionTypes.splice(idx,1); else d.actionTypes.push(type);
+  renderWorkDoc(d);
+}
+function addWork(no){
+  const sel=$('addWorkType').value;
+  const type = sel==='__custom' ? ($('addWorkCustom')?.value||'').trim() : sel;
+  const qty = parseFloat($('addWorkQty').value);
+  if(!type){ toast('Укажите вид работы'); return; }
+  if(!qty || qty<=0){ toast('Укажите количество'); return; }
+  const d=docs.find(x=>x.no===no);
+  d.works.push({type, qty});
+  toast('✓ Работа добавлена в акт');
+  renderWorkDoc(d);
+}
+function removeWork(no, index){
+  const d=docs.find(x=>x.no===no);
+  d.works.splice(index,1);
+  toast('Работа убрана из акта');
+  renderWorkDoc(d);
+}
+// Результат — намеренно НЕ вызывает renderWorkDoc() на каждый ввод (в отличие
+// от остальных обработчиков в этом файле): re-render на oninput уничтожал бы
+// сам <textarea> и терял фокус/клавиатуру после первого символа — ровно тот
+// баг, что был найден и исправлен в полях поиска (см. refocusSearchInput()).
+// Поле результата ни на что живое на экране не влияет, поэтому здесь просто
+// onchange (фиксация значения при потере фокуса) без всякой перерисовки.
+function setResultText(no, val){
+  const d=docs.find(x=>x.no===no);
+  d.resultText = val;
+}
+function toggleOtk(no){
+  const d=docs.find(x=>x.no===no);
+  d.otkPassed = !d.otkPassed;
+  renderWorkDoc(d);
+}
+
 function hasUnresolvedMismatch(d){
   return d.planQty!=null && d.factQty!=null && d.planQty!==d.factQty && d.mismatchDecision!=='accept';
 }
@@ -4535,6 +4721,7 @@ function closeWork(no){
   const d=docs.find(x=>x.no===no);
   if(d.status==='Закрыт'){ toast('Акт уже закрыт'); return; }
   if(hasUnresolvedMismatch(d)){ toast('Сначала укажите причину расхождения и решение выше'); return; }
+  if(!d.actionTypes || !d.actionTypes.length){ toast('Укажите тип действия (Ремонт/Модернизация/Обслуживание/Изготовление/Диагностика)'); return; }
   const shortfalls = findMaterialShortfalls(d);
   if(shortfalls.length){
     const s0=shortfalls[0];
@@ -4557,6 +4744,7 @@ function resolveMismatch(no){
     toast('↩ Акт возвращён на доработку — расхождение остаётся под контролем администратора');
     setTimeout(()=>go('docs'), 800);
   } else {
+    if(!d.actionTypes || !d.actionTypes.length){ toast('Укажите тип действия (Ремонт/Модернизация/Обслуживание/Изготовление/Диагностика) перед закрытием'); return; }
     const shortfalls = findMaterialShortfalls(d);
     if(shortfalls.length){
       const s0=shortfalls[0];
@@ -4664,7 +4852,7 @@ function createWorkFromDefekt(defektNo){
   const newNo = 'АВР-'+(200+docs.filter(x=>x.kind==='work').length);
   docs.unshift({no:newNo, kind:'work', status:'Черновик', date:todayStr(), orderNo:d.orderNo,
     serial:d.serial, item:d.item, itemId:d.itemId, defektDoc:defektNo, post:d.post, planQty:null, factQty:null,
-    participants:[], works:[], materials:[]});
+    participants:[], works:[], materials:[], actionTypes:[], resultText:'', otkPassed:false});
   d.workDoc = newNo;
   toast('✓ Акт '+newNo+' создан, привязан к '+defektNo);
   setTimeout(()=>openDoc(docs.indexOf(docs.find(x=>x.no===newNo))), 400);
@@ -4862,7 +5050,7 @@ function exportWorkActExcel(no){
   const matRows=[['Материал','Артикул','Количество']];
   d.materials.forEach(m=>{const it=item(m.id); if(it) matRows.push([it.name,it.sku,`${m.q} ${it.unit}`]);});
 
-  const ok = xlsxDownload(`${no}.xlsx`, [
+  const ok = xlsxDownload(`${sanitizeFilename(actFileTitle(d))}.xlsx`, [
     {name:'Акт', rows:infoRows},
     {name:'Материалы', rows:matRows},
   ]);
@@ -4874,6 +5062,267 @@ function exportInventoryExcel(){
   items.forEach(i=>rows.push([i.sku,i.name,i.stock,i.unit]));
   const ok = xlsxDownload('inventarizatsiya.xlsx', [{name:'Инвентаризация', rows}]);
   if(ok) logAction('Экспорт инвентаризации в Excel', `${items.length} позиций`);
+  return ok;
+}
+
+/* ================= ЭКСПОРТ АКТА ВЫПОЛНЕННЫХ РАБОТ В .DOCX =================
+   В песочнице нет доступа к Maven/npm-библиотекам для генерации DOCX
+   (docxtemplater/JSZip и т.п. недоступны — см. заметки по сети в этом же
+   проекте), поэтому здесь от руки собирается МИНИМАЛЬНЫЙ валидный .docx:
+   ZIP-контейнер методом STORE (без сжатия — не нужна реализация DEFLATE,
+   только CRC32) + собственноручно написанный WordprocessingML
+   (word/document.xml), повторяющий разметку бланка, который прислал
+   пользователь (Акт__выполненных_работ_ТЭЧ_склад.docx): заголовок с номером
+   и датой, таблица "Наименование работ", таблица "Израсходованные
+   материалы", строка результата (авто-статус + вручную введённый текст),
+   строка "ОТК пройдено ..." и блок подписей (Передал — фиксированный
+   подписант; Принял/ОТК — пустые строки под рукописную подпись).
+   Сохранение — через УЖЕ существующий универсальный мост
+   nativeFileBridge()/arrayBufferToBase64() (тот же, что использует xlsx-
+   экспорт), просто с новым MIME-типом .docx. */
+
+const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+const MONTH_NAMES_GENITIVE = ['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
+// 'DD.MM.YYYY' → «DD» MonthName YYYY г. — формат заголовка бланка.
+function formatActDateLong(dateStr){
+  const m = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(String(dateStr||''));
+  if(!m) return String(dateStr||'');
+  const dd = m[1], monIdx = parseInt(m[2],10)-1, yyyy = m[3];
+  const mon = MONTH_NAMES_GENITIVE[monIdx] || m[2];
+  return `«${dd}» ${mon} ${yyyy} г.`;
+}
+
+/* ---- CRC32 (нужен для локальных/центральных заголовков ZIP-записей) ---- */
+let _crc32Table = null;
+function crc32(bytes){
+  if(!_crc32Table){
+    _crc32Table = new Uint32Array(256);
+    for(let n=0;n<256;n++){
+      let c=n;
+      for(let k=0;k<8;k++) c = (c&1) ? (0xEDB88320 ^ (c>>>1)) : (c>>>1);
+      _crc32Table[n]=c>>>0;
+    }
+  }
+  let crc = 0xFFFFFFFF;
+  for(let i=0;i<bytes.length;i++) crc = _crc32Table[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8);
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+/* ---- Минимальный ZIP-writer, метод STORE (без сжатия) ----
+   files: [{name: 'word/document.xml', data: Uint8Array}, ...]
+   Возвращает Uint8Array — целиком собранный .zip (= .docx после переименования). */
+function buildZipStore(files){
+  const enc = (typeof TextEncoder!=='undefined') ? new TextEncoder() : null;
+  const toUtf8 = s => enc ? enc.encode(s) : new Uint8Array([...unescape(encodeURIComponent(s))].map(c=>c.charCodeAt(0)));
+  const FIXED_DOS_TIME = 0x0000;
+  const FIXED_DOS_DATE = 0x5021; // произвольная валидная DOS-дата (21 января 2020) — не влияет на открытие файла Word'ом
+
+  const localChunks = [];
+  const centralChunks = [];
+  let offset = 0;
+
+  files.forEach(f=>{
+    const nameBytes = toUtf8(f.name);
+    const data = f.data;
+    const crc = crc32(data);
+    const size = data.length;
+
+    const lh = new Uint8Array(30 + nameBytes.length);
+    const lv = new DataView(lh.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true);
+    lv.setUint16(6, 0, true);
+    lv.setUint16(8, 0, true);
+    lv.setUint16(10, FIXED_DOS_TIME, true);
+    lv.setUint16(12, FIXED_DOS_DATE, true);
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, size, true);
+    lv.setUint32(22, size, true);
+    lv.setUint16(26, nameBytes.length, true);
+    lv.setUint16(28, 0, true);
+    lh.set(nameBytes, 30);
+    localChunks.push(lh, data);
+
+    const ch = new Uint8Array(46 + nameBytes.length);
+    const cv = new DataView(ch.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint16(8, 0, true);
+    cv.setUint16(10, 0, true);
+    cv.setUint16(12, FIXED_DOS_TIME, true);
+    cv.setUint16(14, FIXED_DOS_DATE, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, size, true);
+    cv.setUint32(24, size, true);
+    cv.setUint16(28, nameBytes.length, true);
+    cv.setUint16(30, 0, true);
+    cv.setUint16(32, 0, true);
+    cv.setUint16(34, 0, true);
+    cv.setUint16(36, 0, true);
+    cv.setUint32(38, 0, true);
+    cv.setUint32(42, offset, true);
+    ch.set(nameBytes, 46);
+    centralChunks.push(ch);
+
+    offset += lh.length + data.length;
+  });
+
+  const centralStart = offset;
+  const centralSize = centralChunks.reduce((a,c)=>a+c.length, 0);
+
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(4, 0, true);
+  ev.setUint16(6, 0, true);
+  ev.setUint16(8, files.length, true);
+  ev.setUint16(10, files.length, true);
+  ev.setUint32(12, centralSize, true);
+  ev.setUint32(16, centralStart, true);
+  ev.setUint16(20, 0, true);
+
+  const out = new Uint8Array(centralStart + centralSize + eocd.length);
+  let pos = 0;
+  localChunks.forEach(c=>{ out.set(c, pos); pos += c.length; });
+  centralChunks.forEach(c=>{ out.set(c, pos); pos += c.length; });
+  out.set(eocd, pos);
+  return out;
+}
+
+/* ---- Вспомогательные билдеры WordprocessingML (word/document.xml) ---- */
+function wPara(text, opts){
+  opts = opts || {};
+  const rPr = [];
+  if(opts.bold) rPr.push('<w:b/>');
+  if(opts.size) rPr.push(`<w:sz w:val="${opts.size}"/>`);
+  const pPr = [];
+  if(opts.align) pPr.push(`<w:jc w:val="${opts.align}"/>`);
+  pPr.push(`<w:spacing w:after="${opts.spacingAfter!=null?opts.spacingAfter:120}"/>`);
+  const rPrXml = rPr.length ? `<w:rPr>${rPr.join('')}</w:rPr>` : '';
+  const lines = String(text==null?'':text).split('\n');
+  const runsXml = lines.map((line,i)=>
+    (i>0?'<w:r><w:br/></w:r>':'') + `<w:r>${rPrXml}<w:t xml:space="preserve">${esc(line)}</w:t></w:r>`
+  ).join('');
+  return `<w:p><w:pPr>${pPr.join('')}</w:pPr>${runsXml}</w:p>`;
+}
+function wCell(text, opts){
+  opts = opts || {};
+  const w = opts.width!=null ? `<w:tcW w:w="${opts.width}" w:type="dxa"/>` : '<w:tcW w:w="0" w:type="auto"/>';
+  const pPr = opts.align ? `<w:pPr><w:jc w:val="${opts.align}"/></w:pPr>` : '';
+  const rPr = opts.bold ? '<w:rPr><w:b/></w:rPr>' : '';
+  return `<w:tc><w:tcPr>${w}<w:vAlign w:val="center"/></w:tcPr><w:p>${pPr}<w:r>${rPr}<w:t xml:space="preserve">${esc(text==null?'':text)}</w:t></w:r></w:p></w:tc>`;
+}
+function wRow(cells){ return `<w:tr>${cells.join('')}</w:tr>`; }
+const TBL_BORDERS = `<w:tblBorders>
+  <w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+  <w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+  <w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+  <w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+  <w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+  <w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>
+</w:tblBorders>`;
+function wTable(rowsXml){
+  return `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>${TBL_BORDERS}</w:tblPr><w:tblGrid/>${rowsXml.join('')}</w:tbl>`;
+}
+
+/* Собирает word/document.xml для конкретного акта — разметка повторяет
+   структуру присланного пользователем бланка (см. историю обсуждения):
+   заголовок с номером/датой, тип действия, таблица работ, таблица
+   материалов, строка результата (авто-статус + ручной текст), строка ОТК,
+   блок подписей (Передал — фиксированный, Принял — под рукописную подпись). */
+function buildWorkActDocumentXml(d){
+  const body = [];
+  body.push(wPara(`АКТ ВЫПОЛНЕННЫХ РАБОТ №${(/(\d+)\s*$/.exec(d.no||'')||[])[1]||d.no}`, {bold:true, size:28, align:'center', spacingAfter:40}));
+  body.push(wPara(`от ${formatActDateLong(d.date)}`, {align:'center', spacingAfter:200}));
+
+  body.push(wPara(`Изделие: ${d.item||''}${d.serial&&d.serial!=='—'?' № '+d.serial:''}`));
+  if(d.orderNo) body.push(wPara(`Наряд-задание: ${d.orderNo}`));
+  if(d.defektDoc) body.push(wPara(`Акт дефектовки: ${d.defektDoc}`));
+  body.push(wPara(`Пост: ${d.post||''}`));
+  body.push(wPara(`Вид действия: ${(d.actionTypes||[]).join(', ')||'—'}`, {spacingAfter:200}));
+
+  body.push(wPara('Наименование работ', {bold:true, spacingAfter:60}));
+  const workRows = [ wRow([wCell('№ п/п',{bold:true,align:'center',width:600}), wCell('Наименование работы',{bold:true}), wCell('Кол-во',{bold:true,align:'center',width:1200})]) ];
+  (d.works||[]).forEach((w,i)=> workRows.push(wRow([wCell(String(i+1),{align:'center'}), wCell(w.type), wCell(String(w.qty),{align:'center'})])) );
+  if(!(d.works||[]).length) workRows.push(wRow([wCell('',{align:'center'}), wCell('— не указаны —'), wCell('',{align:'center'})]));
+  body.push(wTable(workRows));
+
+  body.push(wPara('Израсходованные материалы', {bold:true, spacingAfter:60}));
+  const matRows = [ wRow([wCell('№ п/п',{bold:true,align:'center',width:600}), wCell('Материал',{bold:true}), wCell('Артикул',{bold:true}), wCell('Кол-во',{bold:true,align:'center',width:1200})]) ];
+  (d.materials||[]).forEach((m,i)=>{
+    const it = item(m.id);
+    matRows.push(wRow([wCell(String(i+1),{align:'center'}), wCell(it?it.name:m.id), wCell(it?it.sku:''), wCell(it?`${m.q} ${it.unit}`:String(m.q),{align:'center'})]));
+  });
+  if(!(d.materials||[]).length) matRows.push(wRow([wCell('',{align:'center'}), wCell('— не использовались —'), wCell(''), wCell('',{align:'center'})]));
+  body.push(wTable(matRows));
+
+  const statusLine = actResultStatus(d.actionTypes);
+  const resultLine = [statusLine, (d.resultText||'').trim()].filter(Boolean).join(' — ');
+  body.push(wPara('Результат выполненных работ:', {bold:true, spacingAfter:40}));
+  body.push(wPara(resultLine || '—', {spacingAfter:200}));
+
+  body.push(wPara('ОТК пройдено ответственный командир отделения ремонтного поста __________________________ (ФИО, подпись)', {spacingAfter:300}));
+
+  body.push(wTable([
+    wRow([wCell('Передал:',{bold:true,width:2200}), wCell(`${ACT_HANDOVER_SIGNER.title} _________________ ${ACT_HANDOVER_SIGNER.name}`)]),
+    wRow([wCell('Принял:',{bold:true,width:2200}), wCell('_________________________________________ (ФИО, подпись)')]),
+  ]));
+
+  body.push('<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="850" w:bottom="1134" w:left="1701" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr>');
+
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body.join('')}</w:body></w:document>`;
+}
+
+const DOCX_CONTENT_TYPES_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>`;
+const DOCX_RELS_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`;
+
+function buildWorkActDocxBytes(d){
+  const enc = (typeof TextEncoder!=='undefined') ? new TextEncoder() : null;
+  const toBytes = s => enc ? enc.encode(s) : new Uint8Array([...unescape(encodeURIComponent(s))].map(c=>c.charCodeAt(0)));
+  const files = [
+    {name:'[Content_Types].xml', data:toBytes(DOCX_CONTENT_TYPES_XML)},
+    {name:'_rels/.rels', data:toBytes(DOCX_RELS_XML)},
+    {name:'word/document.xml', data:toBytes(buildWorkActDocumentXml(d))},
+  ];
+  return buildZipStore(files);
+}
+
+function exportWorkActDocx(no){
+  const d = docs.find(x=>x.no===no);
+  if(!d){ toast('⚠ Акт не найден'); return false; }
+  let ok = true, errMsg = '';
+  const filename = `${sanitizeFilename(actFileTitle(d))}.docx`;
+  try{
+    const bytes = buildWorkActDocxBytes(d);
+    const fileBridge = nativeFileBridge();
+    if(fileBridge){
+      try{
+        const base64 = arrayBufferToBase64(bytes);
+        const saved = !!fileBridge.saveExportedFile(base64, filename, DOCX_MIME);
+        if(saved) toast('⤓ Файл '+filename+' сохранён в папку "Загрузки"');
+        else { ok=false; errMsg='Устройство отклонило сохранение файла (нет доступа к хранилищу?)'; }
+      }catch(e){ ok=false; errMsg='Ошибка сохранения на устройство: '+(e.message||e); }
+    } else {
+      const blob = new Blob([bytes], {type:DOCX_MIME});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href=url; a.download=filename; document.body.appendChild(a); a.click();
+      setTimeout(()=>{document.body.removeChild(a); URL.revokeObjectURL(url);}, 300);
+      toast('⤓ Файл '+filename+' скачан');
+    }
+  }catch(e){ ok=false; errMsg = e.message||String(e); }
+  if(!ok){ toast('⚠ Ошибка сохранения .docx: '+errMsg); console.error('exportWorkActDocx failed:', errMsg); }
+  if(ok) logAction('Экспорт акта работ в Word', no, d.post);
   return ok;
 }
 
