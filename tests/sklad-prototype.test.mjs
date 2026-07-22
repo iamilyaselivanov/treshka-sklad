@@ -281,6 +281,61 @@ test('#4 — printing falls back to a real browser popup outside the Android wra
   await ctx.close();
 });
 
+test('regression — QR label print HTML fits within one physical page (mm-sized content, no oversized px image)', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.__printCalls = [];
+    window.AndroidPrint = { printHtml: (html, job) => { window.__printCalls.push({ job, html }); } };
+  });
+  const r = await page.evaluate(() => { printLabel('flux'); return window.__printCalls[0]; });
+  // Раньше этикетка была вёрстана в px (img 180x180 + padding:24px) при
+  // физической странице @page 60mm x 40mm — контент был в разы выше страницы,
+  // и Chromium честно паджинировал его на 3-4 листа. Фикс переводит всю
+  // вёрстку этикетки в мм, гарантированно укладывающиеся в рабочую область.
+  assert.ok(r.html.includes('size:60mm 40mm'), 'label must still target a 60x40mm physical page');
+  assert.ok(r.html.includes('width:22mm'), 'QR image must be sized in mm to fit the declared page');
+  assert.ok(!/width:180px/.test(r.html), 'must not regress to the old oversized px image that overflowed the page');
+  await ctx.close();
+});
+
+test('#photo — item photo can be attached/replaced/removed via the native AndroidPhoto bridge, gated by role', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.__photoBridgeCalls = [];
+    window.AndroidPhoto = { pickPhoto: (id) => { window.__photoBridgeCalls.push(id); } };
+  });
+  const r = await page.evaluate(() => {
+    const out = {};
+    // Работник не может прикреплять фото — мост даже не вызывается.
+    currentRole = 'rabotnik';
+    requestItemPhoto('flux');
+    out.blockedForRabotnik = window.__photoBridgeCalls.length === 0;
+
+    // Администратор — мост вызывается с id товара.
+    currentRole = 'admin';
+    requestItemPhoto('flux');
+    out.bridgeCalledForAdmin = window.__photoBridgeCalls[0] === 'flux';
+
+    // Асинхронный callback из Android (или browser-fallback) сохраняет фото в модели
+    // и его видно в разметке карточки товара.
+    window.onPhotoPicked('flux', 'data:image/jpeg;base64,AAAA', null);
+    out.photoStored = item('flux').photo === 'data:image/jpeg;base64,AAAA';
+    openItem('flux');
+    out.photoInMarkup = document.getElementById('content').innerHTML.includes('data:image/jpeg;base64,AAAA');
+
+    // Удаление фото очищает поле и убирает <img> из карточки.
+    removeItemPhoto('flux');
+    out.photoCleared = item('flux').photo == null;
+    out.imgGoneFromMarkup = !document.getElementById('content').innerHTML.includes('data:image/jpeg;base64,AAAA');
+    return out;
+  });
+  assert.equal(r.blockedForRabotnik, true);
+  assert.equal(r.bridgeCalledForAdmin, true);
+  assert.equal(r.photoStored, true);
+  assert.equal(r.photoInMarkup, true);
+  assert.equal(r.photoCleared, true);
+  assert.equal(r.imgGoneFromMarkup, true);
+  await ctx.close();
+});
+
 test('#8 — native back handler drives the JS navigation stack (sheet > sklad drill-down > tab > root)', async () => {
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => {

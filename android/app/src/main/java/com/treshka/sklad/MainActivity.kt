@@ -2,10 +2,13 @@ package com.treshka.sklad
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.AlertDialog
 import android.app.Dialog
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -24,6 +27,7 @@ import android.webkit.WebViewClient
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 
@@ -42,6 +46,10 @@ import java.io.FileOutputStream
  *    вовсе, но UI утверждал обратное — #3 ревью);
  *  - window.AndroidPrint — печать через системный PrintManager
  *    (WebView не реализует window.print() — #4 ревью).
+ *  - window.AndroidPhoto — прикрепление фото к карточке товара камерой устройства
+ *    или из галереи (WebView не показывает системный file picker без
+ *    onShowFileChooser/нативного моста — обычный <input type=file> внутри
+ *    приложения молча ничего не делает).
  */
 class MainActivity : AppCompatActivity() {
 
@@ -81,6 +89,64 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // --- Фото карточки товара (window.AndroidPhoto, см. PhotoBridge ниже) ---
+    // itemId, для которого сейчас идёт выбор источника фото — нужен, потому что
+    // между pickPhoto(itemId) и приходом результата из ActivityResultLauncher
+    // проходит асинхронный переход в другое приложение (камера/галерея), и
+    // сам launcher.launch() не может пронести itemId иначе, чем через это поле.
+    private var pendingPhotoItemId: String? = null
+    private var pendingCameraPermissionItemId: String? = null
+
+    private val cameraPhotoLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val itemId = pendingPhotoItemId
+        pendingPhotoItemId = null
+        if (itemId == null) return@registerForActivityResult
+        if (result.resultCode == RESULT_OK) {
+            @Suppress("DEPRECATION")
+            val bitmap = result.data?.extras?.get("data") as? Bitmap
+            if (bitmap != null) deliverPhoto(itemId, bitmap)
+            else deliverPhotoError(itemId, "Не удалось получить снимок с камеры")
+        } else {
+            deliverPhotoError(itemId, "Съёмка отменена")
+        }
+    }
+
+    private val galleryPhotoLauncher = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        val itemId = pendingPhotoItemId
+        pendingPhotoItemId = null
+        if (itemId == null) return@registerForActivityResult
+        if (uri == null) {
+            deliverPhotoError(itemId, "Выбор фото отменён")
+            return@registerForActivityResult
+        }
+        try {
+            val bitmap = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
+            if (bitmap != null) deliverPhoto(itemId, bitmap)
+            else deliverPhotoError(itemId, "Не удалось прочитать выбранное изображение")
+        } catch (e: Exception) {
+            Log.e("PhotoBridge", "gallery pick failed", e)
+            deliverPhotoError(itemId, "Ошибка чтения изображения")
+        }
+    }
+
+    private val requestCameraPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val itemId = pendingCameraPermissionItemId
+        pendingCameraPermissionItemId = null
+        if (itemId == null) return@registerForActivityResult
+        if (granted) {
+            pendingPhotoItemId = itemId
+            cameraPhotoLauncher.launch(Intent(MediaStore.ACTION_IMAGE_CAPTURE))
+        } else {
+            deliverPhotoError(itemId, "Нет разрешения на использование камеры")
+        }
+    }
+
     // Разрешение на запись во внешнее хранилище нужно только на API 26-28
     // (Android 8-9): начиная с API 29 (Q) запись в коллекцию MediaStore.Downloads
     // не требует WRITE_EXTERNAL_STORAGE. Запрашиваем один раз при старте, чтобы
@@ -110,6 +176,7 @@ class MainActivity : AppCompatActivity() {
         webView.addJavascriptInterface(ScannerBridge(), "AndroidScanner")
         webView.addJavascriptInterface(FileExportBridge(), "AndroidFiles")
         webView.addJavascriptInterface(PrintBridge(), "AndroidPrint")
+        webView.addJavascriptInterface(PhotoBridge(), "AndroidPhoto")
 
         webView.webViewClient = WebViewClient()
         webView.webChromeClient = PrintPopupChromeClient()
@@ -220,6 +287,90 @@ class MainActivity : AppCompatActivity() {
             }
         }
         printWebView.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+    }
+
+    /**
+     * window.AndroidPhoto.pickPhoto(itemId) из prototype.html (см. requestItemPhoto()).
+     * Раньше карточка товара вообще не могла принять фото — не было ни поля в
+     * модели данных, ни способа получить изображение из WebView (обычный
+     * <input type=file> без onShowFileChooser в системном WebView молча
+     * ничего не делает). Показывает выбор "Камера / Галерея", результат уходит
+     * в JS асинхронно через window.onPhotoPicked(itemId, dataUrl, error) —
+     * сам pickPhoto() ничего не возвращает, как и остальные мосты, работающие
+     * через системные Activity (см. ScannerBridge выше).
+     *
+     * Камера использует MediaStore.ACTION_IMAGE_CAPTURE с превью-Bitmap из
+     * extras "data" — сознательный компромисс: это уменьшенное превью (не
+     * полноразмерный кадр через FileProvider/Uri), но для идентификации
+     * позиции на складе этого достаточно, а лишний провайдер файлов/разрешения
+     * на запись не нужны. Оба источника (камера/галерея) перед кодированием
+     * в base64 ужимаются до 640px по большей стороне (см. scaleBitmap) —
+     * иначе полноразмерные фото раздули бы JSON-состояние склада и SQLite.
+     */
+    inner class PhotoBridge {
+        @JavascriptInterface
+        fun pickPhoto(itemId: String) {
+            runOnUiThread { showPhotoSourceDialog(itemId) }
+        }
+    }
+
+    private fun showPhotoSourceDialog(itemId: String) {
+        val options = arrayOf("📷 Камера", "🖼 Галерея")
+        AlertDialog.Builder(this)
+            .setTitle("Фото товара")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> {
+                        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                            == PackageManager.PERMISSION_GRANTED
+                        ) {
+                            pendingPhotoItemId = itemId
+                            cameraPhotoLauncher.launch(Intent(MediaStore.ACTION_IMAGE_CAPTURE))
+                        } else {
+                            pendingCameraPermissionItemId = itemId
+                            requestCameraPermission.launch(Manifest.permission.CAMERA)
+                        }
+                    }
+                    1 -> {
+                        pendingPhotoItemId = itemId
+                        galleryPhotoLauncher.launch("image/*")
+                    }
+                }
+            }
+            .setOnCancelListener { deliverPhotoError(itemId, "Отменено") }
+            .show()
+    }
+
+    private fun deliverPhoto(itemId: String, bitmap: Bitmap) {
+        try {
+            val scaled = scaleBitmap(bitmap, 640)
+            val out = ByteArrayOutputStream()
+            scaled.compress(Bitmap.CompressFormat.JPEG, 72, out)
+            val base64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+            webView.evaluateJavascript(
+                "window.onPhotoPicked && window.onPhotoPicked(${jsStringLiteral(itemId)}, " +
+                    "${jsStringLiteral("data:image/jpeg;base64,$base64")}, null);",
+                null
+            )
+        } catch (e: Exception) {
+            Log.e("PhotoBridge", "encode failed for item $itemId", e)
+            deliverPhotoError(itemId, "Не удалось обработать фото")
+        }
+    }
+
+    private fun deliverPhotoError(itemId: String, message: String) {
+        webView.evaluateJavascript(
+            "window.onPhotoPicked && window.onPhotoPicked(${jsStringLiteral(itemId)}, null, ${jsStringLiteral(message)});",
+            null
+        )
+    }
+
+    private fun scaleBitmap(src: Bitmap, maxDim: Int): Bitmap {
+        val w = src.width
+        val h = src.height
+        val scale = maxDim.toFloat() / maxOf(w, h)
+        if (scale >= 1f) return src
+        return Bitmap.createScaledBitmap(src, (w * scale).toInt(), (h * scale).toInt(), true)
     }
 
     private fun flushWebAppState() {

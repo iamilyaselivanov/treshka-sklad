@@ -72,6 +72,11 @@
   .qr-wrap{text-align:center; flex:none;}
   .qr-wrap img{border-radius:8px; border:1px solid var(--line); padding:5px; background:#fff;}
   .qr-wrap .s{margin-top:4px; font-size:10px;}
+  /* фото карточки товара */
+  .photo-box{width:96px; height:96px; border-radius:14px; flex:none; overflow:hidden; background:var(--chip); cursor:pointer; position:relative;}
+  .photo-box img{width:100%; height:100%; object-fit:cover; display:block;}
+  .photo-placeholder{width:100%; height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; border:1.5px dashed var(--line); border-radius:14px; box-sizing:border-box; color:var(--muted);}
+  .photo-placeholder .s{font-size:9.5px; text-align:center; padding:0 6px; line-height:1.2;}
   .kv{display:flex; justify-content:space-between; padding:9px 0; border-bottom:1px solid var(--line); font-size:13px;}
   .kv:last-child{border-bottom:none;}
   .kv .k{color:var(--muted);}
@@ -3269,18 +3274,85 @@ function printLabel(id){
   const src = genQR(id);
   const skuTxt = i ? esc(i.sku) : '';
   const nameTxt = i ? esc(i.name) : '';
+  // Раньше этикетка печаталась на 3-4 листах вместо одного: @page задавал
+  // физический размер 60×40мм, а содержимое (padding:24px + img 180×180px ≈
+  // 47.6мм) было в разы выше высоты самой страницы (40мм). WebView/Chromium
+  // при печати честно паджинирует контент, который не помещается в
+  // объявленный @page, — отсюда "разбивка на 4 части". Фикс: вся вёрстка
+  // этикетки переведена в мм (те же единицы, что и @page), с размерами,
+  // заведомо укладывающимися в 56×36мм рабочей области (60×40мм минус поля).
   const html = `<html><head><title>Этикетка ${skuTxt}</title><style>
-    @page{ size:60mm 40mm; margin:4mm; }
+    @page{ size:60mm 40mm; margin:2mm; }
     @media print{ .noprint{display:none;} }
-    body{font-family:Arial,sans-serif;text-align:center;padding:24px;}
-    img{width:180px;height:180px;} h2{font-size:14px;margin:10px 0 2px;word-break:break-word} p{font-size:12px;color:#555}
-    .noprint{margin-top:16px;font-size:11px;color:#888}
+    *{box-sizing:border-box;}
+    html,body{margin:0;padding:0;}
+    body{
+      width:56mm; min-height:36mm;
+      display:flex; flex-direction:column; align-items:center; justify-content:center;
+      font-family:Arial,sans-serif; text-align:center;
+    }
+    img{width:22mm;height:22mm;}
+    h2{font-size:9px;margin:1.5mm 0 0.5mm;line-height:1.2;word-break:break-word;max-width:54mm}
+    p{font-size:8px;color:#555;margin:0}
+    .noprint{margin-top:3mm;font-size:8px;color:#888}
   </style></head><body>
     <img src="${src||''}"><h2>${nameTxt}</h2><p>${skuTxt}</p>
-    <div class="noprint">Предпросмотр печати — размер этикетки 60×40мм, поля 4мм</div>
+    <div class="noprint">Предпросмотр печати — размер этикетки 60×40мм, поля 2мм</div>
     <script>window.onload=()=>{window.print();}<\/script>
   </body></html>`;
   printHtmlDocument(html, 'Этикетка '+(i?i.sku:id));
+}
+
+/* ================= ФОТО КАРТОЧКИ ТОВАРА ================= */
+// window.AndroidPhoto — нативный мост (см. MainActivity.kt: PhotoBridge), даёт выбор
+// "Камера / Галерея" системным диалогом и присылает результат АСИНХРОННО через
+// window.onPhotoPicked(itemId, dataUrl, error) — сам pickPhoto() ничего не возвращает.
+function nativePhotoBridge(){
+  return (typeof window!=='undefined' && window.AndroidPhoto && typeof window.AndroidPhoto.pickPhoto==='function')
+    ? window.AndroidPhoto : null;
+}
+function requestItemPhoto(id){
+  if(!canManageCatalog()){ toast('🔒 Добавлять фото может только Кладовщик или Администратор'); return; }
+  const bridge = nativePhotoBridge();
+  if(bridge){
+    try{ bridge.pickPhoto(id); }
+    catch(e){ toast('⚠ Не удалось открыть камеру/галерею: '+(e.message||e)); }
+    return;
+  }
+  // Вне Android-приложения (браузерный предпросмотр) — обычный file input,
+  // чтобы фичу можно было проверить без сборки APK.
+  const input = document.createElement('input');
+  input.type = 'file'; input.accept = 'image/*';
+  input.onchange = () => {
+    const file = input.files && input.files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = () => window.onPhotoPicked(id, reader.result, null);
+    reader.onerror = () => window.onPhotoPicked(id, null, 'Не удалось прочитать файл');
+    reader.readAsDataURL(file);
+  };
+  input.click();
+}
+// Вызывается из Android (см. PhotoBridge.deliverPhoto/deliverPhotoError) либо из
+// браузерного fallback выше. dataUrl — "data:image/jpeg;base64,...", либо null при
+// ошибке/отмене (тогда error содержит текст для пользователя).
+window.onPhotoPicked = function(itemId, dataUrl, error){
+  const i = item(itemId);
+  if(!i) return;
+  if(error){ toast('⚠ '+error); return; }
+  if(!dataUrl) return;
+  i.photo = dataUrl;
+  logAction('Фото товара', esc(i.name)+' — фото добавлено/заменено');
+  toast('✓ Фото сохранено');
+  openItem(itemId);
+};
+function removeItemPhoto(id){
+  const i = item(id);
+  if(!i || !i.photo) return;
+  i.photo = null;
+  logAction('Фото товара', esc(i.name)+' — фото удалено');
+  toast('Фото удалено');
+  openItem(id);
 }
 
 /* ================= НИЖНЯЯ ШТОРКА (МЕНЮ +) ================= */
@@ -4202,7 +4274,22 @@ function openItem(id){
   render({fn(){
     setHdr(i.name, `${esc(i.sku)} · ${i.subCat||i.topCat}`, true, false);
     const total=i.stock+Object.values(i.posts).reduce((a,b)=>a+b,0)+i.ext;
+    const canEditPhoto = canManageCatalog();
     $('content').innerHTML = `
+      <div class="card static" style="display:flex; gap:12px; align-items:flex-start">
+        <div class="photo-box" ${canEditPhoto?`onclick="requestItemPhoto('${esc(i.id)}')"`:''} title="${canEditPhoto?'Изменить фото':''}">
+          ${i.photo
+            ? `<img src="${i.photo}" alt="Фото ${esc(i.name)}">`
+            : `<div class="photo-placeholder">📷${canEditPhoto?'<div class="s">Добавить фото</div>':'<div class="s">Нет фото</div>'}</div>`}
+        </div>
+        <div class="grow s" style="padding-top:2px">
+          ${canEditPhoto
+            ? (i.photo
+                ? `Нажмите на фото, чтобы заменить его снимком с камеры или из галереи.<br><span class="doc-link" onclick="removeItemPhoto('${esc(i.id)}')">✕ Удалить фото</span>`
+                : `Нажмите на плейсхолдер, чтобы прикрепить фото товара — снимком с камеры или из галереи.`)
+            : (i.photo ? 'Фото товара' : 'Фото не добавлено — доступно роли «Кладовщик» и «Администратор».')}
+        </div>
+      </div>
       <div class="detail-top">
         <div class="qr-wrap"><div id="qrc" style="width:110px;height:110px"></div><div class="s">QR · ${esc(i.sku)}</div>
           <button class="fbtn" style="margin-top:5px" onclick="printLabel('${esc(i.id)}')">🖨 Печать</button></div>
