@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#1b1f27</color>
+    <!-- Совпадает с чёрным фоном по углам иконки-совы (см. res/mipmap-*/ic_launcher_foreground.png) -->
+    <color name="ic_launcher_background">#000000</color>
 </resources>
