@@ -364,3 +364,14 @@ test('regression — small-screen layout: bottom nav stays within the viewport',
   assert.ok(r.scrollH <= r.viewportH + 1, 'app container must not force whole-page scrolling');
   await ctx.close();
 });
+
+test('regression — app version is shown to the user on the "Ещё" screen', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    render({ fn: views.more });
+    return { version: APP_VERSION, html: document.getElementById('content').innerHTML };
+  });
+  assert.equal(r.version, '1.0');
+  assert.ok(r.html.includes('версия 1.0'), 'more() screen must render the current app version');
+  await ctx.close();
+});

@@ -2897,6 +2897,11 @@ function logAction(action, detail, post, itemId){
 const APP_SCHEMA_VERSION = 1;
 const STORAGE_FALLBACK_KEY = 'treshka_sklad_state_v1';
 
+/* Версия приложения (для отображения пользователю на экране "Ещё" и в диагностике).
+   Держим синхронно с android/app/build.gradle → defaultConfig.versionName; отдельно
+   от APP_SCHEMA_VERSION, который версионирует структуру данных, а не сборку. */
+const APP_VERSION = '1.0';
+
 function nativeStorageBridge(){
   return (typeof window!=='undefined' && window.AndroidStorage && typeof window.AndroidStorage.saveState==='function')
     ? window.AndroidStorage : null;
@@ -3567,6 +3572,7 @@ more(){
         <div style="color:var(--muted)">›</div>
       </div>
     </div>`:''}
+    <div class="s" style="text-align:center;margin:16px 0 4px;color:var(--muted)">ТРЁШКА склад · версия ${esc(APP_VERSION)}</div>
   `;
 },
 
