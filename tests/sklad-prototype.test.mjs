@@ -426,7 +426,14 @@ test('regression — app version is shown to the user on the "Ещё" screen', a
     render({ fn: views.more });
     return { version: APP_VERSION, html: document.getElementById('content').innerHTML };
   });
-  assert.equal(r.version, '1.0');
-  assert.ok(r.html.includes('версия 1.0'), 'more() screen must render the current app version');
+  assert.equal(r.version, '1.1');
+  assert.ok(r.html.includes('версия 1.1'), 'more() screen must render the current app version');
+  await ctx.close();
+});
+
+test('regression — app version is also shown in the persistent top masthead on every screen', async () => {
+  const { ctx, page } = await newPage();
+  const text = await page.evaluate(() => document.getElementById('mastVersion').textContent);
+  assert.equal(text, 'v1.1');
   await ctx.close();
 });
