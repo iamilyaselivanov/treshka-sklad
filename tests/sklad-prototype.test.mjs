@@ -687,6 +687,7 @@ test('regression — exportWorkActDocx() produces a real, valid, parseable .docx
   assert.ok(docXml.includes('Ремонт'), 'document.xml must contain the selected action type');
   assert.ok(docXml.includes('отремонтировано'), 'document.xml must contain the auto-derived result status');
   assert.ok(docXml.includes('Герасимчук'), 'document.xml must contain the fixed "Передал" signer');
+  assert.ok(docXml.includes('<w:br/>'), '"Передал" signer name must be on its own explicit line break, not just concatenated after the title/blank');
   assert.ok(docXml.includes('ОТК пройдено ответственный командир отделения ремонтного поста'), 'document.xml must contain the fixed blank OTK signature line');
   assert.ok(docXml.includes('Флюс паяльный ТТ'), 'document.xml must list the act\'s materials table (from d.materials)');
   await ctx.close();

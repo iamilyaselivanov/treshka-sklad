@@ -4617,7 +4617,7 @@ function buildWorkActPrintHtml(d, title){
     <h1>АКТ ВЫПОЛНЕННЫХ РАБОТ №${esc((/(\d+)\s*$/.exec(d.no||'')||[])[1]||d.no)}</h1>
     <div class="sub">от ${esc(formatActDateLong(d.date))}</div>
     <p>Изделие: ${esc(d.item)}${d.serial&&d.serial!=='—'?' № '+esc(d.serial):''}<br>
-    ${d.orderNo?`Наряд-задание: ${esc(d.orderNo)}<br>`:''}${d.defektDoc?`Акт дефектовки: ${esc(d.defektDoc)}<br>`:''}
+    ${d.orderNo?`Номер заявки: ${esc(d.orderNo)}<br>`:''}${d.defektDoc?`Акт дефектовки: ${esc(d.defektDoc)}<br>`:''}
     Пост: ${esc(d.post)}<br>Вид действия: ${esc((d.actionTypes||[]).join(', ')||'—')}</p>
     <div class="sec">Наименование работ</div>
     <table><tr><th>Наименование работы</th><th>Кол-во</th></tr>${workRows}</table>
@@ -4626,7 +4626,7 @@ function buildWorkActPrintHtml(d, title){
     <div class="sec">Результат выполненных работ</div>
     <p>${esc(resultLine)}</p>
     <p class="blank">ОТК пройдено ответственный командир отделения ремонтного поста __________________________ (ФИО, подпись)</p>
-    <div class="sigrow"><span>Передал: ${esc(ACT_HANDOVER_SIGNER.title)} _________________ ${esc(ACT_HANDOVER_SIGNER.name)}</span></div>
+    <div class="sigrow"><span>Передал: ${esc(ACT_HANDOVER_SIGNER.title)} _________________<br>${esc(ACT_HANDOVER_SIGNER.name)}</span></div>
     <div class="sigrow"><span>Принял: _________________________________________ (ФИО, подпись)</span></div>
     <script>window.onload=()=>window.print();<\/script>
   </body></html>`;
@@ -5207,12 +5207,20 @@ function wPara(text, opts){
   ).join('');
   return `<w:p><w:pPr>${pPr.join('')}</w:pPr>${runsXml}</w:p>`;
 }
+// Поддерживает явный перенос строки внутри ячейки (text содержит '\n') —
+// нужно, например, для строки "Передал", где название должности и подпись
+// должны идти на одной строке, а ФИО подписанта — всегда на СЛЕДУЮЩЕЙ,
+// независимо от того, как Word перенёс бы текст сам по ширине ячейки.
 function wCell(text, opts){
   opts = opts || {};
   const w = opts.width!=null ? `<w:tcW w:w="${opts.width}" w:type="dxa"/>` : '<w:tcW w:w="0" w:type="auto"/>';
   const pPr = opts.align ? `<w:pPr><w:jc w:val="${opts.align}"/></w:pPr>` : '';
   const rPr = opts.bold ? '<w:rPr><w:b/></w:rPr>' : '';
-  return `<w:tc><w:tcPr>${w}<w:vAlign w:val="center"/></w:tcPr><w:p>${pPr}<w:r>${rPr}<w:t xml:space="preserve">${esc(text==null?'':text)}</w:t></w:r></w:p></w:tc>`;
+  const lines = String(text==null?'':text).split('\n');
+  const runsXml = lines.map((line,i)=>
+    (i>0?'<w:r><w:br/></w:r>':'') + `<w:r>${rPr}<w:t xml:space="preserve">${esc(line)}</w:t></w:r>`
+  ).join('');
+  return `<w:tc><w:tcPr>${w}<w:vAlign w:val="center"/></w:tcPr><w:p>${pPr}${runsXml}</w:p></w:tc>`;
 }
 function wRow(cells){ return `<w:tr>${cells.join('')}</w:tr>`; }
 const TBL_BORDERS = `<w:tblBorders>
@@ -5238,7 +5246,7 @@ function buildWorkActDocumentXml(d){
   body.push(wPara(`от ${formatActDateLong(d.date)}`, {align:'center', spacingAfter:200}));
 
   body.push(wPara(`Изделие: ${d.item||''}${d.serial&&d.serial!=='—'?' № '+d.serial:''}`));
-  if(d.orderNo) body.push(wPara(`Наряд-задание: ${d.orderNo}`));
+  if(d.orderNo) body.push(wPara(`Номер заявки: ${d.orderNo}`));
   if(d.defektDoc) body.push(wPara(`Акт дефектовки: ${d.defektDoc}`));
   body.push(wPara(`Пост: ${d.post||''}`));
   body.push(wPara(`Вид действия: ${(d.actionTypes||[]).join(', ')||'—'}`, {spacingAfter:200}));
@@ -5266,7 +5274,7 @@ function buildWorkActDocumentXml(d){
   body.push(wPara('ОТК пройдено ответственный командир отделения ремонтного поста __________________________ (ФИО, подпись)', {spacingAfter:300}));
 
   body.push(wTable([
-    wRow([wCell('Передал:',{bold:true,width:2200}), wCell(`${ACT_HANDOVER_SIGNER.title} _________________ ${ACT_HANDOVER_SIGNER.name}`)]),
+    wRow([wCell('Передал:',{bold:true,width:2200}), wCell(`${ACT_HANDOVER_SIGNER.title} _________________\n${ACT_HANDOVER_SIGNER.name}`)]),
     wRow([wCell('Принял:',{bold:true,width:2200}), wCell('_________________________________________ (ФИО, подпись)')]),
   ]));
 
