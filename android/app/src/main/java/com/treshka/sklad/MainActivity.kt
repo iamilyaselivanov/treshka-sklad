@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -124,7 +125,14 @@ class MainActivity : AppCompatActivity() {
             return@registerForActivityResult
         }
         try {
-            val bitmap = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
+            // Раньше здесь была BitmapFactory.decodeStream(it) без опций — фото из
+            // галереи (нередко 12+ Мп с современных камер) декодировалось В ПОЛНОМ
+            // разрешении в память, и только ПОТОМ deliverPhoto() ужимало его до 640px.
+            // На слабых устройствах/при большом фото это могло привести к OutOfMemory
+            // ещё до того, как урезанная версия вообще была бы создана. Теперь сначала
+            // читаются только размеры (inJustDecodeBounds), считается inSampleSize —
+            // и декодируется сразу уменьшенная битовая карта.
+            val bitmap = decodeSampledBitmapFromUri(uri, 640)
             if (bitmap != null) deliverPhoto(itemId, bitmap)
             else deliverPhotoError(itemId, "Не удалось прочитать выбранное изображение")
         } catch (e: Exception) {
@@ -271,18 +279,44 @@ class MainActivity : AppCompatActivity() {
      */
     inner class PrintBridge {
         @JavascriptInterface
-        fun printHtml(html: String, jobName: String) {
-            runOnUiThread { printHtmlContent(html, jobName) }
+        fun printHtml(html: String, jobName: String, pageFormat: String) {
+            runOnUiThread { printHtmlContent(html, jobName, pageFormat) }
         }
     }
 
-    private fun printHtmlContent(html: String, jobName: String) {
+    // Поля бланка акта (см. buildWorkActDocumentXml()/prototype.html: w:pgMar
+    // top=1134 right=850 bottom=1134 left=1701 twips = 2/1.5/2/3 см) — переведены
+    // в милы (1/1000 дюйма), как того требует PrintAttributes.Margins. Раньше
+    // PrintAttributes.Builder().build() без единого заданного параметра означал,
+    // что реальный формат страницы/поля печатного PDF зависели от того, что
+    // подставит система/принтер по умолчанию (не обязательно A4) — печатная
+    // форма могла не совпадать с .docx-версией того же акта.
+    private fun cmToMils(cm: Double): Int = Math.round(cm / 2.54 * 1000).toInt()
+
+    private fun printHtmlContent(html: String, jobName: String, pageFormat: String) {
         val printWebView = WebView(this)
         printWebView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String?) {
                 val printManager = getSystemService(PRINT_SERVICE) as PrintManager
                 val adapter = view.createPrintDocumentAdapter(jobName)
-                val attributes = PrintAttributes.Builder().build()
+                // 'label' (этикетка товара, 60×40мм) держит собственный @page в HTML —
+                // принудительный A4 здесь сломал бы её формат, поэтому для неё
+                // оставляем незаданные атрибуты, как было раньше.
+                val attributes = if (pageFormat == "label") {
+                    PrintAttributes.Builder().build()
+                } else {
+                    PrintAttributes.Builder()
+                        .setMediaSize(PrintAttributes.MediaSize.ISO_A4)
+                        .setMinMargins(
+                            PrintAttributes.Margins(
+                                cmToMils(3.0), // left
+                                cmToMils(2.0), // top
+                                cmToMils(1.5), // right
+                                cmToMils(2.0), // bottom
+                            )
+                        )
+                        .build()
+                }
                 printManager.print(jobName, adapter, attributes)
             }
         }
@@ -363,6 +397,37 @@ class MainActivity : AppCompatActivity() {
             "window.onPhotoPicked && window.onPhotoPicked(${jsStringLiteral(itemId)}, null, ${jsStringLiteral(message)});",
             null
         )
+    }
+
+    // Степень уменьшения при декодировании (только степени двойки — так умеет
+    // BitmapFactory без потери качества сэмплирования): считается по ИСХОДНЫМ
+    // размерам изображения (из inJustDecodeBounds), не требуя загрузки пикселей.
+    private fun calculateInSampleSize(width: Int, height: Int, reqSize: Int): Int {
+        var inSampleSize = 1
+        if (height > reqSize || width > reqSize) {
+            val halfHeight = height / 2
+            val halfWidth = width / 2
+            while ((halfHeight / inSampleSize) >= reqSize && (halfWidth / inSampleSize) >= reqSize) {
+                inSampleSize *= 2
+            }
+        }
+        return inSampleSize
+    }
+
+    // Двухпроходное декодирование: первый проход (inJustDecodeBounds=true) не
+    // выделяет память под пиксели — только читает ширину/высоту; второй проход
+    // decodes сразу с нужным inSampleSize, а не в полном разрешении с
+    // последующим Bitmap.createScaledBitmap() (см. deliverPhoto/scaleBitmap) —
+    // так пиковое потребление памяти на большом фото из галереи многократно ниже.
+    private fun decodeSampledBitmapFromUri(uri: Uri, reqSize: Int): Bitmap? {
+        val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, boundsOptions) }
+        if (boundsOptions.outWidth <= 0 || boundsOptions.outHeight <= 0) return null
+
+        val decodeOptions = BitmapFactory.Options().apply {
+            inSampleSize = calculateInSampleSize(boundsOptions.outWidth, boundsOptions.outHeight, reqSize)
+        }
+        return contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, decodeOptions) }
     }
 
     private fun scaleBitmap(src: Bitmap, maxDim: Int): Bitmap {

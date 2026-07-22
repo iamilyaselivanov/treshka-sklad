@@ -682,14 +682,32 @@ test('regression — exportWorkActDocx() produces a real, valid, parseable .docx
   Object.values(entries).forEach(e => assert.equal(e.compression, 0, 'all entries must use STORE (no compression), matching what the ZIP writer claims'));
 
   const docXml = entries['word/document.xml'].data.toString('utf8');
-  assert.ok(docXml.includes('АКТ ВЫПОЛНЕННЫХ РАБОТ №145'), 'document.xml must contain the act title with its number');
+  // Заголовок теперь в 3 строки (АКТ №.../выполненных работ/от «...»), а не
+  // одной строкой "АКТ ВЫПОЛНЕННЫХ РАБОТ №145" — см. ревью по образцу.
+  assert.ok(docXml.includes('АКТ №145'), 'document.xml must contain the "АКТ №..." title line');
+  assert.ok(docXml.includes('выполненных работ'), 'document.xml must contain the "выполненных работ" title line');
   assert.ok(docXml.includes('«17» июля 2026 г.'), 'document.xml must contain the long-form Russian date');
   assert.ok(docXml.includes('Ремонт'), 'document.xml must contain the selected action type');
-  assert.ok(docXml.includes('отремонтировано'), 'document.xml must contain the auto-derived result status');
+  assert.ok(docXml.includes('1. Результат выполненных работ: произведено:'), 'document.xml must contain the numbered result heading');
+  assert.ok(docXml.includes('- отремонтировано'), 'document.xml must contain the auto-derived result status as a bullet line');
   assert.ok(docXml.includes('Герасимчук'), 'document.xml must contain the fixed "Передал" signer');
   assert.ok(docXml.includes('<w:br/>'), '"Передал" signer name must be on its own explicit line break, not just concatenated after the title/blank');
   assert.ok(docXml.includes('ОТК пройдено ответственный командир отделения ремонтного поста'), 'document.xml must contain the fixed blank OTK signature line');
   assert.ok(docXml.includes('Флюс паяльный ТТ'), 'document.xml must list the act\'s materials table (from d.materials)');
+  assert.ok(docXml.includes('арт. РМ-0012'), 'material article must be folded into the material name (sample has no separate 4th column)');
+  // Весь текст должен быть Times New Roman 14pt (w:sz/w:szCs=28), не только заголовок.
+  assert.ok(docXml.includes('Times New Roman'), 'document.xml must set Times New Roman explicitly');
+  assert.ok((docXml.match(/w:sz w:val="28"/g) || []).length > 5, 'the 14pt (w:sz=28) size must be applied throughout the document, not just the title');
+  // Таблицы должны иметь закреплённые ширины колонок (tblLayout fixed), а не
+  // пустой tblGrid, который Word мог бы перераспределить по содержимому.
+  assert.ok(docXml.includes('w:type="fixed"'), 'work/materials tables must use a fixed table layout with explicit column widths');
+  assert.ok(docXml.includes('w:gridSpan w:val="3"'), 'the merged row above the works table (action type/item/order/date) must span all 3 columns');
+  // Блок подписей — двухколоночный, БЕЗ рамок (ревью #6).
+  assert.ok(/w:val="none"[\s\S]{0,40}w:sz="0"/.test(docXml), 'the signature table must use explicit "none" borders (borderless two-column layout)');
+  // ZIP должен содержать styles.xml с Times New Roman 14pt по умолчанию — подстраховка,
+  // если где-то run без явного rPr.
+  assert.ok(entries['word/styles.xml'], 'ZIP must contain word/styles.xml with docDefaults');
+  assert.ok(entries['word/_rels/document.xml.rels'], 'ZIP must relate document.xml to styles.xml');
   await ctx.close();
 });
 
@@ -700,14 +718,21 @@ test('regression — the updated PDF/print form for a work act matches the new t
   });
   const r = await page.evaluate(() => { printDoc('АВР-145'); return window.__printCalls[0]; });
   assert.equal(r.job, 'Акт выполненных работ №145 от 17.07.2026 ремонт');
-  assert.ok(r.html.includes('АКТ ВЫПОЛНЕННЫХ РАБОТ №145'), 'print form must show the new title with act number');
+  assert.ok(r.html.includes('АКТ №145'), 'print form must show the "АКТ №..." title line');
+  assert.ok(r.html.includes('выполненных работ'), 'print form must show the "выполненных работ" title line');
   assert.ok(r.html.includes('«17» июля 2026 г.'), 'print form must show the long-form Russian date');
-  assert.ok(r.html.includes('Вид действия: Ремонт'), 'print form must show the selected action type(s)');
+  assert.ok(r.html.includes('Ремонт'), 'print form must show the selected action type(s) in the merged header row');
   assert.ok(r.html.includes('Наименование работ'), 'print form must include the "Наименование работ" table');
+  assert.ok(r.html.includes('№ п/п'), 'print form work/materials tables must include the "№ п/п" column (was missing before)');
   assert.ok(r.html.includes('Сборочные работы'), 'print form must list the act\'s works (from d.works)');
-  assert.ok(r.html.includes('отремонтировано'), 'print form must show the auto-derived result status');
+  assert.ok(r.html.includes('арт. РМ-0012'), 'print form materials table must fold the article into the material name, matching the 3-column sample');
+  assert.ok(r.html.includes('1. Результат выполненных работ: произведено:'), 'print form must show the numbered result heading');
+  assert.ok(r.html.includes('- отремонтировано'), 'print form must show the auto-derived result status as a bullet line');
   assert.ok(r.html.includes('ОТК пройдено ответственный командир отделения ремонтного поста'), 'print form must include the fixed blank OTK signature line');
   assert.ok(r.html.includes('Герасимчук'), 'print form must include the fixed "Передал" signer');
+  assert.ok(r.html.includes('Times New Roman'), 'print form must use Times New Roman, matching the .docx export');
+  assert.ok(r.html.includes('14pt'), 'print form must use 14pt text, matching the .docx export');
+  assert.ok(r.html.includes('size:A4'), 'print form @page must target A4, matching the .docx page size');
   await ctx.close();
 });
 
@@ -720,5 +745,107 @@ test('regression — the PDF/print form for a дефектовка act stays on 
   assert.equal(r.job, 'Акт дефектовки №041 от 16.07.2026');
   assert.ok(r.html.includes('Акт дефектовки ДФ-041'), 'defekt print form must keep its own simple title');
   assert.ok(!r.html.includes('Наименование работ'), 'defekt acts have no works table and must not show the work-act template section');
+  await ctx.close();
+});
+
+test('regression — closing a work act decrements the specific post-level lots, not just the post total', async () => {
+  // Раньше performWorkClose() уменьшал только общий остаток поста (s.q), а
+  // вложенные партии (s.lots) оставались нетронутыми — сумма партий переставала
+  // сходиться с фактическим остатком (отчёт по партиям/срокам годности "врал").
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    const p = posts.find((x) => x.name === 'НРТК');
+    const stockEntry = p.stock.find((s) => s.id === 'battnrtk');
+    stockEntry.q = 2;
+    stockEntry.lots = [{ lot: 'Л-СТАРАЯ', q: 1, exp: '01.2026' }, { lot: 'Л-НОВАЯ', q: 1, exp: '01.2027' }];
+
+    const clone = JSON.parse(JSON.stringify(docs.find((d) => d.no === 'АВР-145')));
+    clone.no = 'АВР-TEST-LOTS';
+    clone.status = 'Черновик';
+    clone.post = 'НРТК';
+    clone.itemId = null; // не связываем с конкретным изделием — тест только про партии материала
+    clone.materials = [{ id: 'battnrtk', q: 1 }];
+    docs.push(clone);
+
+    performWorkClose(clone);
+
+    const after = p.stock.find((s) => s.id === 'battnrtk');
+    const lotsSum = (after ? after.lots || [] : []).reduce((a, l) => a + l.q, 0);
+    const result = {
+      postQtyAfter: after ? after.q : null,
+      lotsAfter: after ? after.lots : null,
+      lotsSum,
+    };
+    docs.pop();
+    return result;
+  });
+  assert.equal(r.postQtyAfter, 1, 'post-level total quantity must be decremented by the consumed amount');
+  assert.ok(r.lotsAfter && r.lotsAfter.length === 1 && r.lotsAfter[0].lot === 'Л-НОВАЯ',
+    'the FIFO-consumed lot ("Л-СТАРАЯ") must be fully removed once its quantity reaches 0, leaving only the untouched lot');
+  assert.equal(r.lotsSum, r.postQtyAfter, 'the sum of remaining post-level lots must match the post-level total (they must not drift apart)');
+  await ctx.close();
+});
+
+test('regression — applyAppState() is atomic: a malformed non-array field must not leave items/posts/docs partially replaced', async () => {
+  // Раньше items/posts/docs уже заменялись (items.length=0; items.push(...)),
+  // пока extIssues/auditLog ещё не были проверены — spread по некорректному
+  // полю бросал исключение, и state оставался ЧАСТИЧНО применённым (новые
+  // items/posts/docs, но старые extIssues/auditLog), при этом функция всё
+  // равно возвращала false, маскируя то, что состояние уже искажено.
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    const base = JSON.parse(JSON.stringify(serializeAppState()));
+    const itemsBefore = JSON.stringify(items);
+    const docsBefore = JSON.stringify(docs);
+    const postsBefore = JSON.stringify(posts);
+
+    const malformed = { ...base, items: [{ id: 'fake-item-should-not-apply' }], extIssues: 'НЕ МАССИВ — специально сломано' };
+    const ok = applyAppState(malformed);
+
+    return {
+      ok,
+      itemsUnchanged: JSON.stringify(items) === itemsBefore,
+      docsUnchanged: JSON.stringify(docs) === docsBefore,
+      postsUnchanged: JSON.stringify(posts) === postsBefore,
+    };
+  });
+  assert.equal(r.ok, false, 'applyAppState must report failure when any field is malformed');
+  assert.equal(r.itemsUnchanged, true, 'items must NOT be partially replaced when a later field (extIssues) fails validation');
+  assert.equal(r.docsUnchanged, true, 'docs must remain untouched (atomicity)');
+  assert.equal(r.postsUnchanged, true, 'posts must remain untouched (atomicity)');
+  await ctx.close();
+});
+
+test('regression — rabotnik can no longer freely reassign their own bound post without the admin PIN', async () => {
+  // Раньше <select id="postSwitchSelect"> менял currentUserPost НАПРЯМУЮ по
+  // onchange — работник мог сам назначить себя на любой пост, полностью
+  // обходя ограничение canSeeDoc()/isRabotnikRestrictedToPost().
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    currentRole = 'rabotnik';
+    currentUserPost = 'ТЭЧ';
+    views.roles();
+    const otherPost = posts.find((p) => p.name !== 'ТЭЧ').name;
+    requestPostSwitch(otherPost);
+    const postDuringPinPrompt = currentUserPost;
+    const sheetShown = !!document.querySelector('#postPinInput');
+    return { postDuringPinPrompt, sheetShown, otherPost };
+  });
+  assert.equal(r.sheetShown, true, 'requesting a post switch must show a PIN prompt, not apply immediately');
+  assert.equal(r.postDuringPinPrompt, 'ТЭЧ', 'currentUserPost must NOT change before the PIN is confirmed');
+
+  const wrong = await page.evaluate((otherPost) => {
+    confirmPostSwitch(otherPost);
+    return currentUserPost;
+  }, r.otherPost);
+  assert.equal(wrong, 'ТЭЧ', 'a missing/wrong PIN must not change the bound post');
+
+  const right = await page.evaluate((otherPost) => {
+    const inp = document.getElementById('postPinInput') || (() => { requestPostSwitch(otherPost); return document.getElementById('postPinInput'); })();
+    inp.value = ROLE_PINS.admin;
+    confirmPostSwitch(otherPost);
+    return currentUserPost;
+  }, r.otherPost);
+  assert.equal(right, r.otherPost, 'the correct admin PIN must allow the post reassignment to go through');
   await ctx.close();
 });

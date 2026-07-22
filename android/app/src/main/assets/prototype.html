@@ -2905,6 +2905,46 @@ function confirmRoleSwitch(role){
   }
 }
 
+// Раньше <select> "Мой пост" менял currentUserPost НАПРЯМУЮ (onchange без
+// какой-либо проверки) — любой, у кого открыта роль «Работник», мог сам
+// назначить себя на ЛЮБОЙ пост, полностью обходя ограничение "работник
+// видит и создаёт акты только по своему посту" (canSeeDoc()/isRabotnikRestrictedToPost()).
+// Смена поста работника теперь требует того же ПИН администратора, что и
+// переключение на привилегированную роль (см. requestRoleSwitch выше) — та
+// же сдерживающая мера, применённая последовательно.
+function requestPostSwitch(newPost){
+  if(newPost === currentUserPost) return;
+  views.roles(); // сбрасывает <select> обратно к текущему посту, пока ПИН не подтверждён
+  const layer = $('sheetLayer');
+  layer.innerHTML = `
+    <div class="sheet-backdrop" onclick="if(event.target===this) closeSheet()">
+      <div class="sheet">
+        <div class="handle"></div>
+        <div class="sec" style="margin-top:0">ПИН администратора для смены поста работника</div>
+        <div class="fld"><input id="postPinInput" type="password" inputmode="numeric" placeholder="Введите ПИН" autofocus></div>
+        <div id="postPinErr" class="s" style="color:var(--red);display:none;margin:4px 0">Неверный ПИН</div>
+        <button class="btn primary" onclick="confirmPostSwitch('${esc(newPost)}')">Подтвердить</button>
+      </div>
+    </div>`;
+  const inp = $('postPinInput');
+  if(inp) inp.addEventListener('keydown', e=>{ if(e.key==='Enter') confirmPostSwitch(newPost); });
+}
+function confirmPostSwitch(newPost){
+  const entered = ($('postPinInput')||{}).value || '';
+  if(entered === ROLE_PINS.admin){
+    closeSheet();
+    const prevPost = currentUserPost;
+    currentUserPost = newPost;
+    toast('Пост работника: '+newPost);
+    views.roles();
+    logAction('Смена поста работника', prevPost+' → '+newPost);
+  } else {
+    const err = $('postPinErr');
+    if(err) err.style.display = 'block';
+    logAction('Неверный ПИН при попытке сменить пост работника', 'Попытка переключиться на «'+newPost+'»');
+  }
+}
+
 const auditLog = [
   {t:'19.07.2026 15:10', user:'Иванов А.', action:'Акт с расхождением', detail:'АВР-147: получено 150, годных 147 — направлено администратору', post:'ТЭЧ', item:null},
   {t:'18.07.2026 16:40', user:'Петров С.', action:'Списание материалов', detail:'АВР-144 закрыт, антенна №000871 возвращена на склад', post:'ТЭЧ', item:'ant'},
@@ -3006,17 +3046,39 @@ function applyAppState(saved){
   try{
     const s = migrateAppState(saved);
     if(!s) return false;
+    // Раньше items/posts/docs уже заменялись (items.length=0; items.push(...)),
+    // пока extIssues/auditLog и остальные поля ещё не были проверены — если
+    // распаковка (spread) одного из последующих полей бросала исключение
+    // (например, extIssues в сохранённых данных оказался не массивом, а
+    // объектом/строкой), state оставался ЧАСТИЧНО применённым: новые
+    // items/posts/docs, но старые/демо extIssues/auditLog, и это никак не
+    // отражалось в возвращаемом false — вызывающий код не мог понять, что
+    // приложение уже в несогласованном состоянии. Теперь СНАЧАЛА валидируются
+    // ВСЕ поля до единого throw-safe места, и только после полного успеха один
+    // блок применяет их разом — частичного применения быть не может.
     if(!Array.isArray(s.items) || !Array.isArray(s.docs) || !Array.isArray(s.posts)) return false;
+    const extIssuesNext = s.extIssues!=null ? s.extIssues : [];
+    if(!Array.isArray(extIssuesNext)) return false;
+    const auditLogNext = s.auditLog!=null ? s.auditLog : [];
+    if(!Array.isArray(auditLogNext)) return false;
+    const itemSeqNext = typeof s.itemSeq === 'number' ? s.itemSeq : itemSeq;
+    const categoriesListNext = (Array.isArray(s.categoriesList) && s.categoriesList.length) ? s.categoriesList : categoriesList;
+    const componentSubcatsNext = (Array.isArray(s.componentSubcats) && s.componentSubcats.length) ? s.componentSubcats : componentSubcats;
+    const currentRoleNext = (s.currentRole && ROLES[s.currentRole]) ? s.currentRole : currentRole;
+    const currentUserPostNext = s.currentUserPost ? s.currentUserPost : currentUserPost;
+
+    // Точка применения — все поля выше уже провалидированы, здесь только
+    // присваивание/push в уже гарантированно корректные массивы.
     items.length = 0; items.push(...s.items);
     posts.length = 0; posts.push(...s.posts);
     docs.length = 0; docs.push(...s.docs);
-    extIssues.length = 0; extIssues.push(...(s.extIssues||[]));
-    auditLog.length = 0; auditLog.push(...(s.auditLog||[]));
-    itemSeq = typeof s.itemSeq === 'number' ? s.itemSeq : itemSeq;
-    if(Array.isArray(s.categoriesList) && s.categoriesList.length) categoriesList = s.categoriesList;
-    if(Array.isArray(s.componentSubcats) && s.componentSubcats.length) componentSubcats = s.componentSubcats;
-    if(s.currentRole && ROLES[s.currentRole]) currentRole = s.currentRole;
-    if(s.currentUserPost) currentUserPost = s.currentUserPost;
+    extIssues.length = 0; extIssues.push(...extIssuesNext);
+    auditLog.length = 0; auditLog.push(...auditLogNext);
+    itemSeq = itemSeqNext;
+    categoriesList = categoriesListNext;
+    componentSubcats = componentSubcatsNext;
+    currentRole = currentRoleNext;
+    currentUserPost = currentUserPostNext;
     return true;
   }catch(e){
     console.error('applyAppState: сохранённые данные повреждены, in-memory демо-данные НЕ затёрты:', e);
@@ -3324,10 +3386,14 @@ function nativePrintBridge(){
   return (typeof window!=='undefined' && window.AndroidPrint && typeof window.AndroidPrint.printHtml==='function')
     ? window.AndroidPrint : null;
 }
-function printHtmlDocument(html, jobName){
+// pageFormat подсказывает нативному мосту, какие PrintAttributes выставить:
+// 'a4' — акты/отчёты (А4, поля как в .docx-шаблоне), 'label' — этикетка товара
+// (60×40мм, задаётся собственным @page в HTML — нативной стороне НЕЛЬЗЯ
+// принудительно выставлять A4, иначе конфликт со страницей этикетки).
+function printHtmlDocument(html, jobName, pageFormat){
   const bridge = nativePrintBridge();
   if(bridge){
-    try{ bridge.printHtml(html, jobName); }
+    try{ bridge.printHtml(html, jobName, pageFormat||'a4'); }
     catch(e){ toast('⚠ Ошибка печати: '+(e.message||e)); }
     return;
   }
@@ -3367,7 +3433,7 @@ function printLabel(id){
     <div class="noprint">Предпросмотр печати — размер этикетки 60×40мм, поля 2мм</div>
     <script>window.onload=()=>{window.print();}<\/script>
   </body></html>`;
-  printHtmlDocument(html, 'Этикетка '+(i?i.sku:id));
+  printHtmlDocument(html, 'Этикетка '+(i?i.sku:id), 'label');
 }
 
 /* ================= ФОТО КАРТОЧКИ ТОВАРА ================= */
@@ -3731,8 +3797,8 @@ roles(){
       </div>`).join('')}
     ${currentRole==='rabotnik'?`
     <div class="sec">Мой пост</div>
-    <div class="fld"><label>Работник видит и создаёт акты только по этому посту</label>
-      <select onchange="currentUserPost=this.value; toast('Пост работника: '+this.value)">
+    <div class="fld"><label>Работник видит и создаёт акты только по этому посту (смена — по ПИН администратора)</label>
+      <select id="postSwitchSelect" onchange="requestPostSwitch(this.value)">
         ${posts.map(p=>`<option ${p.name===currentUserPost?'selected':''}>${esc(p.name)}</option>`).join('')}
       </select></div>`:''}
     <div class="progress-note">⚠ ПИН — только сдерживающая мера прототипа против случайного/непреднамеренного переключения роли на этом же устройстве. Это НЕ полноценная авторизация: реальное разграничение прав требует входа сотрудника через сервер (логин/пароль или SSO) — без него любой, у кого физический доступ к устройству и к коду приложения, теоретически может обойти проверку. См. STATE_MIGRATIONS/persistence — тот же принцип "клиент не источник правды" применим и к ролям.</div>
@@ -4596,45 +4662,77 @@ function actFileTitle(d){
   }
   return title;
 }
-const PRINT_DOC_STYLE = `body{font-family:Arial,sans-serif;padding:24px;font-size:13px}
-  h1{font-size:16px;margin-bottom:2px} .sub{font-size:13px;font-weight:normal;margin-bottom:14px}
-  table{width:100%;border-collapse:collapse;margin-top:10px} td,th{border:1px solid #ccc;padding:6px;font-size:12px;text-align:left}
-  .sec{font-weight:bold;margin-top:16px;margin-bottom:4px} .blank{margin-top:18px}
-  .sigrow{display:flex;justify-content:space-between;margin-top:6px}`;
+// Единая модель оформления для PDF/печати И .docx — шрифт, размер, поля
+// страницы должны совпадать в обоих форматах (ревью #1/#7: раньше PDF был
+// Arial 13px, .docx — Times New Roman только в заголовке, остальной текст
+// зависел от Normal-стиля Word; и раньше PrintAttributes на Android были
+// пустыми, из-за чего печатный PDF мог не соответствовать A4/полям шаблона).
+// Печатная форма (WebView/CSS) не может напрямую переиспользовать твипы
+// .docx, но использует ТЕ ЖЕ значения в пересчёте на pt/cm.
+const PRINT_DOC_STYLE = `@page{size:A4; margin:2cm 1.5cm 2cm 3cm}
+  body{font-family:'Times New Roman',Georgia,serif;padding:0;font-size:14pt}
+  h1,h2{font-size:14pt;font-weight:bold;text-align:center;margin:0 0 2pt}
+  .sub{font-size:14pt;text-align:center;margin:0 0 14pt}
+  table{width:100%;border-collapse:collapse;margin-top:10pt;table-layout:fixed}
+  td,th{border:1px solid #000;padding:4pt 6pt;font-size:14pt;text-align:left;word-wrap:break-word}
+  .colnum{width:2.29cm;text-align:center} .colqty{width:2.75cm;text-align:center}
+  .mergedrow td{font-weight:bold;text-align:center}
+  .sec{font-weight:bold;margin-top:14pt;margin-bottom:4pt} .blank{margin-top:16pt}
+  .result-item{margin:2pt 0 2pt 12pt}
+  .sigtable{border:none;margin-top:16pt} .sigtable td{border:none;padding:0 12pt 0 0;vertical-align:top;width:50%}`;
 
 // Печатная форма акта выполненных работ — повторяет структуру .docx-экспорта
 // (см. exportWorkActDocx()/buildWorkActDocumentXml()), чтобы печатная и
-// docx-версии акта не расходились: тип действия, обе таблицы, результат
-// (авто-статус + вручную введённый текст), строка ОТК и подписи.
+// docx-версии акта не расходились: заголовок в 3 строки, объединённая строка
+// с типом действия/изделием/заявкой/датой, обе трёхколоночные таблицы,
+// нумерованный результат, строка ОТК и безрамочный блок подписей в 2 колонки.
 function buildWorkActPrintHtml(d, title){
-  const workRows = (d.works||[]).map(w=>`<tr><td>${esc(w.type)}</td><td>${esc(String(w.qty))}</td></tr>`).join('')
-    || '<tr><td colspan="2">— не указаны —</td></tr>';
-  const matRows = (d.materials||[]).map(m=>{const it=item(m.id); return `<tr><td>${it?esc(it.name):esc(m.id)}</td><td>${it?esc(it.sku):''}</td><td>${it?`${m.q} ${it.unit}`:m.q}</td></tr>`;}).join('')
-    || '<tr><td colspan="3">— не использовались —</td></tr>';
+  const num = (/(\d+)\s*$/.exec(d.no||'')||[])[1] || d.no;
+  const workRows = (d.works||[]).map((w,i)=>`<tr><td class="colnum">${i+1}</td><td>${esc(w.type)}</td><td class="colqty">${esc(String(w.qty))}</td></tr>`).join('')
+    || '<tr><td class="colnum"></td><td>— не указаны —</td><td class="colqty"></td></tr>';
+  const matRows = (d.materials||[]).map((m,i)=>{
+    const it=item(m.id);
+    const name = it ? `${esc(it.name)}${it.sku?` (арт. ${esc(it.sku)})`:''}` : esc(m.id);
+    const qty = it ? `${m.q} ${esc(it.unit)}` : esc(String(m.q));
+    return `<tr><td class="colnum">${i+1}</td><td>${name}</td><td class="colqty">${qty}</td></tr>`;
+  }).join('') || '<tr><td class="colnum"></td><td>— не использовались —</td><td class="colqty"></td></tr>';
+  const mergedInfo = [
+    (d.actionTypes||[]).join(', ') || '—',
+    `${d.item||''}${d.serial&&d.serial!=='—'?' № '+d.serial:''}`,
+    d.orderNo ? `заявка ${d.orderNo}` : '',
+    `от ${d.date}`,
+  ].filter(Boolean).join(' — ');
   const statusLine = actResultStatus(d.actionTypes);
-  const resultLine = [statusLine, (d.resultText||'').trim()].filter(Boolean).join(' — ') || '—';
+  const resultItems = [statusLine, (d.resultText||'').trim()].filter(Boolean);
+  if(!resultItems.length) resultItems.push('—');
   return `<html><head><title>${esc(title)}</title><style>${PRINT_DOC_STYLE}</style></head><body>
-    <h1>АКТ ВЫПОЛНЕННЫХ РАБОТ №${esc((/(\d+)\s*$/.exec(d.no||'')||[])[1]||d.no)}</h1>
+    <h1>АКТ №${esc(num)}</h1>
+    <h2>выполненных работ</h2>
     <div class="sub">от ${esc(formatActDateLong(d.date))}</div>
-    <p>Изделие: ${esc(d.item)}${d.serial&&d.serial!=='—'?' № '+esc(d.serial):''}<br>
-    ${d.orderNo?`Номер заявки: ${esc(d.orderNo)}<br>`:''}${d.defektDoc?`Акт дефектовки: ${esc(d.defektDoc)}<br>`:''}
-    Пост: ${esc(d.post)}<br>Вид действия: ${esc((d.actionTypes||[]).join(', ')||'—')}</p>
-    <div class="sec">Наименование работ</div>
-    <table><tr><th>Наименование работы</th><th>Кол-во</th></tr>${workRows}</table>
-    <div class="sec">Израсходованные материалы</div>
-    <table><tr><th>Материал</th><th>Артикул</th><th>Кол-во</th></tr>${matRows}</table>
-    <div class="sec">Результат выполненных работ</div>
-    <p>${esc(resultLine)}</p>
+    <p>Пост: ${esc(d.post)}${d.defektDoc?`<br>Акт дефектовки: ${esc(d.defektDoc)}`:''}</p>
+    <table>
+      <tr><th class="colnum">№ п/п</th><th>Наименование работ</th><th class="colqty">Кол-во</th></tr>
+      <tr class="mergedrow"><td colspan="3">${esc(mergedInfo)}</td></tr>
+      ${workRows}
+    </table>
+    <table>
+      <tr><th class="colnum">№ п/п</th><th>Материал</th><th class="colqty">Кол-во</th></tr>
+      ${matRows}
+    </table>
+    <p style="margin-top:14pt"><b>1. Результат выполненных работ: произведено:</b></p>
+    ${resultItems.map(line=>`<div class="result-item">- ${esc(line)}</div>`).join('')}
     <p class="blank">ОТК пройдено ответственный командир отделения ремонтного поста __________________________ (ФИО, подпись)</p>
-    <div class="sigrow"><span>Передал: ${esc(ACT_HANDOVER_SIGNER.title)} _________________<br>${esc(ACT_HANDOVER_SIGNER.name)}</span></div>
-    <div class="sigrow"><span>Принял: _________________________________________ (ФИО, подпись)</span></div>
+    <table class="sigtable"><tr>
+      <td>Передал: ${esc(ACT_HANDOVER_SIGNER.title)} _________________<br>${esc(ACT_HANDOVER_SIGNER.name)}</td>
+      <td>Принял: _________________________________________ (ФИО, подпись)</td>
+    </tr></table>
     <script>window.onload=()=>window.print();<\/script>
   </body></html>`;
 }
 function buildDefektPrintHtml(d, title){
   const matRows = d.materials ? `<table>${d.materials.map(m=>{const it=item(m.id);return `<tr><td>${esc(it.name)}</td><td>${m.q} ${it.unit}</td></tr>`;}).join('')}</table>` : '';
   return `<html><head><title>${esc(title)}</title><style>${PRINT_DOC_STYLE}</style></head><body>
-    <h1>Акт дефектовки ${esc(d.no)}</h1>
+    <h1 style="text-align:left">Акт дефектовки ${esc(d.no)}</h1>
     <p>Изделие: ${esc(d.item)} ${d.serial&&d.serial!=='—'?'№'+esc(d.serial):''}<br>Дата: ${esc(d.date)}<br>Пост: ${esc(d.post)}</p>
     ${matRows}
     <script>window.onload=()=>window.print();<\/script>
@@ -4754,6 +4852,22 @@ function resolveMismatch(no){
     performWorkClose(d, 'расхождение принято администратором — '+reason);
   }
 }
+// Списывает qty из массива партий на ПОСТУ (p.stock[].lots — поле q, не
+// путать с item-level i.lots, где поле называется qty) методом FIFO —
+// раньше при закрытии акта уменьшался только общий остаток поста (s.q), а
+// вложенные партии (s.lots) оставались нетронутыми: сумма партий переставала
+// сходиться с остатком, отчёт по партиям/срокам годности показывал больше,
+// чем реально есть на посту.
+function consumePostLotsFifo(lotsArr, qty){
+  let remaining = qty;
+  for(const l of lotsArr){
+    if(remaining<=0) break;
+    const take = Math.min(l.q, remaining);
+    l.q -= take;
+    remaining -= take;
+  }
+  return lotsArr.filter(l=>l.q>0);
+}
 function performWorkClose(d, note){
   if(d.status==='Закрыт'){ toast('Акт уже закрыт'); return; }
   d.status='Закрыт';
@@ -4766,7 +4880,13 @@ function performWorkClose(d, note){
   });
   const p=posts.find(p=>p.name===d.post);
   if(p){ p.repairs=p.repairs.filter(r=>r.serial!==d.serial);
-    d.materials.forEach(m=>{ p.stock=p.stock.map(s=>s.id===m.id?{...s,q:Math.max(0,s.q-m.q)}:s).filter(s=>s.q>0); });
+    d.materials.forEach(m=>{
+      p.stock = p.stock.map(s=>{
+        if(s.id!==m.id) return s;
+        const nextLots = (s.lots && s.lots.length) ? consumePostLotsFifo(s.lots, m.q) : s.lots;
+        return {...s, q:Math.max(0,s.q-m.q), lots:nextLots};
+      }).filter(s=>s.q>0);
+    });
   }
   const repaired = d.itemId ? item(d.itemId) : null;
   if(repaired){
@@ -5192,15 +5312,20 @@ function buildZipStore(files){
 }
 
 /* ---- Вспомогательные билдеры WordprocessingML (word/document.xml) ---- */
+// Весь документ должен быть Times New Roman 14pt (ревью #1: раньше только
+// заголовок задавал размер, остальной текст зависел от Normal-стиля Word,
+// который мог открыть его в Calibri/Aptos 11pt) — задаём явно w:rFonts и
+// w:sz/w:szCs=28 (28 полупунктов = 14pt) на КАЖДОМ текстовом run,
+// и тем же значением в docDefaults styles.xml как подстраховку.
+const DOCX_FONT_RPR = '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/><w:sz w:val="28"/><w:szCs w:val="28"/>';
 function wPara(text, opts){
   opts = opts || {};
-  const rPr = [];
+  const rPr = [DOCX_FONT_RPR];
   if(opts.bold) rPr.push('<w:b/>');
-  if(opts.size) rPr.push(`<w:sz w:val="${opts.size}"/>`);
   const pPr = [];
   if(opts.align) pPr.push(`<w:jc w:val="${opts.align}"/>`);
   pPr.push(`<w:spacing w:after="${opts.spacingAfter!=null?opts.spacingAfter:120}"/>`);
-  const rPrXml = rPr.length ? `<w:rPr>${rPr.join('')}</w:rPr>` : '';
+  const rPrXml = `<w:rPr>${rPr.join('')}</w:rPr>`;
   const lines = String(text==null?'':text).split('\n');
   const runsXml = lines.map((line,i)=>
     (i>0?'<w:r><w:br/></w:r>':'') + `<w:r>${rPrXml}<w:t xml:space="preserve">${esc(line)}</w:t></w:r>`
@@ -5211,16 +5336,21 @@ function wPara(text, opts){
 // нужно, например, для строки "Передал", где название должности и подпись
 // должны идти на одной строке, а ФИО подписанта — всегда на СЛЕДУЮЩЕЙ,
 // независимо от того, как Word перенёс бы текст сам по ширине ячейки.
+// opts.span — горизонтальное объединение ячеек (w:gridSpan), нужно для
+// строки над таблицей работ с типом действия/изделием/заявкой/датой.
 function wCell(text, opts){
   opts = opts || {};
   const w = opts.width!=null ? `<w:tcW w:w="${opts.width}" w:type="dxa"/>` : '<w:tcW w:w="0" w:type="auto"/>';
+  const span = opts.span ? `<w:gridSpan w:val="${opts.span}"/>` : '';
   const pPr = opts.align ? `<w:pPr><w:jc w:val="${opts.align}"/></w:pPr>` : '';
-  const rPr = opts.bold ? '<w:rPr><w:b/></w:rPr>' : '';
+  const rPr = [DOCX_FONT_RPR];
+  if(opts.bold) rPr.push('<w:b/>');
+  const rPrXml = `<w:rPr>${rPr.join('')}</w:rPr>`;
   const lines = String(text==null?'':text).split('\n');
   const runsXml = lines.map((line,i)=>
-    (i>0?'<w:r><w:br/></w:r>':'') + `<w:r>${rPr}<w:t xml:space="preserve">${esc(line)}</w:t></w:r>`
+    (i>0?'<w:r><w:br/></w:r>':'') + `<w:r>${rPrXml}<w:t xml:space="preserve">${esc(line)}</w:t></w:r>`
   ).join('');
-  return `<w:tc><w:tcPr>${w}<w:vAlign w:val="center"/></w:tcPr><w:p>${pPr}${runsXml}</w:p></w:tc>`;
+  return `<w:tc><w:tcPr>${w}${span}<w:vAlign w:val="center"/></w:tcPr><w:p>${pPr}${runsXml}</w:p></w:tc>`;
 }
 function wRow(cells){ return `<w:tr>${cells.join('')}</w:tr>`; }
 const TBL_BORDERS = `<w:tblBorders>
@@ -5231,52 +5361,95 @@ const TBL_BORDERS = `<w:tblBorders>
   <w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>
   <w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>
 </w:tblBorders>`;
-function wTable(rowsXml){
-  return `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>${TBL_BORDERS}</w:tblPr><w:tblGrid/>${rowsXml.join('')}</w:tbl>`;
+// Все стороны — "none": для безрамочного блока подписей ("Передал"/"Принял"
+// стоят параллельно в двух колонках без видимых границ — ревью #6). Явное
+// "none" (а не просто отсутствие tblBorders) — чтобы Word не подставил рамку
+// из стиля таблицы по умолчанию.
+const TBL_NO_BORDERS = `<w:tblBorders>
+  <w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>
+  <w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>
+  <w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>
+  <w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>
+  <w:insideH w:val="none" w:sz="0" w:space="0" w:color="auto"/>
+  <w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/>
+</w:tblBorders>`;
+// colWidths (в твипах) фиксирует ширины колонок через tblGrid + tblLayout
+// w:type="fixed" — иначе Word перераспределяет ширины по содержимому и
+// таблица "плывёт" (ревью #3: "tblGrid пустой и ширины строк явно не
+// закреплены — Word может перераспределить таблицу").
+function wTable(rowsXml, opts){
+  opts = opts || {};
+  const borders = opts.noBorders ? TBL_NO_BORDERS : TBL_BORDERS;
+  const grid = opts.colWidths ? `<w:tblGrid>${opts.colWidths.map(w=>`<w:gridCol w:w="${w}"/>`).join('')}</w:tblGrid>` : '<w:tblGrid/>';
+  const layout = opts.colWidths ? '<w:tblLayout w:type="fixed"/>' : '';
+  const tblW = opts.colWidths
+    ? `<w:tblW w:w="${opts.colWidths.reduce((a,b)=>a+b,0)}" w:type="dxa"/>`
+    : '<w:tblW w:w="0" w:type="auto"/>';
+  return `<w:tbl><w:tblPr>${tblW}${layout}${borders}</w:tblPr>${grid}${rowsXml.join('')}</w:tbl>`;
 }
 
+// Ширины колонок таблиц "Наименование работ"/"Израсходованные материалы" —
+// 2,29 / 11,26 / 2,75 см (см. присланный образец), в твипах (1см = 566,929тв).
+const ACT_TABLE_COL_WIDTHS = [1298, 6384, 1559];
+const ACT_SIG_COL_WIDTHS = [4673, 4673];
+
 /* Собирает word/document.xml для конкретного акта — разметка повторяет
-   структуру присланного пользователем бланка (см. историю обсуждения):
-   заголовок с номером/датой, тип действия, таблица работ, таблица
-   материалов, строка результата (авто-статус + ручной текст), строка ОТК,
-   блок подписей (Передал — фиксированный, Принял — под рукописную подпись). */
+   структуру присланного пользователем бланка: заголовок в 3 строки
+   (АКТ №.../выполненных работ/от «...»), объединённая строка над таблицей
+   работ с типом действия/изделием/заявкой/датой, две трёхколоночные таблицы
+   с закреплёнными ширинами, нумерованный результат ("1. Результат
+   выполненных работ: произведено: - ..."), строка ОТК и безрамочный
+   двухколоночный блок подписей (Передал — фиксированный подписант, Принял —
+   под рукописную подпись). */
 function buildWorkActDocumentXml(d){
   const body = [];
-  body.push(wPara(`АКТ ВЫПОЛНЕННЫХ РАБОТ №${(/(\d+)\s*$/.exec(d.no||'')||[])[1]||d.no}`, {bold:true, size:28, align:'center', spacingAfter:40}));
+  const num = (/(\d+)\s*$/.exec(d.no||'')||[])[1] || d.no;
+  body.push(wPara(`АКТ №${num}`, {bold:true, align:'center', spacingAfter:0}));
+  body.push(wPara('выполненных работ', {bold:true, align:'center', spacingAfter:0}));
   body.push(wPara(`от ${formatActDateLong(d.date)}`, {align:'center', spacingAfter:200}));
 
-  body.push(wPara(`Изделие: ${d.item||''}${d.serial&&d.serial!=='—'?' № '+d.serial:''}`));
-  if(d.orderNo) body.push(wPara(`Номер заявки: ${d.orderNo}`));
-  if(d.defektDoc) body.push(wPara(`Акт дефектовки: ${d.defektDoc}`));
   body.push(wPara(`Пост: ${d.post||''}`));
-  body.push(wPara(`Вид действия: ${(d.actionTypes||[]).join(', ')||'—'}`, {spacingAfter:200}));
+  if(d.defektDoc) body.push(wPara(`Акт дефектовки: ${d.defektDoc}`, {spacingAfter:200}));
 
-  body.push(wPara('Наименование работ', {bold:true, spacingAfter:60}));
-  const workRows = [ wRow([wCell('№ п/п',{bold:true,align:'center',width:600}), wCell('Наименование работы',{bold:true}), wCell('Кол-во',{bold:true,align:'center',width:1200})]) ];
+  const mergedInfo = [
+    (d.actionTypes||[]).join(', ') || '—',
+    `${d.item||''}${d.serial&&d.serial!=='—'?' № '+d.serial:''}`,
+    d.orderNo ? `заявка ${d.orderNo}` : '',
+    `от ${d.date}`,
+  ].filter(Boolean).join(' — ');
+
+  const workRows = [
+    wRow([wCell('№ п/п',{bold:true,align:'center',width:ACT_TABLE_COL_WIDTHS[0]}), wCell('Наименование работ',{bold:true,width:ACT_TABLE_COL_WIDTHS[1]}), wCell('Кол-во',{bold:true,align:'center',width:ACT_TABLE_COL_WIDTHS[2]})]),
+    wRow([wCell(mergedInfo,{bold:true,align:'center',span:3})]),
+  ];
   (d.works||[]).forEach((w,i)=> workRows.push(wRow([wCell(String(i+1),{align:'center'}), wCell(w.type), wCell(String(w.qty),{align:'center'})])) );
   if(!(d.works||[]).length) workRows.push(wRow([wCell('',{align:'center'}), wCell('— не указаны —'), wCell('',{align:'center'})]));
-  body.push(wTable(workRows));
+  body.push(wTable(workRows, {colWidths:ACT_TABLE_COL_WIDTHS}));
 
-  body.push(wPara('Израсходованные материалы', {bold:true, spacingAfter:60}));
-  const matRows = [ wRow([wCell('№ п/п',{bold:true,align:'center',width:600}), wCell('Материал',{bold:true}), wCell('Артикул',{bold:true}), wCell('Кол-во',{bold:true,align:'center',width:1200})]) ];
+  const matRows = [ wRow([wCell('№ п/п',{bold:true,align:'center',width:ACT_TABLE_COL_WIDTHS[0]}), wCell('Материал',{bold:true,width:ACT_TABLE_COL_WIDTHS[1]}), wCell('Кол-во',{bold:true,align:'center',width:ACT_TABLE_COL_WIDTHS[2]})]) ];
   (d.materials||[]).forEach((m,i)=>{
     const it = item(m.id);
-    matRows.push(wRow([wCell(String(i+1),{align:'center'}), wCell(it?it.name:m.id), wCell(it?it.sku:''), wCell(it?`${m.q} ${it.unit}`:String(m.q),{align:'center'})]));
+    const name = it ? `${it.name}${it.sku?` (арт. ${it.sku})`:''}` : m.id;
+    matRows.push(wRow([wCell(String(i+1),{align:'center'}), wCell(name), wCell(it?`${m.q} ${it.unit}`:String(m.q),{align:'center'})]));
   });
-  if(!(d.materials||[]).length) matRows.push(wRow([wCell('',{align:'center'}), wCell('— не использовались —'), wCell(''), wCell('',{align:'center'})]));
-  body.push(wTable(matRows));
+  if(!(d.materials||[]).length) matRows.push(wRow([wCell('',{align:'center'}), wCell('— не использовались —'), wCell('',{align:'center'})]));
+  body.push(wPara('Израсходованные материалы', {bold:true, spacingAfter:60}));
+  body.push(wTable(matRows, {colWidths:ACT_TABLE_COL_WIDTHS}));
 
   const statusLine = actResultStatus(d.actionTypes);
-  const resultLine = [statusLine, (d.resultText||'').trim()].filter(Boolean).join(' — ');
-  body.push(wPara('Результат выполненных работ:', {bold:true, spacingAfter:40}));
-  body.push(wPara(resultLine || '—', {spacingAfter:200}));
+  const resultItems = [statusLine, (d.resultText||'').trim()].filter(Boolean);
+  if(!resultItems.length) resultItems.push('—');
+  body.push(wPara('1. Результат выполненных работ: произведено:', {bold:true, spacingAfter:40}));
+  resultItems.forEach(line => body.push(wPara(`- ${line}`, {spacingAfter:40})));
 
   body.push(wPara('ОТК пройдено ответственный командир отделения ремонтного поста __________________________ (ФИО, подпись)', {spacingAfter:300}));
 
   body.push(wTable([
-    wRow([wCell('Передал:',{bold:true,width:2200}), wCell(`${ACT_HANDOVER_SIGNER.title} _________________\n${ACT_HANDOVER_SIGNER.name}`)]),
-    wRow([wCell('Принял:',{bold:true,width:2200}), wCell('_________________________________________ (ФИО, подпись)')]),
-  ]));
+    wRow([
+      wCell(`Передал: ${ACT_HANDOVER_SIGNER.title} _________________\n${ACT_HANDOVER_SIGNER.name}`, {width:ACT_SIG_COL_WIDTHS[0]}),
+      wCell('Принял: _________________________________________ (ФИО, подпись)', {width:ACT_SIG_COL_WIDTHS[1]}),
+    ]),
+  ], {noBorders:true, colWidths:ACT_SIG_COL_WIDTHS}));
 
   body.push('<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="850" w:bottom="1134" w:left="1701" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr>');
 
@@ -5284,15 +5457,27 @@ function buildWorkActDocumentXml(d){
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body.join('')}</w:body></w:document>`;
 }
 
+const DOCX_STYLES_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docDefaults>
+    <w:rPrDefault><w:rPr>${DOCX_FONT_RPR}</w:rPr></w:rPrDefault>
+  </w:docDefaults>
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+</w:styles>`;
 const DOCX_CONTENT_TYPES_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
 </Types>`;
 const DOCX_RELS_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`;
+const DOCX_DOCUMENT_RELS_XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
 </Relationships>`;
 
 function buildWorkActDocxBytes(d){
@@ -5302,6 +5487,8 @@ function buildWorkActDocxBytes(d){
     {name:'[Content_Types].xml', data:toBytes(DOCX_CONTENT_TYPES_XML)},
     {name:'_rels/.rels', data:toBytes(DOCX_RELS_XML)},
     {name:'word/document.xml', data:toBytes(buildWorkActDocumentXml(d))},
+    {name:'word/styles.xml', data:toBytes(DOCX_STYLES_XML)},
+    {name:'word/_rels/document.xml.rels', data:toBytes(DOCX_DOCUMENT_RELS_XML)},
   ];
   return buildZipStore(files);
 }
