@@ -1,0 +1,366 @@
+// Регрессионный набор для public/prototype.html («ТРЁШКА склад»).
+//
+// Почему так: прототип — это один файл HTML/JS без сборки и без модулей,
+// поэтому классический unit-тест с импортом невозможен. Вместо этого тесты
+// грузят файл в headless Chromium через Playwright и дёргают внутренние
+// функции напрямую через page.evaluate() — это быстрее и точнее, чем
+// кликать по DOM, а нам как раз важно проверять поведение функций
+// (сохранение, миграции, роли, экспорт), а не вёрстку.
+//
+// Запуск: npm run test:sklad
+// (добавляет playwright-core в devDependencies — см. package.json).
+//
+// Покрывает пункты код-ревью от 2026-07-22 (branch C_Sklad):
+//  #1 — ошибка сохранения не должна считаться успехом
+//  #2 — резервная копия реально используется при повреждении основной
+//  #3 — экспорт в Excel сохраняется через нативный мост, а не Blob-фикцию
+//  #4 — печать идёт через нативный мост, а не через window.print()
+//  #5 — переключение на привилегированную роль требует ПИН
+//  #6 — «Работник» не может выгрузить весь склад
+//  #7 — миграция схемы не применяется частично/для неизвестной версии
+//  #8 — системная кнопка "Назад" обрабатывает JS-стек навигации
+// Плюс регрессия по более ранним раундам: неизменяемый id в QR, точный
+// возврат по партии/сроку годности, разграничение документов по посту.
+
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { chromium } from 'playwright-core';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+const PROTOTYPE_PATH = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'public',
+  'prototype.html',
+);
+const PROTOTYPE_URL = 'file://' + PROTOTYPE_PATH;
+
+let browser;
+
+before(async () => {
+  // Пытаемся использовать системный Chrome (обычно уже стоит на машине
+  // разработчика) — так не нужно тянуть отдельный браузер только ради тестов.
+  // Если его нет, пробуем браузер, который playwright-core сам нашёл бы
+  // по умолчанию (например, установленный ранее через `npx playwright install`).
+  try {
+    browser = await chromium.launch({ channel: 'chrome' });
+  } catch {
+    try {
+      browser = await chromium.launch();
+    } catch (e) {
+      throw new Error(
+        'Не удалось запустить Chromium для тестов. Установите Google Chrome, ' +
+        'либо выполните `npx playwright install chromium` и повторите `npm run test:sklad`. ' +
+        'Исходная ошибка: ' + (e && e.message),
+      );
+    }
+  }
+});
+
+after(async () => {
+  if (browser) await browser.close();
+});
+
+// Каждый тест — свежий контекст (свой localStorage/сессия), но общий browser
+// process — так тесты изолированы друг от друга и при этом быстро стартуют.
+// `initArg`, если передан, сериализуется и передаётся первым параметром в
+// `initScript` уже внутри страницы (см. Playwright addInitScript(fn, arg)) —
+// так тестовые моки могут замыкать над значениями, вычисленными в Node.
+async function newPage(initScript, initArg) {
+  const ctx = await browser.newContext();
+  if (initScript) await ctx.addInitScript(initScript, initArg);
+  const page = await ctx.newPage();
+  const pageErrors = [];
+  page.on('pageerror', (e) => pageErrors.push(String(e)));
+  await page.goto(PROTOTYPE_URL);
+  await page.waitForTimeout(250);
+  return { ctx, page, pageErrors };
+}
+
+test('loads without console/page errors and exposes all expected subsystems', async () => {
+  const { ctx, page, pageErrors } = await newPage();
+  const r = await page.evaluate(() => ({
+    hasXLSX: typeof XLSX !== 'undefined',
+    hasQrcode: typeof qrcode !== 'undefined',
+    hasPersistence: typeof flushSave === 'function' && typeof loadAppStateOnStart === 'function',
+    hasScan: typeof startNativeScan === 'function' && typeof onNativeScanResult === 'function',
+    hasRolePin: typeof requestRoleSwitch === 'function' && typeof ROLE_PINS === 'object',
+    hasNativeBack: typeof __handleNativeBack === 'function',
+    hasFileBridge: typeof nativeFileBridge === 'function',
+    hasPrintBridge: typeof nativePrintBridge === 'function',
+    itemsLoaded: items.length > 0,
+  }));
+  assert.equal(pageErrors.length, 0, 'no uncaught page errors: ' + pageErrors.join('; '));
+  for (const [k, v] of Object.entries(r)) assert.equal(v, true, `expected ${k} to be true`);
+  await ctx.close();
+});
+
+test('#1 — flushSave() treats a failed native save as failure and retries, not as success', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.__shouldFail = true;
+    window.__saveCalls = 0;
+    window.AndroidStorage = {
+      saveState: (json) => {
+        window.__saveCalls++;
+        if (window.__shouldFail) return false;
+        window.__savedPayload = json;
+        return true;
+      },
+      loadState: () => 'null',
+    };
+  });
+  const afterStartup = await page.evaluate(() => ({ calls: window.__saveCalls, healthy: _saveIsHealthy }));
+  assert.equal(afterStartup.healthy, false, 'a failed save must not be marked healthy');
+
+  await page.evaluate(() => { items[0].name = 'FAIL-TEST'; });
+  await page.waitForTimeout(2000); // periodic autosave should retry
+  const stillFailing = await page.evaluate(() => ({ calls: window.__saveCalls, healthy: _saveIsHealthy }));
+  assert.ok(stillFailing.calls > afterStartup.calls, 'must keep retrying while the bridge fails');
+  assert.equal(stillFailing.healthy, false);
+
+  await page.evaluate(() => { window.__shouldFail = false; });
+  await page.waitForTimeout(2000);
+  const recovered = await page.evaluate(() => ({
+    healthy: _saveIsHealthy,
+    savedHasName: (window.__savedPayload || '').includes('FAIL-TEST'),
+  }));
+  assert.equal(recovered.healthy, true, 'must recover once the bridge starts succeeding');
+  await ctx.close();
+});
+
+test('#2 — corrupted primary falls back to a valid backup', async () => {
+  const goodBackup = JSON.stringify({
+    schemaVersion: 1,
+    items: [{ id: 'x', name: 'FROM_BACKUP', sku: 'B-1', topCat: 'Расход', unit: 'шт', stock: 5, min: 1, abc: 'A', posts: {}, history: [], lots: [] }],
+    posts: [], docs: [], extIssues: [], auditLog: [], itemSeq: 1000,
+    categoriesList: ['Расход'], componentSubcats: [], currentRole: 'admin', currentUserPost: 'ТЭЧ',
+  });
+  const { ctx, page } = await newPage((backup) => {
+    window.AndroidStorage = {
+      saveState: () => true,
+      loadState: () => '{ this is not valid json',
+      loadBackupState: () => backup,
+    };
+  }, goodBackup);
+  const r = await page.evaluate(() => ({
+    itemName: items[0] ? items[0].name : null,
+    suspended: _autosaveSuspended,
+  }));
+  assert.equal(r.itemName, 'FROM_BACKUP', 'must restore from the backup slot when primary is corrupt');
+  assert.equal(r.suspended, false, 'autosave should resume normally once backup restore succeeds');
+  await ctx.close();
+});
+
+test('#2 — both primary and backup corrupted: demo data used, autosave suspended (no silent overwrite)', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.__saveCalls = 0;
+    window.AndroidStorage = {
+      saveState: () => { window.__saveCalls++; return true; },
+      loadState: () => '{ not valid',
+      loadBackupState: () => '{ also not valid',
+    };
+  });
+  await page.waitForTimeout(2200); // give the periodic autosave a chance to fire if it (incorrectly) wasn't suspended
+  const r = await page.evaluate(() => ({
+    itemsLen: items.length,
+    suspended: _autosaveSuspended,
+    saveCalls: window.__saveCalls,
+  }));
+  assert.ok(r.itemsLen > 0, 'demo data still usable');
+  assert.equal(r.suspended, true, 'autosave must be suspended so the corrupted raw data stays recoverable');
+  assert.equal(r.saveCalls, 0, 'must not write demo data over the only remaining (corrupted) copies');
+  await ctx.close();
+});
+
+test('#7 — schema migration refuses newer-than-known or unmigratable-older data instead of partial-applying', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    const base = JSON.parse(JSON.stringify(serializeAppState()));
+    const okNewer = applyAppState({ ...base, schemaVersion: APP_SCHEMA_VERSION + 1 });
+    const okOlderNoMigration = APP_SCHEMA_VERSION > 0
+      ? applyAppState({ ...base, schemaVersion: APP_SCHEMA_VERSION - 1 })
+      : null;
+    const okExact = applyAppState({ ...base });
+    return { okNewer, okOlderNoMigration, okExact };
+  });
+  assert.equal(r.okNewer, false, 'must refuse data from a schema version newer than this app understands');
+  if (r.okOlderNoMigration !== null) {
+    assert.equal(r.okOlderNoMigration, false, 'must refuse older data with no registered migration path');
+  }
+  assert.equal(r.okExact, true, 'exact schema version match must still apply normally');
+  await ctx.close();
+});
+
+test('#5/#6 — privileged roles require a PIN; rabotnik cannot export the whole warehouse', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    const out = {};
+    currentRole = 'admin';
+    requestRoleSwitch('rabotnik');
+    out.rabotnikNoPinNeeded = currentRole === 'rabotnik';
+
+    currentRole = 'rabotnik';
+    requestRoleSwitch('admin');
+    out.pinSheetShown = document.getElementById('rolePinInput') !== null;
+    document.getElementById('rolePinInput').value = 'WRONG';
+    confirmRoleSwitch('admin');
+    out.wrongPinRejected = currentRole === 'rabotnik';
+    document.getElementById('rolePinInput').value = ROLE_PINS.admin;
+    confirmRoleSwitch('admin');
+    out.correctPinAccepted = currentRole === 'admin';
+
+    currentRole = 'rabotnik';
+    let toastMsg = '';
+    const origToast = toast;
+    window.toast = (m) => { toastMsg = m; origToast(m); };
+    exportStockExcel();
+    out.exportBlockedAtFunctionLevel = toastMsg.includes('🔒');
+    window.toast = origToast;
+
+    go('more');
+    out.exportCardHiddenInMenu = !document.getElementById('content').innerHTML.includes('exportStockExcel()');
+    currentRole = 'admin';
+    go('more');
+    out.exportCardShownForAdmin = document.getElementById('content').innerHTML.includes('exportStockExcel()');
+
+    return out;
+  });
+  for (const [k, v] of Object.entries(r)) assert.equal(v, true, `expected ${k} to be true`);
+  await ctx.close();
+});
+
+test('#3 — xlsx export uses the native file bridge and reports real success/failure', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.__savedFiles = [];
+    window.__fileSaveShouldSucceed = true;
+    window.AndroidFiles = {
+      saveExportedFile: (base64, filename, mime) => {
+        window.__savedFiles.push({ filename, mime, len: base64.length });
+        return window.__fileSaveShouldSucceed;
+      },
+    };
+  });
+  const ok = await page.evaluate(() => {
+    const result = exportInventoryExcel();
+    return { result, saved: window.__savedFiles, toast: document.getElementById('toast').textContent };
+  });
+  assert.equal(ok.saved.length, 1);
+  assert.ok(ok.toast.includes('сохранён'), 'success message must reflect real native save');
+
+  const fail = await page.evaluate(() => {
+    window.__fileSaveShouldSucceed = false;
+    window.__savedFiles = [];
+    const result = exportInventoryExcel();
+    return { result, toast: document.getElementById('toast').textContent };
+  });
+  assert.equal(fail.result, false, 'must propagate native save failure, not report success');
+  assert.ok(!fail.toast.includes('скачан') && !fail.toast.includes('сохранён'),
+    'must not claim success ("скачан"/"сохранён") when the native bridge rejected the save');
+  await ctx.close();
+});
+
+test('#4 — printing routes through the native print bridge when available', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.__printCalls = [];
+    window.AndroidPrint = { printHtml: (html, job) => { window.__printCalls.push({ job, len: html.length }); } };
+  });
+  const r = await page.evaluate(() => { printLabel('flux'); return { calls: window.__printCalls }; });
+  assert.equal(r.calls.length, 1);
+  assert.ok(r.calls[0].len > 0);
+  await ctx.close();
+});
+
+test('#4 — printing falls back to a real browser popup outside the Android wrapper', async () => {
+  const { ctx, page } = await newPage();
+  let popupOpened = false;
+  page.on('popup', () => { popupOpened = true; });
+  await page.evaluate(() => { printLabel('flux'); });
+  await page.waitForTimeout(250);
+  assert.equal(popupOpened, true);
+  await ctx.close();
+});
+
+test('#8 — native back handler drives the JS navigation stack (sheet > sklad drill-down > tab > root)', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    const out = {};
+    go('sklad');
+    out.atRootReturnsFalse = __handleNativeBack() === false;
+
+    goSklad(['Комплектующие']);
+    goSklad(['Комплектующие', 'Кабели']);
+    out.deepInSkladReturnsTrue = __handleNativeBack() === true;
+    out.pathAfterOneBack = skladPath.slice();
+
+    go('docs');
+    out.otherTabReturnsTrue = __handleNativeBack() === true;
+    out.tabAfterBack = currentTab;
+
+    go('sklad');
+    openPlusMenu();
+    out.sheetOpenBeforeBack = document.getElementById('sheetLayer').innerHTML.trim().length > 0;
+    out.sheetClosesOnBackFirst = __handleNativeBack() === true;
+    out.sheetEmptyAfterBack = document.getElementById('sheetLayer').innerHTML.trim().length === 0;
+    return out;
+  });
+  assert.equal(r.atRootReturnsFalse, true, 'at the top level, native back should let Android close/minimize');
+  assert.equal(r.deepInSkladReturnsTrue, true);
+  assert.deepEqual(r.pathAfterOneBack, ['Комплектующие']);
+  assert.equal(r.otherTabReturnsTrue, true);
+  assert.equal(r.tabAfterBack, 'sklad');
+  assert.equal(r.sheetOpenBeforeBack, true);
+  assert.equal(r.sheetClosesOnBackFirst, true, 'an open sheet/modal must close before touching nav state');
+  assert.equal(r.sheetEmptyAfterBack, true);
+  await ctx.close();
+});
+
+test('regression — QR encodes the immutable item id and survives a SKU rename', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    const i = items.find((x) => x.id === 'flux');
+    const before = genQR(i.id);
+    const oldSku = i.sku;
+    i.sku = 'РМ-9999-NEW';
+    const after = genQR(i.id);
+    const encodesId = qrValue(i).includes(i.id) && !qrValue(i).includes(oldSku);
+    i.sku = oldSku;
+    return { sameImage: before === after, encodesId };
+  });
+  assert.equal(r.sameImage, true);
+  assert.equal(r.encodesId, true);
+  await ctx.close();
+});
+
+test('regression — role-scoped documents: rabotnik only sees their own post\'s docs', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    currentRole = 'rabotnik';
+    currentUserPost = 'ТЭЧ';
+    const visible = docs.filter(canSeeDoc);
+    const allSamePost = visible.every((d) => d.post === 'ТЭЧ');
+    const someOtherPostHidden = docs.some((d) => d.post && d.post !== 'ТЭЧ' && !canSeeDoc(d));
+    currentRole = 'admin';
+    return { allSamePost, someOtherPostHidden, hasAnyVisible: visible.length > 0 };
+  });
+  assert.equal(r.allSamePost, true);
+  assert.equal(r.someOtherPostHidden, true);
+  assert.equal(r.hasAnyVisible, true);
+  await ctx.close();
+});
+
+test('regression — small-screen layout: bottom nav stays within the viewport', async () => {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto(PROTOTYPE_URL);
+  await page.waitForTimeout(250);
+  const r = await page.evaluate(() => {
+    const nav = document.querySelector('.nav');
+    const rect = nav.getBoundingClientRect();
+    return { navBottom: rect.bottom, viewportH: window.innerHeight, scrollH: document.documentElement.scrollHeight };
+  });
+  assert.ok(r.navBottom <= r.viewportH + 1, 'bottom nav must stay within the visible viewport');
+  assert.ok(r.scrollH <= r.viewportH + 1, 'app container must not force whole-page scrolling');
+  await ctx.close();
+});

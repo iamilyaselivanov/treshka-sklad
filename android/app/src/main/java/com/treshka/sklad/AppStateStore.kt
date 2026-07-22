@@ -92,7 +92,14 @@ class AppStateStore(context: Context) :
             values.put(COL_SCHEMA_VERSION, schemaVersion)
             values.put(COL_PAYLOAD, payload)
             values.put(COL_UPDATED_AT, System.currentTimeMillis())
-            db.insertWithOnConflict(TABLE, null, values, SQLiteDatabase.CONFLICT_REPLACE)
+            // #10 ревью: insertWithOnConflict() может вернуть -1 при ошибке —
+            // раньше результат игнорировался, и мы всё равно помечали транзакцию
+            // успешной и возвращали true, хотя запись могла не произойти.
+            val rowId = db.insertWithOnConflict(TABLE, null, values, SQLiteDatabase.CONFLICT_REPLACE)
+            if (rowId == -1L) {
+                Log.e(TAG, "save() failed: insertWithOnConflict() вернул -1, транзакция НЕ помечена успешной")
+                return false
+            }
             db.setTransactionSuccessful()
             return true
         } catch (e: Exception) {

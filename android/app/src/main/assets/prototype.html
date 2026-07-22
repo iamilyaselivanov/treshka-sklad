@@ -2823,6 +2823,44 @@ let currentUserPost = 'ТЭЧ'; // пост, к которому привяза�
 function isRabotnikRestrictedToPost(){ return currentRole==='rabotnik'; }
 function canSeeDoc(d){ return !isRabotnikRestrictedToPost() || d.post===currentUserPost; }
 
+// ================= ПИН на переключение привилегированных ролей (#5 ревью) =================
+// ВАЖНО: это сдерживающая мера в рамках клиентского прототипа, а НЕ настоящая
+// авторизация. Полноценное разграничение прав требует серверного логина
+// сотрудника (см. комментарии к персистентности — тот же принцип: клиент не
+// может быть источником правды). Значения ниже — плейсхолдер; в реальной
+// эксплуатации ПИН должен задаваться администратором и не лежать в коде.
+const ROLE_PINS = { admin:'1234', kladovshik:'0000' };
+
+function requestRoleSwitch(role){
+  if(role === currentRole){ return; }
+  const pin = ROLE_PINS[role];
+  if(!pin){ setRole(role); return; } // роль без ПИНа (рабочий) — переключаем сразу
+  const layer = $('sheetLayer');
+  layer.innerHTML = `
+    <div class="sheet-backdrop" onclick="if(event.target===this) closeSheet()">
+      <div class="sheet">
+        <div class="handle"></div>
+        <div class="sec" style="margin-top:0">ПИН роли «${esc(ROLES[role].label)}»</div>
+        <div class="fld"><input id="rolePinInput" type="password" inputmode="numeric" placeholder="Введите ПИН" autofocus></div>
+        <div id="rolePinErr" class="s" style="color:var(--red);display:none;margin:4px 0">Неверный ПИН</div>
+        <button class="btn primary" onclick="confirmRoleSwitch('${role}')">Подтвердить</button>
+      </div>
+    </div>`;
+  const inp = $('rolePinInput');
+  if(inp) inp.addEventListener('keydown', e=>{ if(e.key==='Enter') confirmRoleSwitch(role); });
+}
+function confirmRoleSwitch(role){
+  const entered = ($('rolePinInput')||{}).value || '';
+  if(entered === ROLE_PINS[role]){
+    closeSheet();
+    setRole(role);
+  } else {
+    const err = $('rolePinErr');
+    if(err) err.style.display = 'block';
+    logAction('Неверный ПИН при попытке смены роли', 'Попытка переключиться на «'+ROLES[role].label+'»');
+  }
+}
+
 const auditLog = [
   {t:'19.07.2026 15:10', user:'Иванов А.', action:'Акт с расхождением', detail:'АВР-147: получено 150, годных 147 — направлено администратору', post:'ТЭЧ', item:null},
   {t:'18.07.2026 16:40', user:'Петров С.', action:'Списание материалов', detail:'АВР-144 закрыт, антенна №000871 возвращена на склад', post:'ТЭЧ', item:'ant'},
@@ -2879,21 +2917,30 @@ function serializeAppState(){
 // Пример на будущее: STATE_MIGRATIONS[1] = function(s){ s.newField = s.newField ?? default; s.schemaVersion = 2; return s; };
 const STATE_MIGRATIONS = {};
 
+// Возвращает мигрированный объект СТРОГО на текущей версии схемы, либо null,
+// если безопасно довести данные до текущей версии не удалось (нет миграции для
+// какого-то промежуточного шага, либо сохранённые данные новее, чем понимает
+// эта версия приложения — например, после отката apk). null означает "не знаем,
+// как это применить" — вызывающий код обязан НЕ трогать текущее состояние
+// в этом случае, а не наполовину применять несовместимую схему.
 function migrateAppState(saved){
   let s = saved;
+  if(typeof s.schemaVersion !== 'number') return null;
+  if(s.schemaVersion > APP_SCHEMA_VERSION) return null; // данные новее этой версии приложения — не понимаем формат
   let guard = 0;
   while(s.schemaVersion < APP_SCHEMA_VERSION && guard++ < 50){
     const step = STATE_MIGRATIONS[s.schemaVersion];
-    if(!step) break; // миграции для этой версии нет — останавливаемся, не трогая данные дальше
+    if(!step) return null; // миграции для этой версии нет — не можем безопасно довести до текущей
     s = step(s);
   }
-  return s;
+  return s.schemaVersion === APP_SCHEMA_VERSION ? s : null;
 }
 
 function applyAppState(saved){
   if(!saved || typeof saved !== 'object') return false;
   try{
     const s = migrateAppState(saved);
+    if(!s) return false;
     if(!Array.isArray(s.items) || !Array.isArray(s.docs) || !Array.isArray(s.posts)) return false;
     items.length = 0; items.push(...s.items);
     posts.length = 0; posts.push(...s.posts);
@@ -2912,48 +2959,108 @@ function applyAppState(saved){
   }
 }
 
+// true, пока мы не убедились, что сохранение реально доходит до хранилища —
+// выставляется в false при первой же неудачной попытке (см. #1 ревью:
+// раньше результат bridge.saveState() игнорировался и следующая попытка
+// сохранения откладывалась до следующего изменения данных).
 let _lastSavedPayload = null;
+let _saveIsHealthy = true;
+// Взводится в true, если при старте не удалось прочитать ни основные, ни резервные
+// данные (см. loadAppStateOnStart(), результат 'corrupted'). Пока флаг взведён,
+// автосохранение полностью отключено: перезаписывать хранилище демо-данными
+// нельзя — это единственный шанс администратора вручную восстановить "сырой"
+// повреждённый JSON из SQLite/localStorage для форензики.
+let _autosaveSuspended = false;
 function flushSave(){
+  if(_autosaveSuspended) return;
   const payload = JSON.stringify(serializeAppState());
-  if(payload === _lastSavedPayload) return; // ничего не изменилось — не пишем лишний раз
+  if(payload === _lastSavedPayload && _saveIsHealthy) return; // ничего не изменилось и предыдущая попытка была успешной
   const bridge = nativeStorageBridge();
   try{
+    let ok;
     if(bridge){
-      bridge.saveState(payload, APP_SCHEMA_VERSION);
+      ok = bridge.saveState(payload, APP_SCHEMA_VERSION);
     } else {
       localStorage.setItem(STORAGE_FALLBACK_KEY, payload);
+      ok = true;
     }
-    _lastSavedPayload = payload;
+    if(ok){
+      _lastSavedPayload = payload;
+      _saveIsHealthy = true;
+    } else {
+      // Нативное хранилище вернуло false (например, SQLite не смог записать) —
+      // НЕ считаем это успехом и НЕ запоминаем payload, чтобы следующий тик
+      // автосохранения обязательно повторил попытку, даже если данные с тех
+      // пор больше не менялись.
+      _saveIsHealthy = false;
+      console.error('flushSave: bridge.saveState() вернул false — данные НЕ сохранены, повторим на следующем тике');
+    }
   }catch(e){
+    _saveIsHealthy = false;
     console.error('flushSave: ошибка сохранения, попробуем на следующем тике:', e);
   }
 }
 // Периодическое автосохранение — основной механизм: не зависит от того, вызван ли
 // markDirty()/logAction() в каждой конкретной мутирующей функции, поэтому ни одно
-// изменение не потеряется из-за забытого вызова где-то в коде.
-let _autosaveTimer = setInterval(flushSave, 4000);
-// Android вызывает это перед уходом приложения в фон (onPause), гарантируя сохранение
-// последних изменений даже если процесс будет убит системой сразу после сворачивания.
+// изменение не потеряется из-за забытого вызова где-то в коде. Интервал короткий
+// (1.5с), чтобы сократить окно, в которое могут попасть несохранённые изменения,
+// если процесс убьют между onPause() и завершением асинхронного JS-вызова из Kotlin.
+let _autosaveTimer = setInterval(flushSave, 1500);
+// Android вызывает это перед уходом приложения в фон (onPause/onStop), пытаясь
+// сохранить последние изменения. ВАЖНО: вызов идёт через evaluateJavascript(),
+// который асинхронный сам по себе — Android не даёт синхронного способа
+// выполнить JS и дождаться результата в том же кадре. Поэтому это снижает риск
+// потери данных, но не даёт стопроцентной гарантии; короткий период
+// автосохранения (см. выше) — основная защита от потери данных при убийстве процесса.
 window.__flushSaveBeforePause = flushSave;
 document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='hidden') flushSave(); });
 window.addEventListener('pagehide', flushSave);
 
-function loadAppStateOnStart(){
-  const bridge = nativeStorageBridge();
+// Безопасно читает+парсит+применяет один источник (основной или резервный).
+// НИКОГДА не бросает исключение наружу — любая ошибка (сам вызов моста упал,
+// JSON.parse упал, применённые данные структурно некорректны) превращается
+// в false, чтобы вызывающий код мог перейти к следующему источнику.
+function tryLoadFrom(readFn){
   try{
-    const raw = bridge ? bridge.loadState() : localStorage.getItem(STORAGE_FALLBACK_KEY);
-    if(raw && raw!=='null' && raw!==''){
-      const saved = JSON.parse(raw);
-      const ok = applyAppState(saved);
-      if(!ok) toast('⚠ Не удалось прочитать сохранённые данные склада — открыты демо-данные, ничего не сохраняйте до проверки администратором');
-      return ok;
-    }
-    return false; // сохранённых данных нет (первый запуск) — используем демо-данные как исходные
+    const raw = readFn();
+    if(!raw || raw==='null' || raw==='') return false;
+    const saved = JSON.parse(raw);
+    return applyAppState(saved);
   }catch(e){
-    console.error('loadAppStateOnStart: ошибка чтения хранилища, демо-данные НЕ применялись поверх возможных сохранённых:', e);
-    toast('⚠ Ошибка чтения локального хранилища склада');
+    console.error('tryLoadFrom: источник не читается:', e);
     return false;
   }
+}
+
+function loadAppStateOnStart(){
+  const bridge = nativeStorageBridge();
+  const readPrimary = () => bridge ? bridge.loadState() : localStorage.getItem(STORAGE_FALLBACK_KEY);
+
+  // Была ли вообще попытка сохранения раньше? Нужно, чтобы отличить "первый
+  // запуск, сохранений ещё не было" (safe: используем демо-данные и сохраняем)
+  // от "основные данные повреждены" (unsafe: НЕ перезаписывать демо-данными —
+  // см. #2 ревью, раньше это было перепутано и backup затирался демо-контентом).
+  let primaryRaw;
+  try{ primaryRaw = readPrimary(); }catch(e){ primaryRaw = undefined; console.error('loadAppStateOnStart: bridge.loadState() упал:', e); }
+  const primaryExists = !!(primaryRaw && primaryRaw!=='null' && primaryRaw!=='');
+
+  if(!primaryExists) return 'first-run'; // сохранений ещё не было — демо-данные это безопасно сохранить
+
+  // #1/#2 ревью: раньше JSON.parse() основных данных, упав с исключением,
+  // улетал в общий catch и восстановление из резервной копии вообще не
+  // пыталось выполниться. Теперь основной и резервный источники читаются
+  // через один и тот же безопасный tryLoadFrom(), который не бросает исключений.
+  if(tryLoadFrom(readPrimary)) return 'loaded';
+
+  if(bridge && typeof bridge.loadBackupState === 'function'){
+    if(tryLoadFrom(() => bridge.loadBackupState())){
+      toast('⚠ Основные данные повреждены — восстановлено из резервной копии (возможна потеря последних изменений)');
+      return 'restored-from-backup';
+    }
+  }
+
+  toast('⚠ Данные склада повреждены, резервная копия недоступна — открыты демо-данные. НЕ вносите изменения до проверки администратором');
+  return 'corrupted'; // сигнал вызывающему коду: не делать базовый flushSave(), чтобы не затереть единственный шанс на ручное восстановление
 }
 
 /* ================= ИНВЕНТАРИЗАЦИЯ ================= */
@@ -3009,6 +3116,21 @@ function goBack(){
   const prev = stack.pop();
   if(prev){ restoreNavState(prev.snap); current = prev; prev.fn(); }
 }
+// #8 ревью: системная кнопка "Назад" в Android раньше проверяла только
+// webView.canGoBack() — реальную историю переходов WebView, которая в этом
+// SPA почти никогда не продвигается (навигация внутри прототипа держит
+// собственный JS-стек `stack`, а не грузит новые страницы). Из-за этого
+// системная кнопка "Назад" почти всегда сразу закрывала приложение, даже
+// если внутри было куда возвращаться. MainActivity.kt вызывает эту функцию
+// перед тем как решить, закрывать ли Activity, и ожидает строго 'true'/'false'.
+function __handleNativeBack(){
+  if($('sheetLayer') && $('sheetLayer').innerHTML.trim()){ closeSheet(); return true; }
+  if(stack.length){ goBack(); return true; }
+  if(currentTab !== 'sklad'){ go('sklad'); return true; }
+  if(skladPath.length){ goSklad([]); return true; }
+  return false; // мы на самом верхнем уровне — пусть система закрывает/сворачивает приложение
+}
+window.__handleNativeBack = __handleNativeBack;
 /* Переход внутри дерева склада — обязательно через render(), чтобы каждый
    уровень (категория → подкатегория → …) реально попадал в стек навигации. */
 function goSklad(path, resetSearch=true, resetFilters=false){
@@ -3112,14 +3234,37 @@ function csvDownload(filename, rows){
   setTimeout(()=>{document.body.removeChild(a); URL.revokeObjectURL(url);}, 300);
   toast('⤓ Файл '+filename+' скачан');
 }
+// #4 ревью: раньше печать всегда шла через window.open()+document.write()+
+// window.print() во втором WebView (см. MainActivity.kt: PrintPopupChromeClient).
+// Обычный Android WebView НЕ реализует window.print() — вызов молча ничего не
+// делает, пользователь видит только предпросмотр без реальной системной печати
+// или сохранения в PDF. Теперь: внутри Android-приложения HTML передаётся
+// нативному мосту window.AndroidPrint, который печатает его через
+// PrintManager/createPrintDocumentAdapter() (см. MainActivity.kt: printHtmlContent).
+// Вне приложения (предпросмотр в браузере) — прежний путь через window.open(),
+// где window.print() у обычного браузера действительно работает.
+function nativePrintBridge(){
+  return (typeof window!=='undefined' && window.AndroidPrint && typeof window.AndroidPrint.printHtml==='function')
+    ? window.AndroidPrint : null;
+}
+function printHtmlDocument(html, jobName){
+  const bridge = nativePrintBridge();
+  if(bridge){
+    try{ bridge.printHtml(html, jobName); }
+    catch(e){ toast('⚠ Ошибка печати: '+(e.message||e)); }
+    return;
+  }
+  const w = window.open('', '_blank', 'width=480,height=640');
+  if(!w){ toast('Разрешите всплывающие окна для печати'); return; }
+  w.document.write(html);
+  w.document.close();
+}
 function printLabel(id){
   const i = items.find(x=>x.id===id);
   const src = genQR(id);
-  const w = window.open('', '_blank', 'width=400,height=500');
-  if(!w){ toast('Разрешите всплывающие окна для печати'); return; }
   const skuTxt = i ? esc(i.sku) : '';
   const nameTxt = i ? esc(i.name) : '';
-  w.document.write(`<html><head><title>Этикетка ${skuTxt}</title><style>
+  const html = `<html><head><title>Этикетка ${skuTxt}</title><style>
     @page{ size:60mm 40mm; margin:4mm; }
     @media print{ .noprint{display:none;} }
     body{font-family:Arial,sans-serif;text-align:center;padding:24px;}
@@ -3129,8 +3274,8 @@ function printLabel(id){
     <img src="${src||''}"><h2>${nameTxt}</h2><p>${skuTxt}</p>
     <div class="noprint">Предпросмотр печати — размер этикетки 60×40мм, поля 4мм</div>
     <script>window.onload=()=>{window.print();}<\/script>
-  </body></html>`);
-  w.document.close();
+  </body></html>`;
+  printHtmlDocument(html, 'Этикетка '+(i?i.sku:id));
 }
 
 /* ================= НИЖНЯЯ ШТОРКА (МЕНЮ +) ================= */
@@ -3414,13 +3559,14 @@ more(){
         <div style="color:var(--muted)">›</div>
       </div>
     </div>
+    ${currentRole!=='rabotnik'?`
     <div class="card" onclick="exportStockExcel()">
       <div class="row">
         <div class="icbox">⤓</div>
         <div class="grow"><div class="t">Экспорт остатков в Excel</div><div class="s">Весь склад, все категории и посты</div></div>
         <div style="color:var(--muted)">›</div>
       </div>
-    </div>
+    </div>`:''}
   `;
 },
 
@@ -3429,9 +3575,9 @@ roles(){
   $('content').innerHTML = `
     ${Object.entries(ROLES).map(([k,v])=>`
       <div class="card static">
-        <div class="row" style="cursor:pointer" onclick="setRole('${k}')">
+        <div class="row" style="cursor:pointer" onclick="requestRoleSwitch('${k}')">
           <div class="icbox">${k===currentRole?'●':'○'}</div>
-          <div class="grow"><div class="t">${v.label}${k===currentRole?'<span class="badge-role">активна</span>':''}</div><div class="s">${v.desc}</div></div>
+          <div class="grow"><div class="t">${v.label}${k===currentRole?'<span class="badge-role">активна</span>':''}${ROLE_PINS[k]?' 🔒':''}</div><div class="s">${v.desc}</div></div>
         </div>
         <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--line)">
           ${v.rights.map(r=>`<div class="s" style="color:var(--green);margin:4px 0">✓ ${r}</div>`).join('')}
@@ -3444,7 +3590,7 @@ roles(){
       <select onchange="currentUserPost=this.value; toast('Пост работника: '+this.value)">
         ${posts.map(p=>`<option ${p.name===currentUserPost?'selected':''}>${esc(p.name)}</option>`).join('')}
       </select></div>`:''}
-    <div class="progress-note">Переключатель — для демонстрации прав в прототипе. В реальном приложении роль и пост определяются логином сотрудника, а не переключателем в приложении.</div>
+    <div class="progress-note">⚠ ПИН — только сдерживающая мера прототипа против случайного/непреднамеренного переключения роли на этом же устройстве. Это НЕ полноценная авторизация: реальное разграничение прав требует входа сотрудника через сервер (логин/пароль или SSO) — без него любой, у кого физический доступ к устройству и к коду приложения, теоретически может обойти проверку. См. STATE_MIGRATIONS/persistence — тот же принцип "клиент не источник правды" применим и к ролям.</div>
   `;
 },
 
@@ -4232,16 +4378,14 @@ function checkMismatch(){
   if($('mm_submit')) $('mm_submit').disabled = !(reason && decision);
 }
 function printDoc(no){
-  const w = window.open('', '_blank', 'width=480,height=640');
-  if(!w){ toast('Разрешите всплывающие окна для печати'); return; }
   const d=docs.find(x=>x.no===no);
-  w.document.write(`<html><head><title>${no}</title><style>body{font-family:Arial,sans-serif;padding:24px;font-size:13px}h1{font-size:16px}table{width:100%;border-collapse:collapse;margin-top:10px}td{border:1px solid #ccc;padding:6px;font-size:12px}</style></head><body>
+  const html = `<html><head><title>${no}</title><style>body{font-family:Arial,sans-serif;padding:24px;font-size:13px}h1{font-size:16px}table{width:100%;border-collapse:collapse;margin-top:10px}td{border:1px solid #ccc;padding:6px;font-size:12px}</style></head><body>
     <h1>${d.kind==='defekt'?'Акт дефектовки':'Акт выполненных работ'} ${d.no}</h1>
     <p>Изделие: ${esc(d.item)} ${d.serial&&d.serial!=='—'?'№'+d.serial:''}<br>Дата: ${d.date}<br>Пост: ${d.post}</p>
     ${d.materials?`<table>${d.materials.map(m=>{const it=item(m.id);return `<tr><td>${esc(it.name)}</td><td>${m.q} ${it.unit}</td></tr>`;}).join('')}</table>`:''}
     <script>window.onload=()=>window.print();<\/script>
-  </body></html>`);
-  w.document.close();
+  </body></html>`;
+  printHtmlDocument(html, 'Акт '+no);
 }
 
 function addMat(no){
@@ -4414,10 +4558,12 @@ function createWorkFromDefekt(defektNo){
 }
 
 function setRole(role){
+  const prevRole = currentRole;
   currentRole = role;
   render({fn:views.roles}, false);
   updateNavForRole();
   toast('Роль: '+ROLES[role].label);
+  if(prevRole !== role) logAction('Смена роли', ROLES[prevRole].label+' → '+ROLES[role].label);
 }
 
 function startCycleCount(){
@@ -4468,6 +4614,24 @@ function buildWorkbook(sheets){
   });
   return wb;
 }
+const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+// Blob→base64 без построения гигантской строки за один вызов String.fromCharCode
+// (упало бы на больших файлах из-за лимита аргументов движка).
+function arrayBufferToBase64(buf){
+  const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let binary = '';
+  const chunk = 0x8000;
+  for(let i=0;i<bytes.length;i+=chunk){
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i+chunk));
+  }
+  return btoa(binary);
+}
+function nativeFileBridge(){
+  return (typeof window!=='undefined' && window.AndroidFiles && typeof window.AndroidFiles.saveExportedFile==='function')
+    ? window.AndroidFiles : null;
+}
+
 function xlsxDownload(filename, sheets){
   let ok = true, errMsg = '';
   try{
@@ -4480,17 +4644,42 @@ function xlsxDownload(filename, sheets){
     const missing = expected.filter(n=>!reparsed.SheetNames.includes(n));
     if(missing.length){ ok=false; errMsg = 'Отсутствуют листы: '+missing.join(', '); }
     if(ok){
-      const blob = new Blob([wbout], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a'); a.href=url; a.download=filename; document.body.appendChild(a); a.click();
-      setTimeout(()=>{document.body.removeChild(a); URL.revokeObjectURL(url);}, 300);
-      toast('⤓ Файл '+filename+' скачан');
+      // #3 ревью: раньше здесь всегда создавался Blob + <a download>, что в
+      // Android WebView НЕ сохраняет файл на устройство (нет DownloadListener/
+      // моста) — при этом пользователю показывалось "Файл скачан", хотя файла
+      // могло не быть вовсе. Теперь: внутри Android-приложения файл передаётся
+      // нативному мосту (см. MainActivity.kt: AndroidFiles.saveExportedFile,
+      // сохраняет через MediaStore/Downloads), и успех/неудача берутся из
+      // РЕАЛЬНОГО возврата нативного вызова, а не предполагаются.
+      const fileBridge = nativeFileBridge();
+      if(fileBridge){
+        try{
+          const base64 = arrayBufferToBase64(wbout);
+          const saved = !!fileBridge.saveExportedFile(base64, filename, XLSX_MIME);
+          if(saved){
+            toast('⤓ Файл '+filename+' сохранён в папку "Загрузки"');
+          } else {
+            ok = false; errMsg = 'Устройство отклонило сохранение файла (нет доступа к хранилищу?)';
+          }
+        }catch(e){ ok=false; errMsg = 'Ошибка сохранения на устройство: '+(e.message||e); }
+      } else {
+        // Предпросмотр вне Android-приложения — обычная браузерная загрузка через Blob.
+        const blob = new Blob([wbout], {type:XLSX_MIME});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href=url; a.download=filename; document.body.appendChild(a); a.click();
+        setTimeout(()=>{document.body.removeChild(a); URL.revokeObjectURL(url);}, 300);
+        toast('⤓ Файл '+filename+' скачан');
+      }
     }
   }catch(e){ ok=false; errMsg = e.message||String(e); }
-  if(!ok){ toast('⚠ Ошибка генерации .xlsx: '+errMsg); console.error('xlsxDownload failed:', errMsg); }
+  if(!ok){ toast('⚠ Ошибка сохранения .xlsx: '+errMsg); console.error('xlsxDownload failed:', errMsg); }
   return ok;
 }
 function exportStockExcel(){
+  // Защита на уровне функции (не только скрытая кнопка в меню — см. #6 ревью):
+  // выгрузка всего склада по всем постам не должна быть доступна роли «Работник»,
+  // даже если функция вызвана напрямую, а не через скрытый в UI пункт меню.
+  if(currentRole==='rabotnik'){ toast('🔒 Экспорт всего склада недоступен роли «Работник»'); return false; }
   const stockRows=[['Артикул','Название','Раздел','Подраздел','Остаток','Ед.','Мин.остаток','ABC']];
   items.forEach(i=>stockRows.push([i.sku,i.name,i.topCat,i.subCat||'',i.stock,i.unit,i.min,i.abc]));
 
@@ -4514,14 +4703,17 @@ function exportStockExcel(){
   const movementsRows=[['Дата/время','Пользователь','Действие','Детали','Пост','Карточка']];
   auditLog.forEach(a=>{ const it=a.item?item(a.item):null; movementsRows.push([a.t,a.user,a.action,a.detail,a.post||'',it?it.sku:'']); });
 
-  xlsxDownload('sklad_ostatki.xlsx', [
+  const ok = xlsxDownload('sklad_ostatki.xlsx', [
     {name:'Остатки', rows:stockRows},
     {name:'Посты', rows:postsRows},
     {name:'Партии', rows:lotsRows},
     {name:'Документы', rows:docsRows},
     {name:'Движения', rows:movementsRows},
   ]);
-  logAction('Экспорт остатков в Excel', `${items.length} позиций`);
+  // Пишем в журнал только реально состоявшийся экспорт — иначе аудит-лог
+  // будет утверждать, что выгрузка прошла, даже когда xlsxDownload() вернул false.
+  if(ok) logAction('Экспорт остатков в Excel', `${items.length} позиций`);
+  return ok;
 }
 function exportPostExcel(idx){
   const p=posts[idx];
@@ -4534,17 +4726,19 @@ function exportPostExcel(idx){
     (s.lots||[]).forEach(l=>lotsRows.push([it.name,it.sku,l.lot,l.q,l.exp||'—']));
   });
 
-  xlsxDownload(`post_${p.name.replace(/\s+/g,'_')}.xlsx`, [
+  const ok = xlsxDownload(`post_${p.name.replace(/\s+/g,'_')}.xlsx`, [
     {name:'Пост', rows:infoRows},
     {name:'Партии', rows:lotsRows},
   ]);
-  logAction('Экспорт акта по посту', p.name, p.name);
+  if(ok) logAction('Экспорт акта по посту', p.name, p.name);
+  return ok;
 }
 function exportDocsExcel(){
   const rows=[['№ акта','Тип','Статус','Дата','Изделие','Пост']];
   docs.forEach(d=>rows.push([d.no, d.kind==='defekt'?'Дефектовка':'Акт работ', d.status, d.date, d.item, d.post]));
-  xlsxDownload('dokumenty_akty.xlsx', [{name:'Документы', rows}]);
-  logAction('Экспорт документов в Excel', `${docs.length} актов`);
+  const ok = xlsxDownload('dokumenty_akty.xlsx', [{name:'Документы', rows}]);
+  if(ok) logAction('Экспорт документов в Excel', `${docs.length} актов`);
+  return ok;
 }
 function exportWorkActExcel(no){
   const d=docs.find(x=>x.no===no);
@@ -4555,24 +4749,38 @@ function exportWorkActExcel(no){
   const matRows=[['Материал','Артикул','Количество']];
   d.materials.forEach(m=>{const it=item(m.id); if(it) matRows.push([it.name,it.sku,`${m.q} ${it.unit}`]);});
 
-  xlsxDownload(`${no}.xlsx`, [
+  const ok = xlsxDownload(`${no}.xlsx`, [
     {name:'Акт', rows:infoRows},
     {name:'Материалы', rows:matRows},
   ]);
-  logAction('Экспорт акта работ в Excel', no, d.post);
+  if(ok) logAction('Экспорт акта работ в Excel', no, d.post);
+  return ok;
 }
 function exportInventoryExcel(){
   const rows=[['Артикул','Название','Учётный остаток','Ед.']];
   items.forEach(i=>rows.push([i.sku,i.name,i.stock,i.unit]));
-  xlsxDownload('inventarizatsiya.xlsx', [{name:'Инвентаризация', rows}]);
-  logAction('Экспорт инвентаризации в Excel', `${items.length} позиций`);
+  const ok = xlsxDownload('inventarizatsiya.xlsx', [{name:'Инвентаризация', rows}]);
+  if(ok) logAction('Экспорт инвентаризации в Excel', `${items.length} позиций`);
+  return ok;
 }
 
 /* start */
-loadAppStateOnStart();
+const _startupLoadResult = loadAppStateOnStart();
 go('sklad');
 updateNavForRole();
-flushSave(); // гарантируем, что на самом первом запуске (демо-данные) сразу появляется бэкап в хранилище
+if(_startupLoadResult === 'corrupted'){
+  // И основные, и резервные данные не читаются (#2 ревью). Полностью отключаем
+  // автосохранение на эту сессию, чтобы демо-данные не затёрли единственный
+  // оставшийся "сырой" повреждённый JSON — его ещё можно попытаться
+  // восстановить вручную (см. AppStateStore.load()/loadBackup()), но только
+  // пока их не перезаписали. Работать с демо-данными в этом режиме можно,
+  // но результат не сохранится — предупреждение уже показано пользователю.
+  _autosaveSuspended = true;
+} else {
+  // Базовый flushSave() при старте нужен только чтобы на самом первом запуске
+  // (демо-данные, сохранений ещё не было) сразу появилась резервная копия.
+  flushSave();
+}
 </script>
 </body>
 </html>

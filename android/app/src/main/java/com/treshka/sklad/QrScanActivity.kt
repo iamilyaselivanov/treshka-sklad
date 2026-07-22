@@ -42,14 +42,23 @@ class QrScanActivity : AppCompatActivity() {
 
     companion object {
         const val EXTRA_RESULT_VALUE = "result_value"
+        // #12 ревью: раньше отказ в разрешении на камеру и сбой её запуска
+        // одинаково превращались в "Сканирование отменено" — пользователь не мог
+        // отличить "я сам отменил" от "камера не работает"/"нет разрешения".
+        // Причина отмены передаётся обратно вызывающей Activity через этот extra.
+        const val EXTRA_CANCEL_REASON = "cancel_reason"
+        const val REASON_USER_CANCELLED = "user_cancelled"
+        const val REASON_PERMISSION_DENIED = "permission_denied"
+        const val REASON_CAMERA_ERROR = "camera_error"
     }
 
     private lateinit var cameraExecutor: ExecutorService
     private val resultDelivered = AtomicBoolean(false)
+    private var barcodeScanner: com.google.mlkit.vision.barcode.BarcodeScanner? = null
 
     private val requestCameraPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) startCamera() else finishWithCancel("Нет разрешения на использование камеры")
+            if (granted) startCamera() else finishWithCancel(REASON_PERMISSION_DENIED)
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -78,7 +87,7 @@ class QrScanActivity : AppCompatActivity() {
         val closeBtn = ImageButton(this).apply {
             setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
             setBackgroundColor(Color.TRANSPARENT)
-            setOnClickListener { finishWithCancel("Отменено пользователем") }
+            setOnClickListener { finishWithCancel(REASON_USER_CANCELLED) }
         }
         root.addView(closeBtn, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
@@ -108,6 +117,7 @@ class QrScanActivity : AppCompatActivity() {
             }
 
             val scanner = BarcodeScanning.getClient()
+            barcodeScanner = scanner
             val analysis = ImageAnalysis.Builder()
                 .setTargetResolution(Size(1280, 720))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -122,7 +132,7 @@ class QrScanActivity : AppCompatActivity() {
                     this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis
                 )
             } catch (e: Exception) {
-                finishWithCancel("Не удалось запустить камеру: ${e.message}")
+                finishWithCancel(REASON_CAMERA_ERROR)
             }
         }, ContextCompat.getMainExecutor(this))
     }
@@ -157,14 +167,19 @@ class QrScanActivity : AppCompatActivity() {
         finish()
     }
 
-    private fun finishWithCancel(@Suppress("UNUSED_PARAMETER") reason: String) {
+    private fun finishWithCancel(reason: String) {
         if (!resultDelivered.compareAndSet(false, true)) return
-        setResult(RESULT_CANCELED)
+        val data = Intent().putExtra(EXTRA_CANCEL_REASON, reason)
+        setResult(RESULT_CANCELED, data)
         finish()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         cameraExecutor.shutdown()
+        // #12 ревью: ML Kit BarcodeScanner держит нативные ресурсы и должен быть
+        // явно закрыт — раньше он не закрывался вовсе.
+        barcodeScanner?.close()
+        barcodeScanner = null
     }
 }
