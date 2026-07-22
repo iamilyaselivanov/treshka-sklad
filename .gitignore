@@ -40,3 +40,17 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+
+# android/ (ТРЁШКА склад apk-обёртка) — генерируемые Android Studio/Gradle файлы.
+# gradlew/gradlew.bat/gradle/wrapper/gradle-wrapper.jar НЕ игнорируются и лежат в
+# репозитории: сеть до services.gradle.org/dl.google.com/repo1.maven.org в этой
+# песочнице заблокирована (403), поэтому wrapper-jar получен из совместимого
+# npm-пакета (bootstrap-код wrapper'а версионно-независим, distributionUrl в
+# gradle-wrapper.properties указывает на нужную версию Gradle 8.7). Ниже
+# игнорируются только реально генерируемые локальные артефакты сборки/IDE.
+android/local.properties
+android/.gradle/
+android/**/build/
+android/*.iml
+android/**/*.iml
+android/.idea/
