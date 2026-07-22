@@ -209,6 +209,12 @@ test('#5/#6 — privileged roles require a PIN; rabotnik cannot export the whole
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => {
     const out = {};
+    out.startsAsWorker = currentRole === 'rabotnik';
+    out.pinsUpdated = ROLE_PINS.admin === '21208' && ROLE_PINS.kladovshik === '21208';
+    const state = serializeAppState();
+    out.privilegedRoleNotPersisted = !Object.prototype.hasOwnProperty.call(state, 'currentRole');
+    currentRole = 'admin';
+    out.savedAdminIgnoredOnLoad = applyAppState({ ...state, currentRole: 'admin' }) && currentRole === 'rabotnik';
     currentRole = 'admin';
     requestRoleSwitch('rabotnik');
     out.rabotnikNoPinNeeded = currentRole === 'rabotnik';
@@ -466,7 +472,7 @@ for (const [screen, inputId, text] of [
 ]) {
   test(`regression — "${screen}" search input keeps focus while typing (was closing the keyboard after 1 char)`, async () => {
     const { ctx, page } = await newPage();
-    await page.evaluate((s) => go(s), screen);
+    await page.evaluate((s) => { currentRole = 'admin'; go(s); }, screen);
     await page.click('#' + inputId);
     await page.type('#' + inputId, text, { delay: 25 });
     const value = await page.inputValue('#' + inputId);
@@ -500,6 +506,7 @@ test('regression — "add material" button in an open work act stays on-screen a
   await page.goto(PROTOTYPE_URL);
   await page.waitForTimeout(250);
   await page.evaluate(() => {
+    currentRole = 'admin';
     const idx = docs.findIndex((d) => d.no === 'АВР-145');
     openDoc(idx);
   });
@@ -920,23 +927,23 @@ test('regression — rabotnik can no longer freely reassign their own bound post
   await ctx.close();
 });
 
-test('v1.3 — quantity input accepts decimal comma/dot and rejects letters, negatives, zero and exponent notation', async () => {
+test('v1.3 — quantity input accepts only whole numbers and rejects fractions, letters, negatives, zero and exponent notation', async () => {
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => ({
+    integer: parseQuantity('15'),
+    zeroAllowed: parseQuantity('0', true),
     comma: parseQuantity('1,5'),
     dot: parseQuantity('2.75'),
-    leadingDot: parseQuantity('.25'),
-    zeroAllowed: parseQuantity('0', true),
     letters: parseQuantity('1abc'),
     negative: parseQuantity('-1'),
     zeroDenied: parseQuantity('0'),
     exponent: parseQuantity('1e3'),
     empty: parseQuantity(''),
   }));
-  assert.equal(r.comma, 1.5, 'Russian decimal comma must not be truncated to an integer');
-  assert.equal(r.dot, 2.75, 'decimal point must remain supported');
-  assert.equal(r.leadingDot, 0.25, 'a fractional value below one must be accepted');
+  assert.equal(r.integer, 15, 'a whole positive quantity must be accepted');
   assert.equal(r.zeroAllowed, 0, 'zero is valid only in explicitly non-negative fields');
+  assert.equal(r.comma, null, 'a fraction with a comma must be rejected, not truncated');
+  assert.equal(r.dot, null, 'a fraction with a point must be rejected, not truncated');
   assert.equal(r.letters, null, 'letters mixed with a number must be rejected');
   assert.equal(r.negative, null, 'negative quantities must be rejected');
   assert.equal(r.zeroDenied, null, 'movement/write-off quantity must be strictly positive');
@@ -950,17 +957,17 @@ test('v1.3 — quantity input accepts decimal comma/dot and rejects letters, neg
     const stockBefore = i.stock;
     const postBefore = i.posts[post] || 0;
     openQuickTransfer(i.id, 'toPost', post);
+    document.getElementById('qt_qty').value = '2';
+    submitQuickTransfer(i.id, 'toPost');
+    const afterInteger = { stock: i.stock, post: i.posts[post] || 0 };
+    openQuickTransfer(i.id, 'toPost', post);
     document.getElementById('qt_qty').value = '0,5';
     submitQuickTransfer(i.id, 'toPost');
-    const afterFraction = { stock: i.stock, post: i.posts[post] || 0 };
-    openQuickTransfer(i.id, 'toPost', post);
-    document.getElementById('qt_qty').value = '-1';
-    submitQuickTransfer(i.id, 'toPost');
-    return { stockBefore, postBefore, afterFraction, afterInvalid: { stock: i.stock, post: i.posts[post] || 0 } };
+    return { stockBefore, postBefore, afterInteger, afterInvalid: { stock: i.stock, post: i.posts[post] || 0 } };
   });
-  assert.equal(movement.afterFraction.stock, movement.stockBefore - 0.5, 'fractional issue must decrement warehouse stock exactly');
-  assert.equal(movement.afterFraction.post, movement.postBefore + 0.5, 'fractional issue must increment post stock exactly');
-  assert.deepEqual(movement.afterInvalid, movement.afterFraction, 'invalid/negative issue must not mutate stock');
+  assert.equal(movement.afterInteger.stock, movement.stockBefore - 2, 'integer issue must decrement warehouse stock exactly');
+  assert.equal(movement.afterInteger.post, movement.postBefore + 2, 'integer issue must increment post stock exactly');
+  assert.deepEqual(movement.afterInvalid, movement.afterInteger, 'a fractional issue must not mutate stock');
   await ctx.close();
 });
 

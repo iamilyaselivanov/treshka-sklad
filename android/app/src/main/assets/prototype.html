@@ -2865,7 +2865,9 @@ const ROLES = {
   kladovshik:{label:'Кладовщик', desc:'Складской учёт, акты и выгрузки', rights:['Создание акта дефектовки','Создание акта выполненных работ','Создание карточек и категорий','Выгрузка актов и инвентаризации в Excel'], restricted:['Создание постов недоступно','Переназначение ответственных недоступно','Закрытие актов с расхождением недоступно']},
   rabotnik:{label:'Работник (старший на посту)', desc:'Доступ только к своему посту', rights:['Создание акта дефектовки на своём посту','Создание акта выполненных работ','Списание израсходованных материалов'], restricted:['Создание карточек и категорий недоступно','Создание постов недоступно','Переназначение ответственных недоступно','Закрытие актов с расхождением недоступно']},
 };
-let currentRole = 'admin';
+// Безопасный старт: после каждого запуска пользователь входит как работник.
+// Повышение до кладовщика/администратора выполняется только через ПИН.
+let currentRole = 'rabotnik';
 let currentUserPost = 'ТЭЧ'; // пост, к которому привязан текущий пользователь с ролью «Работник»
 function isRabotnikRestrictedToPost(){ return currentRole==='rabotnik'; }
 function canSeeDoc(d){ return !isRabotnikRestrictedToPost() || d.post===currentUserPost; }
@@ -2876,7 +2878,7 @@ function canSeeDoc(d){ return !isRabotnikRestrictedToPost() || d.post===currentU
 // сотрудника (см. комментарии к персистентности — тот же принцип: клиент не
 // может быть источником правды). Значения ниже — плейсхолдер; в реальной
 // эксплуатации ПИН должен задаваться администратором и не лежать в коде.
-const ROLE_PINS = { admin:'1234', kladovshik:'0000' };
+const ROLE_PINS = { admin:'21208', kladovshik:'21208' };
 
 function requestRoleSwitch(role){
   if(role === currentRole){ return; }
@@ -2967,28 +2969,24 @@ function nowTimeStr(){
   const d = new Date();
   return `${todayStr()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
 }
-// Единые правила количества: десятичная запятая и точка допустимы,
-// буквы, знаки, экспонента, отрицательные и бесконечные значения — нет.
-// Округление защищает остатки от двоичных хвостов вроде 0.30000000000000004.
+// Единые правила количества: только целые цифры. Буквы, дробная часть,
+// знаки, экспонента, отрицательные и бесконечные значения запрещены.
 function roundQuantity(value){ return Math.round(Number(value) * 1000000) / 1000000; }
 function parseQuantity(raw, allowZero=false){
-  const normalized = String(raw??'').trim().replace(',', '.');
-  if(!/^(?:\d+|\d+\.\d+|\.\d+)$/.test(normalized)) return null;
+  const normalized = String(raw??'').trim();
+  if(!/^\d+$/.test(normalized)) return null;
   const value = Number(normalized);
   if(!Number.isFinite(value) || value<0 || (!allowZero && value===0)) return null;
   return roundQuantity(value);
 }
 function normalizeQuantityInput(el){
   const raw = String(el.value??'');
-  // Не превращаем случайно "-5" в положительные 5 — очищаем поле целиком.
-  if(/[+-]/.test(raw)){ el.value=''; return; }
-  let value = raw.replace(/\s/g,'').replace(/,/g,'.').replace(/[^\d.]/g,'');
-  const dot = value.indexOf('.');
-  if(dot>=0) value = value.slice(0,dot+1) + value.slice(dot+1).replace(/\./g,'');
-  el.value = value;
+  // Не превращаем "-5" или "1.5" в другое допустимое число — неверный
+  // ввод очищается целиком, чтобы пользователь ввёл значение заново.
+  el.value = /^\d*$/.test(raw) ? raw : '';
 }
 function quantityInputAttrs(){
-  return 'type="text" inputmode="decimal" autocomplete="off" oninput="normalizeQuantityInput(this)"';
+  return 'type="text" inputmode="numeric" autocomplete="off" pattern="[0-9]*" oninput="normalizeQuantityInput(this)"';
 }
 function logAction(action, detail, post, itemId){
   auditLog.unshift({t:nowTimeStr(), user:ROLES[currentRole].label, action, detail, post:post||null, item:itemId||null});
@@ -3022,7 +3020,7 @@ function serializeAppState(){
   return {
     schemaVersion: APP_SCHEMA_VERSION,
     savedAt: nowTimeStr(),
-    itemSeq, categoriesList, componentSubcats, currentRole, currentUserPost,
+    itemSeq, categoriesList, componentSubcats, currentUserPost,
     items, posts, docs, extIssues, auditLog,
   };
 }
@@ -3103,7 +3101,9 @@ function applyAppState(saved){
     const itemSeqNext = typeof s.itemSeq === 'number' ? s.itemSeq : itemSeq;
     const categoriesListNext = (Array.isArray(s.categoriesList) && s.categoriesList.length) ? s.categoriesList : categoriesList;
     const componentSubcatsNext = (Array.isArray(s.componentSubcats) && s.componentSubcats.length) ? s.componentSubcats : componentSubcats;
-    const currentRoleNext = (s.currentRole && ROLES[s.currentRole]) ? s.currentRole : currentRole;
+    // Привилегированная роль никогда не восстанавливается из сохранения:
+    // после нового запуска всегда требуется повторный ввод ПИН.
+    const currentRoleNext = 'rabotnik';
     const currentUserPostNext = s.currentUserPost ? s.currentUserPost : currentUserPost;
 
     // Точка применения — все поля выше уже провалидированы, здесь только
@@ -4093,8 +4093,8 @@ function submitNewItem(){
   const subCat = topCat==='Комплектующие' ? $('ni_sub').value : undefined;
   const stockVal=parseQuantity($('ni_stock').value, true);
   const minVal=parseQuantity($('ni_min').value, true);
-  if(stockVal===null){ toast('Начальный остаток: введите ноль или положительное число без букв'); return; }
-  if(minVal===null){ toast('Минимальный остаток: введите ноль или положительное число без букв'); return; }
+  if(stockVal===null){ toast('Начальный остаток: введите целое неотрицательное число'); return; }
+  if(minVal===null){ toast('Минимальный остаток: введите целое неотрицательное число'); return; }
   const sku = $('ni_sku').value.trim() || null;
   if(sku && items.some(x=>x.sku===sku)){ toast('Артикул «'+sku+'» уже используется другим товаром'); return; }
   itemSeq++;
@@ -4139,7 +4139,7 @@ function submitEditItem(id){
   }
   i.unit=$('ei_unit').value.trim()||i.unit;
   const minVal=parseQuantity($('ei_min').value, true);
-  if(minVal===null){ toast('Минимальный остаток: введите ноль или положительное число без букв'); return; }
+  if(minVal===null){ toast('Минимальный остаток: введите целое неотрицательное число'); return; }
   i.min=minVal;
   i.desc=$('ei_desc').value;
   logAction('Карточка отредактирована', `${i.name} (${i.sku})`);
@@ -4276,7 +4276,7 @@ function submitQuickTransfer(itemId, direction){
   const post=$('qt_post').value;
   const qty=parseQuantity($('qt_qty').value);
   if(!post){ toast('Выберите пост'); return; }
-  if(qty===null){ toast('Введите положительное количество числом без букв'); return; }
+  if(qty===null){ toast('Введите целое положительное количество'); return; }
   if(direction==='toPost'){
     if(qty>i.stock){ toast('Недостаточно на складе: '+i.stock+' '+i.unit); return; }
     transferToPost(i, post, qty);
@@ -4368,7 +4368,7 @@ function toggleIssueItem(id, mode, avail){
 }
 function setIssueQty(id, val, avail){
   let v=parseQuantity(val, true);
-  if(v===null){ toast('Введите количество числом без букв и знака минус'); v=0; }
+  if(v===null){ toast('Введите целое неотрицательное количество'); v=0; }
   if(v>avail) v=avail;
   issueSelected[id]=v;
 }
@@ -4394,7 +4394,7 @@ let extDraftLines=[];
 function addExtLine(){
   if(currentRole==='rabotnik'){ toast('🔒 Выдачи недоступны для роли «Работник»'); return; }
   const id=$('ei_item').value, q=parseQuantity($('ei_qty').value);
-  if(q===null){ toast('Введите положительное количество числом без букв'); return; }
+  if(q===null){ toast('Введите целое положительное количество'); return; }
   const i=item(id);
   const already = extDraftLines.filter(l=>l.id===id).reduce((s,l)=>s+l.q,0);
   const remaining = i.stock - already;
@@ -4865,7 +4865,7 @@ function printDoc(no){
 
 function addMat(no){
   const id=$('addSel').value, q=parseQuantity($('addQty').value);
-  if(q===null){ toast('Введите положительное количество числом без букв'); return; }
+  if(q===null){ toast('Введите целое положительное количество'); return; }
   const d=docs.find(x=>x.no===no);
   const it=item(id);
   const existing=d.materials.find(m=>m.id===id);
@@ -4895,7 +4895,7 @@ function addWork(no){
   const type = sel==='__custom' ? ($('addWorkCustom')?.value||'').trim() : sel;
   const qty = parseQuantity($('addWorkQty').value);
   if(!type){ toast('Укажите вид работы'); return; }
-  if(qty===null){ toast('Введите положительное количество числом без букв'); return; }
+  if(qty===null){ toast('Введите целое положительное количество'); return; }
   const d=docs.find(x=>x.no===no);
   d.works.push({type, qty});
   toast('✓ Работа добавлена в акт');
@@ -5112,7 +5112,7 @@ function startCycleCount(){
 }
 function setCount(id, val){
   const v = parseQuantity(val, true);
-  if(v===null){ toast('Введите ноль или положительное число без букв'); delete cycleCount.counts[id]; return; }
+  if(v===null){ toast('Введите целое неотрицательное количество'); delete cycleCount.counts[id]; return; }
   cycleCount.counts[id] = v;
 }
 function finishCycleCount(){
