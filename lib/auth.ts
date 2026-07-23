@@ -10,7 +10,10 @@ export type SessionUser = {
   assignment: string;
 };
 
-const ITERATIONS = 310_000;
+// Keep password hashing within the Cloudflare Worker CPU budget. The iteration
+// count is stored in every hash, so it can be raised later without breaking
+// existing accounts.
+const ITERATIONS = 100_000;
 const SESSION_COOKIE = "treshka_session";
 const SESSION_SECONDS = 60 * 60 * 24 * 7;
 

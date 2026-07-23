@@ -319,30 +319,43 @@ function CredentialsForm({
     event.preventDefault();
     setSaving(true);
     setError("");
-    const endpoint = mode === "recover" ? "recover-owner" : mode;
-    const response = await fetch(`/api/auth/${endpoint}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        callsign,
-        login,
-        password,
-        newPassword: password,
-        setupCode: mode === "setup" ? securityCode : undefined,
-        recoveryCode: mode === "recover" ? securityCode : undefined,
-      }),
-    });
-    const data = (await response.json()) as { user?: AuthUser; error?: string };
-    setSaving(false);
-    if (mode === "setup" && response.status === 409 && ownerExists) {
-      ownerExists();
-      return;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 45_000);
+    try {
+      const endpoint = mode === "recover" ? "recover-owner" : mode;
+      const response = await fetch(`/api/auth/${endpoint}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          callsign,
+          login,
+          password,
+          newPassword: password,
+          setupCode: mode === "setup" ? securityCode : undefined,
+          recoveryCode: mode === "recover" ? securityCode : undefined,
+        }),
+      });
+      const data = (await response.json()) as { user?: AuthUser; error?: string };
+      if (mode === "setup" && response.status === 409 && ownerExists) {
+        ownerExists();
+        return;
+      }
+      if (!response.ok || !data.user) {
+        setError(data.error || "Не удалось войти");
+        return;
+      }
+      complete(data.user);
+    } catch (requestError) {
+      setError(
+        requestError instanceof DOMException && requestError.name === "AbortError"
+          ? "Сервер не ответил за 45 секунд. Повторите попытку."
+          : "Нет связи с сервером. Проверьте интернет и повторите попытку.",
+      );
+    } finally {
+      window.clearTimeout(timeout);
+      setSaving(false);
     }
-    if (!response.ok || !data.user) {
-      setError(data.error || "Не удалось войти");
-      return;
-    }
-    complete(data.user);
   }
 
   return (
