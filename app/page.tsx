@@ -50,7 +50,15 @@ export default function Home() {
   }, [refresh]);
 
   if (!status) return <AuthShell title="Проверяем доступ…" text="Подключаемся к серверу версии 1.6." />;
-  if (status.setupRequired) return <CredentialsForm mode="setup" complete={(user) => setStatus({ setupRequired: false, user })} />;
+  if (status.setupRequired) {
+    return (
+      <CredentialsForm
+        mode="setup"
+        complete={(user) => setStatus({ setupRequired: false, user })}
+        ownerExists={() => setStatus({ setupRequired: false, user: null })}
+      />
+    );
+  }
   if (!status.user) {
     return (
       <CredentialsForm
@@ -292,11 +300,13 @@ function CredentialsForm({
   complete,
   recover,
   cancel,
+  ownerExists,
 }: {
   mode: "setup" | "login" | "recover";
   complete: (user: AuthUser) => void;
   recover?: () => void;
   cancel?: () => void;
+  ownerExists?: () => void;
 }) {
   const [callsign, setCallsign] = useState("");
   const [login, setLogin] = useState("");
@@ -324,6 +334,10 @@ function CredentialsForm({
     });
     const data = (await response.json()) as { user?: AuthUser; error?: string };
     setSaving(false);
+    if (mode === "setup" && response.status === 409 && ownerExists) {
+      ownerExists();
+      return;
+    }
     if (!response.ok || !data.user) {
       setError(data.error || "Не удалось войти");
       return;
