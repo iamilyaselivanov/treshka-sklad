@@ -212,9 +212,9 @@ test('#5/#6 — privileged roles require a PIN; rabotnik cannot export the whole
     out.startsAsWorker = currentRole === 'rabotnik';
     out.pinsUpdated = ROLE_PINS.admin === '21208' && ROLE_PINS.kladovshik === '21208';
     const state = serializeAppState();
-    out.privilegedRoleNotPersisted = !Object.prototype.hasOwnProperty.call(state, 'currentRole');
-    currentRole = 'admin';
-    out.savedAdminIgnoredOnLoad = applyAppState({ ...state, currentRole: 'admin' }) && currentRole === 'rabotnik';
+    out.rolePersisted = state.currentRole === 'rabotnik';
+    currentRole = 'rabotnik';
+    out.savedAdminRestoredOnLoad = applyAppState({ ...state, currentRole: 'admin' }) && currentRole === 'admin';
     currentRole = 'admin';
     requestRoleSwitch('rabotnik');
     out.rabotnikNoPinNeeded = currentRole === 'rabotnik';
@@ -389,7 +389,7 @@ test('#8 — native back handler drives the JS navigation stack (sheet > sklad d
   await ctx.close();
 });
 
-test('regression — QR encodes the immutable item id and survives a SKU rename', async () => {
+test('regression — QR changes with the SKU while the scanner remains backward-compatible with legacy internal-id labels', async () => {
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => {
     const i = items.find((x) => x.id === 'flux');
@@ -397,12 +397,14 @@ test('regression — QR encodes the immutable item id and survives a SKU rename'
     const oldSku = i.sku;
     i.sku = 'РМ-9999-NEW';
     const after = genQR(i.id);
-    const encodesId = qrValue(i).includes(i.id) && !qrValue(i).includes(oldSku);
+    const encodesNewSku = qrValue(i).includes(i.sku) && !qrValue(i).includes(i.id);
+    const legacyCodeStillResolves = items.find((x) => x.id === i.id) === i;
     i.sku = oldSku;
-    return { sameImage: before === after, encodesId };
+    return { imageChanged: before !== after, encodesNewSku, legacyCodeStillResolves };
   });
-  assert.equal(r.sameImage, true);
-  assert.equal(r.encodesId, true);
+  assert.equal(r.imageChanged, true);
+  assert.equal(r.encodesNewSku, true);
+  assert.equal(r.legacyCodeStillResolves, true);
   await ctx.close();
 });
 
@@ -655,7 +657,8 @@ test('v1.3 — application photo is stored in the defect card and automatically 
     const previewShown = !!document.querySelector('#defektPhotoBox img');
 
     document.getElementById('f_order').value = 'З-TEST-PHOTO';
-    document.getElementById('f_serial').value = 'Тестовое изделие №123456';
+    document.getElementById('f_item_name').value = 'Тестовое изделие';
+    document.getElementById('f_serial').value = '123456';
     document.getElementById('f_date').value = '22.07.2026';
     document.getElementById('f_from').value = 'Тестовое подразделение';
     document.getElementById('f_post').value = posts[0].name;
@@ -993,5 +996,227 @@ test('v1.3 — only an administrator can reassign a post responsible person', as
   assert.equal(r.buttonForAdmin, true, 'administrator must see the reassignment control');
   assert.equal(r.adminResult, true, 'administrator must be allowed to save a new responsible person');
   assert.equal(r.afterAdmin, 'Новый ответственный');
+  await ctx.close();
+});
+
+test('review round — inventory completion creates and displays a persistent inventory act', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    currentRole = 'admin';
+    views.inventory();
+    startCycleCount();
+    items.forEach((i) => setCount(i.id, String(i.stock)));
+    finishCycleCount();
+    return {
+      cycleFinished: cycleCount === null,
+      acts: inventoryActs.length,
+      no: inventoryActs[0]?.no,
+      rendered: document.getElementById('content').textContent.includes(inventoryActs[0]?.no || 'NO-ACT'),
+    };
+  });
+  assert.equal(r.cycleFinished, true);
+  assert.equal(r.acts, 1);
+  assert.match(r.no, /^ИНВ-/);
+  assert.equal(r.rendered, true);
+  await ctx.close();
+});
+
+test('review round — catalog generates collision-free SKUs, supports ABC, receipts/write-offs and safe CRUD', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    currentRole = 'admin';
+    const tempCategory = 'Тестовая категория CRUD';
+    categoriesList.push(tempCategory); CAT_ICON[tempCategory] = '🧪';
+    const catIndex = categoriesList.indexOf(tempCategory);
+    openEditCategoryForm('top', catIndex);
+    document.getElementById('ec_name').value = tempCategory + ' 2';
+    document.getElementById('ec_icon').value = '🔬';
+    const categoryEdited = submitEditCategory('top', catIndex);
+
+    skladPath = [tempCategory + ' 2'];
+    openAddItemForm();
+    document.getElementById('ni_name').value = 'Товар CRUD 1';
+    document.getElementById('ni_stock').value = '1,5';
+    const beforeInvalid = items.length;
+    submitNewItem();
+    const fractionRejected = items.length === beforeInvalid;
+    document.getElementById('ni_stock').value = '2';
+    document.getElementById('ni_abc').value = 'A';
+    submitNewItem();
+    const first = items.find((i) => i.name === 'Товар CRUD 1');
+
+    openEditItemForm(first.id);
+    document.getElementById('ei_sku').value = 'НВ-9002';
+    document.getElementById('ei_abc').value = 'B';
+    submitEditItem(first.id);
+    skladPath = [tempCategory + ' 2'];
+    openAddItemForm();
+    document.getElementById('ni_name').value = 'Товар CRUD 2';
+    document.getElementById('ni_stock').value = '0';
+    submitNewItem();
+    const second = items.find((i) => i.name === 'Товар CRUD 2');
+
+    openStockAdjustment(first.id, 'in');
+    document.getElementById('adjustQty').value = '3'; document.getElementById('adjustReason').value = 'Накладная TEST';
+    const receipt = applyStockAdjustment(first.id, 'in', null);
+    openStockAdjustment(first.id, 'off');
+    document.getElementById('adjustQty').value = '1'; document.getElementById('adjustReason').value = 'Списание TEST';
+    const writeoff = applyStockAdjustment(first.id, 'off', null);
+
+    const secondDeleted = deleteItem(second.id);
+    const categoryDeleteBlockedWhileUsed = deleteCategory('top', categoriesList.indexOf(tempCategory + ' 2')) === false;
+    first.stock = 0; first.ext = 0; first.posts = {};
+    const firstDeleted = deleteItem(first.id);
+    const categoryDeleted = deleteCategory('top', categoriesList.indexOf(tempCategory + ' 2'));
+    return { categoryEdited, fractionRejected, firstAbc: first.abc, sku1: first.sku, sku2: second.sku, receipt, writeoff, stockAfterOps: 4, actualStock: first.stock, secondDeleted, categoryDeleteBlockedWhileUsed, firstDeleted, categoryDeleted };
+  });
+  assert.equal(r.categoryEdited, true);
+  assert.equal(r.fractionRejected, true);
+  assert.equal(r.firstAbc, 'B');
+  assert.equal(r.sku1, 'НВ-9002');
+  assert.notEqual(r.sku2, r.sku1, 'automatic SKU must scan existing values instead of reusing a manually assigned number');
+  assert.equal(r.receipt, true);
+  assert.equal(r.writeoff, true);
+  assert.equal(r.secondDeleted, true);
+  assert.equal(r.categoryDeleteBlockedWhileUsed, true);
+  assert.equal(r.firstDeleted, true);
+  assert.equal(r.categoryDeleted, true);
+  await ctx.close();
+});
+
+test('review round — post movements are listed and an over-limit return is rejected atomically', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    currentRole = 'admin';
+    const i = items.find((x) => Object.values(x.posts).some((q) => q > 0));
+    const post = Object.keys(i.posts).find((p) => i.posts[p] > 0);
+    const have = i.posts[post];
+    const stockBefore = i.stock;
+    issueDest = post; issueSelected = { [i.id]: have + 1 };
+    commitIssue('sklad');
+    const rejected = i.posts[post] === have && i.stock === stockBefore && stockTransfers.length === 0;
+    issueSelected = { [i.id]: 1 };
+    commitIssue('sklad');
+    views.ext();
+    return { rejected, returned: i.posts[post] === have - 1 && i.stock === stockBefore + 1, transferCount: stockTransfers.length, visible: document.getElementById('content').textContent.includes('Возвращено на склад') };
+  });
+  assert.equal(r.rejected, true);
+  assert.equal(r.returned, true);
+  assert.equal(r.transferCount, 1);
+  assert.equal(r.visible, true);
+  await ctx.close();
+});
+
+test('review round — administrator can edit and safely delete an unused post', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    currentRole = 'admin';
+    posts.push({ name: 'Пост CRUD', full: 'Временный', curator: 'Старый', stock: [], repairs: [] });
+    const idx = posts.length - 1;
+    openEditPostForm(idx);
+    document.getElementById('ep_name').value = 'Пост CRUD 2';
+    document.getElementById('ep_full').value = 'Обновлён';
+    document.getElementById('ep_curator').value = 'Новый ответственный';
+    const edited = submitEditPost(idx);
+    const renamed = posts[idx].name === 'Пост CRUD 2' && posts[idx].curator === 'Новый ответственный';
+    const deleted = deletePost(idx);
+    return { edited, renamed, deleted, gone: !posts.some((p) => p.name === 'Пост CRUD 2') };
+  });
+  assert.deepEqual(r, { edited: true, renamed: true, deleted: true, gone: true });
+  await ctx.close();
+});
+
+test('review round — defect validation allows no serial, links/creates a card, moves it through repair and blocks non-repairable work', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    currentRole = 'admin';
+    views.newDefekt();
+    const linked = items.find((i) => i.unit === 'шт');
+    const post = posts[0].name;
+    const linkedStockBefore = linked.stock;
+    document.getElementById('f_order').value = 'З-ROUND-DEF';
+    document.getElementById('f_itemid').value = linked.id; onDefektItemChange();
+    document.getElementById('f_serial').value = '';
+    document.getElementById('f_date').value = '32.07.2026';
+    document.getElementById('f_from').value = 'Внешнее подразделение';
+    document.getElementById('f_post').value = post;
+    document.getElementById('f_callsign').value = 'Тест';
+    document.getElementById('f_fault').value = 'Не включается';
+    document.getElementById('f_defects').value = 'Неисправность';
+    document.getElementById('f_verdict').value = 'Ремонтопригодно';
+    checkDefekt();
+    const badDateRejected = document.getElementById('defSubmit').disabled;
+    document.getElementById('f_date').value = '22.07.2026'; checkDefekt();
+    const noSerialAccepted = !document.getElementById('defSubmit').disabled;
+    submitDefekt();
+    const defect = docs.find((d) => d.orderNo === 'З-ROUND-DEF');
+    const enteredRepair = linked.posts[post] > 0 && posts[0].stock.some((s) => s.id === linked.id && s.q > 0);
+    createWorkFromDefekt(defect.no);
+    const work = docs.find((d) => d.defektDoc === defect.no);
+    work.actionTypes = ['Ремонт']; work.works = [{ type: 'Ремонт', qty: 1 }]; work.participants = [{ worker: 'Мастер', work: 'Ремонт' }]; work.otkPassed = true;
+    closeWork(work.no);
+    const returnedToWarehouse = linked.stock === linkedStockBefore + 1 && !linked.posts[post];
+
+    views.newDefekt();
+    document.getElementById('f_order').value = 'З-CREATE-CARD';
+    document.getElementById('f_item_name').value = 'Новое изделие из дефектовки';
+    document.getElementById('f_create_card').checked = true;
+    document.getElementById('f_create_wrap').style.display = 'block';
+    document.getElementById('f_date').value = '22.07.2026';
+    document.getElementById('f_from').value = 'Внешнее подразделение';
+    document.getElementById('f_post').value = post;
+    document.getElementById('f_callsign').value = 'Тест';
+    document.getElementById('f_fault').value = 'Не включается';
+    document.getElementById('f_defects').value = 'Неисправность';
+    document.getElementById('f_verdict').value = 'Ремонтопригодно';
+    submitDefekt();
+    const createdDefect = docs.find((d) => d.orderNo === 'З-CREATE-CARD');
+    const cardCreatedFromDefect = !!createdDefect?.itemId && item(createdDefect.itemId)?.name === 'Новое изделие из дефектовки';
+
+    const bad = { ...JSON.parse(JSON.stringify(defect)), no: 'ДФ-BAD-ROUND', orderNo: 'BAD', verdict: 'Не подлежит ремонту (списание)', workDoc: null };
+    docs.push(bad); const workCount = docs.filter((d) => d.kind === 'work').length; createWorkFromDefekt(bad.no);
+    return { badDateRejected, noSerialAccepted, serial: defect.serial, linkedId: defect.itemId, enteredRepair, returnedToWarehouse, cardCreatedFromDefect, badWorkBlocked: docs.filter((d) => d.kind === 'work').length === workCount };
+  });
+  assert.equal(r.badDateRejected, true);
+  assert.equal(r.noSerialAccepted, true);
+  assert.equal(r.serial, '—');
+  assert.ok(r.linkedId);
+  assert.equal(r.enteredRepair, true);
+  assert.equal(r.returnedToWarehouse, true);
+  assert.equal(r.cardCreatedFromDefect, true);
+  assert.equal(r.badWorkBlocked, true);
+  await ctx.close();
+});
+
+test('review round — external issue validates date/stock and work-act rework becomes editable but cannot bypass mismatch approval', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    currentRole = 'admin';
+    views.issueExt();
+    const i = items.find((x) => x.stock > 0);
+    document.getElementById('ei_to').value = 'Получатель TEST';
+    document.getElementById('ei_item').value = i.id;
+    document.getElementById('ei_qty').value = String(i.stock + 1);
+    document.getElementById('ei_due').value = 'да';
+    const stockBefore = i.stock, extBefore = extIssues.length;
+    submitExtIssue();
+    const invalidRejected = i.stock === stockBefore && extIssues.length === extBefore;
+
+    const base = docs.find((d) => d.kind === 'work' && d.planQty != null);
+    const d = JSON.parse(JSON.stringify(base)); d.no = 'АВР-REWORK-ROUND'; d.status = 'Расхождение'; d.planQty = 10; d.factQty = 8; d.mismatchDecision = null;
+    d.actionTypes = ['Ремонт']; d.works = [{ type: 'Ремонт', qty: 1 }]; d.participants = [{ worker: 'Мастер', work: 'Ремонт' }]; d.otkPassed = true; d.materials = [];
+    docs.push(d); renderWorkDoc(d);
+    const participantEditorPresent = !!document.getElementById('participantName') && !!document.getElementById('participantWork');
+    const materialOptionsOnlyFromPost = [...document.querySelectorAll('#addSel option')].every((o) => (item(o.value)?.posts[d.post] || 0) > 0);
+    document.getElementById('mm_reason').value = 'Нужна повторная проверка'; document.getElementById('mm_decision').value = 'rework'; resolveMismatch(d.no);
+    const reopened = d.status === 'На доработке' && !hasUnresolvedMismatch(d);
+    currentRole = 'rabotnik'; closeWork(d.no);
+    return { invalidRejected, participantEditorPresent, materialOptionsOnlyFromPost, reopened, resubmitted: d.status === 'Расхождение' && d.status !== 'Закрыт' };
+  });
+  assert.equal(r.invalidRejected, true);
+  assert.equal(r.participantEditorPresent, true);
+  assert.equal(r.materialOptionsOnlyFromPost, true);
+  assert.equal(r.reopened, true);
+  assert.equal(r.resubmitted, true);
   await ctx.close();
 });
