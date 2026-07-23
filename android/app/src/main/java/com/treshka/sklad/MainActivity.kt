@@ -4,6 +4,8 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.app.Dialog
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -53,6 +55,9 @@ import java.io.FileOutputStream
  *    приложения молча ничего не делает).
  */
 class MainActivity : AppCompatActivity() {
+    companion object {
+        private const val NOTIFICATION_CHANNEL_ID = "treshka_sklad_events"
+    }
 
     private lateinit var webView: WebView
     private lateinit var appStateStore: AppStateStore
@@ -161,12 +166,15 @@ class MainActivity : AppCompatActivity() {
     // экспорт в Excel не падал молча на старых устройствах.
     private val requestStoragePermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* результат неважен: saveExportedFile() сам проверит и вернёт false при отказе */ }
+    private val requestNotificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* уведомления также остаются во внутреннем центре приложения */ }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         appStateStore = AppStateStore(this)
+        createNotificationChannel()
 
         webView = WebView(this)
         setContentView(webView)
@@ -185,6 +193,7 @@ class MainActivity : AppCompatActivity() {
         webView.addJavascriptInterface(FileExportBridge(), "AndroidFiles")
         webView.addJavascriptInterface(PrintBridge(), "AndroidPrint")
         webView.addJavascriptInterface(PhotoBridge(), "AndroidPhoto")
+        webView.addJavascriptInterface(NotificationBridge(), "AndroidNotifications")
 
         webView.webViewClient = WebViewClient()
         webView.webChromeClient = PrintPopupChromeClient()
@@ -196,6 +205,50 @@ class MainActivity : AppCompatActivity() {
                 != PackageManager.PERMISSION_GRANTED
             ) {
                 requestStoragePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    NOTIFICATION_CHANNEL_ID,
+                    "События склада",
+                    NotificationManager.IMPORTANCE_DEFAULT
+                ).apply { description = "Поступления на пост, заявки и согласование актов" }
+            )
+        }
+    }
+
+    inner class NotificationBridge {
+        @JavascriptInterface
+        fun notify(title: String, body: String) {
+            runOnUiThread {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                ) return@runOnUiThread
+                val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    android.app.Notification.Builder(this@MainActivity, NOTIFICATION_CHANNEL_ID)
+                } else {
+                    @Suppress("DEPRECATION")
+                    android.app.Notification.Builder(this@MainActivity)
+                }
+                val notification = builder
+                    .setSmallIcon(android.R.drawable.ic_dialog_info)
+                    .setContentTitle(title.take(80))
+                    .setContentText(body.take(240))
+                    .setStyle(android.app.Notification.BigTextStyle().bigText(body.take(1000)))
+                    .setAutoCancel(true)
+                    .build()
+                (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+                    .notify((System.currentTimeMillis() and 0x7fffffff).toInt(), notification)
             }
         }
     }

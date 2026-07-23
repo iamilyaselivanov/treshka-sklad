@@ -634,7 +634,7 @@ test('regression — schema migration v1→v3 preserves old data and backfills w
     };
   });
   assert.equal(r.migratedOk, true, 'v1 data must migrate cleanly to the current schema');
-  assert.equal(r.schemaVersion, 3);
+  assert.equal(r.schemaVersion, 4);
   assert.equal(r.hasActionTypes, true, 'migration must backfill actionTypes:[] where missing');
   assert.equal(r.resultTextIsString, true, 'migration must backfill resultText:\'\' where missing');
   assert.equal(r.otkPassedIsBool, true, 'migration must backfill otkPassed:false where missing');
@@ -1155,6 +1155,8 @@ test('review round — defect validation allows no serial, links/creates a card,
     const work = docs.find((d) => d.defektDoc === defect.no);
     work.actionTypes = ['Ремонт']; work.works = [{ type: 'Ремонт', qty: 1 }]; work.participants = [{ worker: 'Мастер', work: 'Ремонт' }]; work.otkPassed = true;
     closeWork(work.no);
+    currentRole = 'admin';
+    approveWork(work.no);
     const returnedToWarehouse = linked.stock === linkedStockBefore + 1 && !linked.posts[post];
 
     views.newDefekt();
@@ -1218,5 +1220,84 @@ test('review round — external issue validates date/stock and work-act rework b
   assert.equal(r.materialOptionsOnlyFromPost, true);
   assert.equal(r.reopened, true);
   assert.equal(r.resubmitted, true);
+  await ctx.close();
+});
+
+test('v1.3 — stock issue is atomic and rolls back every changed collection when recording fails', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    currentRole = 'admin';
+    const product = items.find((x) => x.stock >= 2);
+    const post = posts[0].name;
+    const before = { stock: product.stock, post: product.posts[post] || 0, transfers: stockTransfers.length, audit: auditLog.length, notifications: notifications.length };
+    const original = recordStockTransfer;
+    recordStockTransfer = () => { throw new Error('simulated persistence failure'); };
+    const ok = runStockTransaction('test', () => {
+      transferToPost(product, post, 1);
+      recordStockTransfer('toPost', post, [{ id: product.id, q: 1 }]);
+    });
+    recordStockTransfer = original;
+    const restored = item(product.id);
+    return { ok, before, after: { stock: restored.stock, post: restored.posts[post] || 0, transfers: stockTransfers.length, audit: auditLog.length, notifications: notifications.length } };
+  });
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.after, r.before);
+  await ctx.close();
+});
+
+test('v1.3 — admin creates a hashed worker account bound to a post and post notifications target that account', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(async () => {
+    currentRole = 'admin';
+    render({ fn: renderAccounts });
+    document.getElementById('accountLogin').value = 'worker.tech';
+    document.getElementById('accountPassword').value = 'secure-21208';
+    document.getElementById('accountRole').value = 'rabotnik';
+    document.getElementById('accountRole').dispatchEvent(new Event('change'));
+    document.getElementById('accountPost').value = posts[0].name;
+    const created = await createAccount();
+    const a = accounts.find((x) => x.login === 'worker.tech');
+    notifyPostUsers(posts[0].name, 'Поступление товара на пост', 'Тестовая поставка', 'stock', 'TEST');
+    return {
+      created,
+      noPlaintext: a && !('password' in a) && a.passwordHash !== 'secure-21208',
+      role: a?.role,
+      post: a?.post,
+      targeted: notifications.some((n) => n.recipientAccountId === a?.id && n.entityNo === 'TEST'),
+    };
+  });
+  assert.equal(r.created, true);
+  assert.equal(r.noPlaintext, true);
+  assert.equal(r.role, 'rabotnik');
+  assert.ok(r.post);
+  assert.equal(r.targeted, true);
+  await ctx.close();
+});
+
+test('v1.3 — every ordinary work act waits for admin approval; analytics stays outside printable output', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    const base = docs.find((d) => d.kind === 'defekt' && d.status === 'Закрыт' && !String(d.verdict || '').includes('Не подлежит'));
+    const source = { ...JSON.parse(JSON.stringify(base)), no: 'ДФ-APPROVAL-TEST', workDoc: null };
+    docs.push(source);
+    createWorkFromDefekt(source.no);
+    const work = docs.find((d) => d.defektDoc === source.no);
+    work.actionTypes = ['Ремонт'];
+    work.works = [{ type: 'Ремонт', qty: 1 }];
+    work.participants = [{ worker: 'Мастер', work: 'Ремонт' }];
+    work.otkPassed = true;
+    closeWork(work.no);
+    const pending = work.status === 'Ожидает согласования';
+    renderWorkDoc(work);
+    const appHasAnalytics = document.getElementById('content').textContent.includes('Аналитика: выдано на пост / фактический расход');
+    const print = buildWorkActPrintHtml(work, actFileTitle(work));
+    currentRole = 'admin';
+    approveWork(work.no);
+    return { pending, closed: work.status === 'Закрыт', appHasAnalytics, printHasAnalytics: print.includes('Аналитика: выдано') };
+  });
+  assert.equal(r.pending, true);
+  assert.equal(r.closed, true);
+  assert.equal(r.appHasAnalytics, true);
+  assert.equal(r.printHasAnalytics, false);
   await ctx.close();
 });

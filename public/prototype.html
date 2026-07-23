@@ -2863,6 +2863,11 @@ const extIssues = [
 ];
 const stockTransfers = [];
 const inventoryActs = [];
+const accounts = [];
+const notifications = [];
+let accountSeq = 0;
+let notificationSeq = 0;
+let currentAccountId = null;
 
 /* ================= РОЛИ И АУДИТ ================= */
 const ROLES = {
@@ -3001,7 +3006,64 @@ function parseRuDate(value){
   return dt.getFullYear()===y&&dt.getMonth()===mo-1&&dt.getDate()===d?`${m[1]}.${m[2]}.${m[3]}`:null;
 }
 function logAction(action, detail, post, itemId){
-  auditLog.unshift({t:nowTimeStr(), user:ROLES[currentRole].label, action, detail, post:post||null, item:itemId||null});
+  const account=accounts.find(a=>a.id===currentAccountId);
+  auditLog.unshift({t:nowTimeStr(), user:account?account.login:ROLES[currentRole].label, action, detail, post:post||null, item:itemId||null});
+}
+
+function deepClone(value){ return JSON.parse(JSON.stringify(value)); }
+function restoreArray(target, snapshot){ target.length=0; target.push(...snapshot); }
+function runStockTransaction(label, action){
+  const snapshot={items:deepClone(items),posts:deepClone(posts),extIssues:deepClone(extIssues),stockTransfers:deepClone(stockTransfers),auditLog:deepClone(auditLog),notifications:deepClone(notifications)};
+  try{
+    const result=action();
+    if(result===false) throw new Error('Операция отклонена');
+    return true;
+  }catch(e){
+    restoreArray(items,snapshot.items);restoreArray(posts,snapshot.posts);restoreArray(extIssues,snapshot.extIssues);
+    restoreArray(stockTransfers,snapshot.stockTransfers);restoreArray(auditLog,snapshot.auditLog);restoreArray(notifications,snapshot.notifications);
+    console.error('Транзакция отменена: '+label,e);
+    toast('Операция отменена: остатки не изменены');
+    return false;
+  }
+}
+function notificationBridge(){
+  return typeof window!=='undefined'&&window.AndroidNotifications&&typeof window.AndroidNotifications.notify==='function'?window.AndroidNotifications:null;
+}
+function addNotification(target,title,body,type,entityNo){
+  const n={id:'NT-'+(++notificationSeq),createdAt:Date.now(),date:nowTimeStr(),title,body,type:type||'info',entityNo:entityNo||null,read:false,...target};
+  notifications.unshift(n);
+  const visibleHere=currentAccountId?n.recipientAccountId===currentAccountId:
+    (!n.recipientAccountId&&n.recipientRole===currentRole&&(!n.post||n.post===currentUserPost));
+  const bridge=visibleHere?notificationBridge():null;
+  if(bridge) try{ bridge.notify(title,body); }catch(e){ console.warn('Системное уведомление недоступно',e); }
+  return n;
+}
+function notifyAdmins(title,body,type,entityNo){
+  const recipients=accounts.filter(a=>a.active!==false&&a.role==='admin');
+  if(recipients.length) recipients.forEach(a=>addNotification({recipientAccountId:a.id},title,body,type,entityNo));
+  else addNotification({recipientRole:'admin'},title,body,type,entityNo);
+}
+function notifyPostUsers(post,title,body,type,entityNo){
+  const recipients=accounts.filter(a=>a.active!==false&&a.post===post);
+  if(recipients.length) recipients.forEach(a=>addNotification({recipientAccountId:a.id},title,body,type,entityNo));
+  else addNotification({recipientRole:'rabotnik',post},title,body,type,entityNo);
+}
+function visibleNotifications(){
+  return notifications.filter(n=>currentAccountId?n.recipientAccountId===currentAccountId:
+    (!n.recipientAccountId&&((n.recipientRole===currentRole)||(!n.recipientRole&&(!n.post||n.post===currentUserPost)))&&(!n.post||n.post===currentUserPost)));
+}
+async function hashPassword(password,salt){
+  const bytes=new TextEncoder().encode(salt+':'+password);
+  if(globalThis.crypto&&crypto.subtle){
+    const digest=await crypto.subtle.digest('SHA-256',bytes);
+    return [...new Uint8Array(digest)].map(b=>b.toString(16).padStart(2,'0')).join('');
+  }
+  let h=2166136261;for(const b of bytes){h^=b;h=Math.imul(h,16777619);}return (h>>>0).toString(16);
+}
+function newSalt(){
+  const b=new Uint8Array(16);
+  if(globalThis.crypto&&crypto.getRandomValues) crypto.getRandomValues(b); else for(let i=0;i<b.length;i++)b[i]=Math.floor(Math.random()*256);
+  return [...b].map(x=>x.toString(16).padStart(2,'0')).join('');
 }
 
 /* ================= ЛОКАЛЬНОЕ СОХРАНЕНИЕ СОСТОЯНИЯ (P0, требование "не терять данные") =================
@@ -3014,7 +3076,7 @@ function logAction(action, detail, post, itemId){
    Если мост недоступен (предпросмотр в обычном браузере вне приложения) —
    используется localStorage, но ТОЛЬКО как временная заглушка прототипа,
    а не как финальное хранилище складского учёта. */
-const APP_SCHEMA_VERSION = 3;
+const APP_SCHEMA_VERSION = 4;
 const STORAGE_FALLBACK_KEY = 'treshka_sklad_state_v1';
 
 /* Версия приложения (отображается в верхней плашке-шапке на каждом экране и
@@ -3032,7 +3094,8 @@ function serializeAppState(){
   return {
     schemaVersion: APP_SCHEMA_VERSION,
     savedAt: nowTimeStr(),
-    itemSeq, categoriesList, componentSubcats, currentRole, currentUserPost,
+    itemSeq, categoriesList, componentSubcats, currentRole, currentUserPost, currentAccountId,
+    accountSeq, notificationSeq, accounts, notifications,
     items, posts, docs, extIssues, stockTransfers, inventoryActs, auditLog,
   };
 }
@@ -3068,6 +3131,17 @@ STATE_MIGRATIONS[2] = function(s){
     if(d.kind==='work' && !d.applicationPhotoSource) d.applicationPhotoSource = d.defektDoc || null;
   });
   s.schemaVersion = 3;
+  return s;
+};
+STATE_MIGRATIONS[3] = function(s){
+  if(!Array.isArray(s.accounts)) s.accounts=[];
+  if(!Array.isArray(s.notifications)) s.notifications=[];
+  if(typeof s.accountSeq!=='number') s.accountSeq=0;
+  if(typeof s.notificationSeq!=='number') s.notificationSeq=0;
+  if(typeof s.currentAccountId!=='string') s.currentAccountId=null;
+  (s.docs||[]).forEach(d=>{if(d.kind==='work'&&!Array.isArray(d.issuedSnapshot))d.issuedSnapshot=[];});
+  (s.stockTransfers||[]).forEach(t=>{if(typeof t.createdAt!=='number')t.createdAt=0;});
+  s.schemaVersion=4;
   return s;
 };
 
@@ -3114,6 +3188,9 @@ function applyAppState(saved){
     if(!Array.isArray(stockTransfersNext)) return false;
     const inventoryActsNext = s.inventoryActs!=null ? s.inventoryActs : [];
     if(!Array.isArray(inventoryActsNext)) return false;
+    const accountsNext=s.accounts!=null?s.accounts:[];
+    const notificationsNext=s.notifications!=null?s.notifications:[];
+    if(!Array.isArray(accountsNext)||!Array.isArray(notificationsNext)) return false;
     const itemSeqNext = typeof s.itemSeq === 'number' ? s.itemSeq : itemSeq;
     const categoriesListNext = (Array.isArray(s.categoriesList) && s.categoriesList.length) ? s.categoriesList : categoriesList;
     const componentSubcatsNext = (Array.isArray(s.componentSubcats) && s.componentSubcats.length) ? s.componentSubcats : componentSubcats;
@@ -3121,6 +3198,7 @@ function applyAppState(saved){
     // после успешного ввода ПИН выбранная роль сохраняется на этом устройстве.
     const currentRoleNext = (s.currentRole && ROLES[s.currentRole]) ? s.currentRole : currentRole;
     const currentUserPostNext = s.currentUserPost ? s.currentUserPost : currentUserPost;
+    const currentAccountIdNext=typeof s.currentAccountId==='string'?s.currentAccountId:null;
 
     // Точка применения — все поля выше уже провалидированы, здесь только
     // присваивание/push в уже гарантированно корректные массивы.
@@ -3131,11 +3209,16 @@ function applyAppState(saved){
     stockTransfers.length = 0; stockTransfers.push(...stockTransfersNext);
     inventoryActs.length = 0; inventoryActs.push(...inventoryActsNext);
     auditLog.length = 0; auditLog.push(...auditLogNext);
+    accounts.length=0;accounts.push(...accountsNext);
+    notifications.length=0;notifications.push(...notificationsNext);
     itemSeq = itemSeqNext;
     categoriesList = categoriesListNext;
     componentSubcats = componentSubcatsNext;
     currentRole = currentRoleNext;
     currentUserPost = currentUserPostNext;
+    currentAccountId=currentAccountIdNext;
+    accountSeq=typeof s.accountSeq==='number'?s.accountSeq:0;
+    notificationSeq=typeof s.notificationSeq==='number'?s.notificationSeq:0;
     return true;
   }catch(e){
     console.error('applyAppState: сохранённые данные повреждены, in-memory демо-данные НЕ затёрты:', e);
@@ -3858,6 +3941,12 @@ more(){
         <div style="color:var(--muted)">›</div>
       </div>
     </div>
+    <div class="card" onclick="render({fn:renderNotifications})">
+      <div class="row"><div class="icbox">🔔</div><div class="grow"><div class="t">Уведомления</div><div class="s">${visibleNotifications().filter(n=>!n.read).length} непрочитанных</div></div><div style="color:var(--muted)">›</div></div>
+    </div>
+    ${currentRole==='admin'?`<div class="card" onclick="render({fn:renderAccounts})">
+      <div class="row"><div class="icbox">👥</div><div class="grow"><div class="t">Аккаунты сотрудников</div><div class="s">${accounts.filter(a=>a.active!==false).length} активных · роли и посты</div></div><div style="color:var(--muted)">›</div></div>
+    </div>`:''}
     <div class="card" onclick="toast('Демо: список позиций ниже минимума + экспорт для закупки')">
       <div class="row">
         <div class="icbox">🛒</div>
@@ -3937,6 +4026,62 @@ inventory(){
 },
 
 };
+
+function renderNotifications(){
+  const list=visibleNotifications();
+  setHdr('Уведомления',`${list.filter(n=>!n.read).length} непрочитанных`,true,false);
+  $('content').innerHTML=`
+    ${list.length?`<button class="fbtn" style="width:100%;margin-bottom:10px" onclick="markNotificationsRead()">✓ Отметить всё прочитанным</button>`:''}
+    ${list.map(n=>`<div class="card static" style="${n.read?'opacity:.7':'border-color:var(--accent)'}"><div class="t">${esc(n.title)}</div><div class="s" style="margin-top:4px;color:var(--ink)">${esc(n.body)}</div><div class="s" style="margin-top:6px">${esc(n.date)}</div></div>`).join('')||'<div class="s" style="text-align:center;padding:32px">Уведомлений пока нет</div>'}`;
+}
+function markNotificationsRead(){visibleNotifications().forEach(n=>n.read=true);renderNotifications();}
+function renderAccounts(){
+  if(currentRole!=='admin'){toast('Доступно только администратору');return;}
+  setHdr('Аккаунты сотрудников','Логин, роль и закреплённый пост',true,false);
+  $('content').innerHTML=`
+    <div class="card static">
+      <div class="fld"><label>Логин</label><input id="accountLogin" autocomplete="off"></div>
+      <div class="fld"><label>Пароль (не менее 6 символов)</label><input id="accountPassword" type="password" autocomplete="new-password"></div>
+      <div class="fld"><label>Роль</label><select id="accountRole" onchange="$('accountPostWrap').style.display=this.value==='rabotnik'?'block':'none'">${Object.entries(ROLES).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('')}</select></div>
+      <div class="fld" id="accountPostWrap" style="display:none"><label>Закрепить за постом</label><select id="accountPost"><option value="">— выберите —</option>${posts.map(p=>`<option>${esc(p.name)}</option>`).join('')}</select></div>
+      <button class="btn primary" onclick="createAccount()">Создать аккаунт</button>
+    </div>
+    <div class="sec">Созданные аккаунты</div>
+    ${accounts.map(a=>`<div class="card static"><div class="row"><div class="icbox">👤</div><div class="grow"><div class="t">${esc(a.login)}</div><div class="s">${esc(ROLES[a.role]?.label||a.role)}${a.post?' · пост '+esc(a.post):''} · ${a.active===false?'отключён':'активен'}</div></div><button class="del" onclick="toggleAccount('${a.id}')">${a.active===false?'↻':'⏻'}</button></div></div>`).join('')||'<div class="s">Аккаунтов пока нет</div>'}
+    <button class="btn ghost" onclick="render({fn:renderLogin})">Войти под аккаунтом</button>`;
+}
+async function createAccount(){
+  if(currentRole!=='admin'){toast('Доступно только администратору');return false;}
+  const login=$('accountLogin').value.trim(),password=$('accountPassword').value,role=$('accountRole').value;
+  const post=role==='rabotnik'?$('accountPost').value:'';
+  if(!/^[A-Za-zА-Яа-яЁё0-9._-]{3,40}$/.test(login)){toast('Логин: 3–40 букв, цифр, точек, дефисов или подчёркиваний');return false;}
+  if(accounts.some(a=>a.login.toLowerCase()===login.toLowerCase())){toast('Такой логин уже существует');return false;}
+  if(password.length<6){toast('Пароль должен содержать не менее 6 символов');return false;}
+  if(!ROLES[role]){toast('Некорректная роль');return false;}
+  if(role==='rabotnik'&&!posts.some(p=>p.name===post)){toast('Выберите пост работника');return false;}
+  const salt=newSalt(),passwordHash=await hashPassword(password,salt);
+  accounts.push({id:'ACC-'+(++accountSeq),login,passwordHash,salt,role,post:post||null,active:true,createdAt:Date.now()});
+  logAction('Создан аккаунт',`${login}: ${ROLES[role].label}${post?' · '+post:''}`);
+  toast('✓ Аккаунт создан');renderAccounts();return true;
+}
+function toggleAccount(id){
+  if(currentRole!=='admin')return;
+  const a=accounts.find(x=>x.id===id);if(!a)return;
+  a.active=a.active===false;logAction(a.active?'Аккаунт включён':'Аккаунт отключён',a.login);renderAccounts();
+}
+function renderLogin(){
+  setHdr('Вход сотрудника','Роль и пост загрузятся из аккаунта',true,false);
+  $('content').innerHTML=`<div class="card static"><div class="fld"><label>Логин</label><input id="loginName" autocomplete="username"></div><div class="fld"><label>Пароль</label><input id="loginPassword" type="password" autocomplete="current-password"></div><button class="btn primary" onclick="loginAccount()">Войти</button></div>${currentAccountId?`<button class="btn ghost" onclick="logoutAccount()">Выйти из аккаунта</button>`:''}`;
+}
+async function loginAccount(){
+  const login=$('loginName').value.trim(),password=$('loginPassword').value;
+  const a=accounts.find(x=>x.active!==false&&x.login.toLowerCase()===login.toLowerCase());
+  if(!a||await hashPassword(password,a.salt)!==a.passwordHash){toast('Неверный логин или пароль');return false;}
+  currentAccountId=a.id;currentRole=a.role;if(a.post)currentUserPost=a.post;
+  logAction('Вход в аккаунт',`${a.login} · ${ROLES[a.role].label}${a.post?' · '+a.post:''}`);
+  updateNavForRole();toast('✓ Вход выполнен');go('more');return true;
+}
+function logoutAccount(){currentAccountId=null;currentRole='rabotnik';updateNavForRole();toast('Выход выполнен');go('more');}
 
 /* ================= СКЛАД: КОРЕНЬ / ПАПКИ ================= */
 function renderSkladRoot(){
@@ -4379,7 +4524,13 @@ function transferToSklad(i, postName, qty){
   return qty;
 }
 function recordStockTransfer(type,post,lines){
-  stockTransfers.unshift({no:'ПМ-'+String(stockTransfers.length+1).padStart(4,'0'),type,post,date:nowTimeStr(),items:lines.map(x=>({id:x.id,q:x.q}))});
+  const transfer={no:'ПМ-'+String(stockTransfers.length+1).padStart(4,'0'),type,post,date:nowTimeStr(),createdAt:Date.now(),items:lines.map(x=>({id:x.id,q:x.q}))};
+  stockTransfers.unshift(transfer);
+  if(type==='toPost'){
+    const body=lines.map(x=>{const i=item(x.id);return `${i?i.name:x.id}: ${x.q}${i?' '+i.unit:''}`;}).join(', ');
+    notifyPostUsers(post,'Поступление товара на пост',`${post}: ${body}`,'stock',transfer.no);
+  }
+  return transfer;
 }
 
 /* быстрая передача одной позиции — из карточки товара или из карточки поста */
@@ -4407,16 +4558,20 @@ function submitQuickTransfer(itemId, direction){
   if(qty===null){ toast('Введите целое положительное количество'); return; }
   if(direction==='toPost'){
     if(qty>i.stock){ toast('Недостаточно на складе: '+i.stock+' '+i.unit); return; }
-    transferToPost(i, post, qty);
-    recordStockTransfer('toPost',post,[{id:itemId,q:qty}]);
-    logAction('Выдача на пост', `${i.name}: ${qty} ${i.unit} на пост ${post}`, post, itemId);
+    if(!runStockTransaction('Выдача на пост',()=>{
+      transferToPost(i, post, qty);
+      recordStockTransfer('toPost',post,[{id:itemId,q:qty}]);
+      logAction('Выдача на пост', `${i.name}: ${qty} ${i.unit} на пост ${post}`, post, itemId);
+    }))return;
     toast(`✓ Выдано ${qty} ${i.unit} на пост ${post}`);
   } else {
     const have=i.posts[post]||0;
     if(qty>have){ toast('На посту всего '+have+' '+i.unit); return; }
-    transferToSklad(i, post, qty);
-    recordStockTransfer('toSklad',post,[{id:itemId,q:qty}]);
-    logAction('Возврат на склад', `${i.name}: ${qty} ${i.unit} с поста ${post}`, post, itemId);
+    if(!runStockTransaction('Возврат на склад',()=>{
+      transferToSklad(i, post, qty);
+      recordStockTransfer('toSklad',post,[{id:itemId,q:qty}]);
+      logAction('Возврат на склад', `${i.name}: ${qty} ${i.unit} с поста ${post}`, post, itemId);
+    }))return;
     toast(`✓ Возвращено ${qty} ${i.unit} на склад`);
   }
   setTimeout(()=>openItem(itemId), 500);
@@ -4512,14 +4667,17 @@ function commitIssue(mode){
   if(invalid){const i=item(invalid);const avail=mode==='post'?i.stock:(i.posts[issueDest]||0);toast(`Недостаточно «${i.name}»: доступно ${avail} ${i.unit}`);return;}
   const names=[];
   const transferLines=[];
-  ids.forEach(id=>{
-    const i=item(id); const q=issueSelected[id];
-    if(mode==='post') transferToPost(i, issueDest, q); else transferToSklad(i, issueDest, q);
-    transferLines.push({id,q});
-    names.push(`${esc(i.name)} (${q} ${i.unit})`);
+  const ok=runStockTransaction(mode==='post'?'Выдача на пост':'Возврат на склад',()=>{
+    ids.forEach(id=>{
+      const i=item(id); const q=issueSelected[id];
+      if(mode==='post') transferToPost(i, issueDest, q); else transferToSklad(i, issueDest, q);
+      transferLines.push({id,q});
+      names.push(`${i.name} (${q} ${i.unit})`);
+    });
+    logAction(mode==='post'?'Выдача на пост':'Возврат на склад', `${issueDest}: ${names.join(', ')}`, issueDest);
+    recordStockTransfer(mode==='post'?'toPost':'toSklad',issueDest,transferLines);
   });
-  logAction(mode==='post'?'Выдача на пост':'Возврат на склад', `${issueDest}: ${names.join(', ')}`, issueDest);
-  recordStockTransfer(mode==='post'?'toPost':'toSklad',issueDest,transferLines);
+  if(!ok)return;
   toast(mode==='post' ? `✓ Выдано на пост «${issueDest}»` : `✓ Возвращено на склад с поста «${issueDest}»`);
   issueSelected={};
   setTimeout(()=>go('ext'), 700);
@@ -4552,20 +4710,18 @@ function submitExtIssue(){
   const dueRaw=$('ei_due').value.trim();
   if(dueRaw && !parseRuDate(dueRaw)){ toast('Срок возврата укажите реальной датой в формате ДД.ММ.ГГГГ'); return; }
   if(!extDraftLines.length && !addExtLine()) return;
-  const finalLines=[];
-  extDraftLines.forEach(l=>{
-    const i=item(l.id);
-    const q=Math.min(l.q, i.stock);
-    if(q<=0) return;
-    i.stock = roundQuantity(i.stock - q); i.ext = roundQuantity(i.ext + q);
-    adjustLots(i, -q);
-    i.history.push({d:todayStr(), type:'out', text:`Выдача на сторону · ${to}`, q:`−${q} ${i.unit}`});
-    finalLines.push({id:l.id, q});
-  });
-  if(!finalLines.length){ toast('Недостаточно остатков для выдачи'); return; }
-  const no='ВН-0'+(20+extIssues.length);
-  extIssues.unshift({no, to, date:todayStr(), status:'Выдано', due:dueRaw||'—', items:finalLines, note:$('ei_note').value||''});
-  logAction('Выдача на сторону оформлена', `${no}: ${to}`);
+  const finalLines=[],no='ВН-0'+(20+extIssues.length);
+  if(!runStockTransaction('Выдача на сторону',()=>{
+    extDraftLines.forEach(l=>{
+      const i=item(l.id),q=l.q;
+      if(q<=0||q>i.stock)throw new Error('Остаток изменился до завершения операции');
+      i.stock=roundQuantity(i.stock-q);i.ext=roundQuantity(i.ext+q);adjustLots(i,-q);
+      i.history.push({d:todayStr(),type:'out',text:`Выдача на сторону · ${to}`,q:`−${q} ${i.unit}`});finalLines.push({id:l.id,q});
+    });
+    if(!finalLines.length)throw new Error('Нет позиций');
+    extIssues.unshift({no,to,date:todayStr(),createdAt:Date.now(),status:'Выдано',due:dueRaw||'—',items:finalLines,note:$('ei_note').value||''});
+    logAction('Выдача на сторону оформлена',`${no}: ${to}`);
+  }))return;
   toast('✓ Выдача '+no+' оформлена');
   extDraftLines=[];
   setTimeout(()=>go('ext'), 600);
@@ -4574,14 +4730,14 @@ function returnExtIssue(idx){
   if(currentRole==='rabotnik'){ toast('🔒 Выдачи недоступны для роли «Работник»'); return; }
   const e=extIssues[idx];
   if(e.status==='Возвращено'){ toast('Возврат по этой выдаче уже оформлен'); return; }
-  e.items.forEach(l=>{
-    const i=item(l.id);
-    i.stock = roundQuantity(i.stock + l.q); i.ext = roundQuantity(Math.max(0, i.ext-l.q));
-    adjustLots(i, l.q);
-    i.history.push({d:todayStr(), type:'in', text:`Возврат по выдаче ${e.no} · ${e.to}`, q:`+${l.q} ${i.unit}`});
-  });
-  e.status='Возвращено';
-  logAction('Возврат выдачи на сторону', `${e.no}: ${e.to}`);
+  if(!runStockTransaction('Возврат выдачи на сторону',()=>{
+    e.items.forEach(l=>{
+      const i=item(l.id);if(!i)throw new Error('Карточка товара не найдена');
+      i.stock=roundQuantity(i.stock+l.q);i.ext=roundQuantity(Math.max(0,i.ext-l.q));adjustLots(i,l.q);
+      i.history.push({d:todayStr(),type:'in',text:`Возврат по выдаче ${e.no} · ${e.to}`,q:`+${l.q} ${i.unit}`});
+    });
+    e.status='Возвращено';logAction('Возврат выдачи на сторону',`${e.no}: ${e.to}`);
+  }))return;
   toast('✓ Возврат по '+e.no+' оформлен, остатки восстановлены');
   setTimeout(()=>go('ext'), 600);
 }
@@ -4833,16 +4989,27 @@ function openDefekt(d){
 function openWork(d){
   render({fn(){ renderWorkDoc(d); }});
 }
+function workMaterialAnalytics(d){
+  const issued=new Map((d.issuedSnapshot||[]).map(x=>[x.id,x.q]));
+  const after=stockTransfers.filter(t=>t.type==='toPost'&&t.post===d.post&&(!d.createdAt||!t.createdAt||t.createdAt>=d.createdAt));
+  after.forEach(t=>t.items.forEach(x=>issued.set(x.id,roundQuantity((issued.get(x.id)||0)+x.q))));
+  const actual=new Map((d.materials||[]).map(x=>[x.id,x.q]));
+  return [...new Set([...issued.keys(),...actual.keys()])].map(id=>({id,it:item(id),issued:issued.get(id)||0,actual:actual.get(id)||0,match:(issued.get(id)||0)===(actual.get(id)||0)}));
+}
 function renderWorkDoc(d){
     const mismatch = d.planQty!=null && d.factQty!=null && d.factQty!==d.planQty;
     const unresolved = hasUnresolvedMismatch(d);
     const closed = d.status==='Закрыт';
+    const pending = d.status==='Ожидает согласования';
+    const locked = closed||pending;
+    const analytics=workMaterialAnalytics(d);
     setHdr(d.no+' · Акт выполненных работ', `${esc(d.item)} · из дефектовки ${d.defektDoc}`, true, false);
     const sum = d.materials.map(m=>{const it=item(m.id);return {it,q:m.q};});
     $('content').innerHTML = `
       ${unresolved?`<div class="progress-note bad">⚠ Расхождение по количеству: получено ${d.planQty}, годных ${d.factQty} (брак: ${d.planQty-d.factQty}). Администратору отправлено push-уведомление. Закрыть акт может только администратор.${d.mismatchDecision==='rework'?' Акт возвращён на доработку, но остаётся заблокирован до решения администратора.':''}</div>`
-        : closed?`<div class="progress-note ok">✓ Акт закрыт — материалы списаны, изделие возвращено на склад${d.mismatchReason?' (принято с расхождением: '+esc(d.mismatchReason)+')':''}</div>`
-        : '<div class="progress-note">⚠ Черновик — при закрытии материалы спишутся с поста, изделие вернётся на склад</div>'}
+        : closed?`<div class="progress-note ok">✓ Акт согласован администратором и закрыт — материалы списаны, изделие возвращено на склад${d.mismatchReason?' (принято с расхождением: '+esc(d.mismatchReason)+')':''}</div>`
+        : pending?'<div class="progress-note">⏳ Акт отправлен администратору. До решения редактирование и списание заблокированы.</div>'
+        : '<div class="progress-note">⚠ Черновик — после отправки акт обязан согласовать администратор</div>'}
       <div class="card static">
         <div class="kv"><span class="k">Основание</span><span class="v doc-link" onclick="openDoc(${docs.findIndex(x=>x.no===d.defektDoc)})">${d.defektDoc}</span></div>
         <div class="kv"><span class="k">Номер заявки</span><span class="v">${esc(d.orderNo)||'—'}</span></div>
@@ -4850,13 +5017,13 @@ function renderWorkDoc(d){
         <div class="kv"><span class="k">Дата</span><span class="v">${d.date}</span></div>
         ${d.planQty!=null?`<div class="kv"><span class="k">Получено / годных</span><span class="v" style="${mismatch?'color:var(--red)':''}">${d.planQty} / ${d.factQty??'—'}</span></div>`:''}
       </div>
-      ${!closed&&d.planQty!=null?`<div class="fld"><label>Фактически годных изделий</label><input id="workFactQty" ${quantityInputAttrs()} value="${d.factQty??''}" onchange="setWorkFactQty('${d.no}',this.value)"></div>`:''}
+      ${!locked&&d.planQty!=null?`<div class="fld"><label>Фактически годных изделий</label><input id="workFactQty" ${quantityInputAttrs()} value="${d.factQty??''}" onchange="setWorkFactQty('${d.no}',this.value)"></div>`:''}
       ${documentPhotoHtml(workApplicationPhoto(d), 'Фото заявки · из '+d.defektDoc)}
       <div class="sec">Тип действия <span class="req">*</span></div>
       <div class="card static">
         ${ACT_ACTION_TYPES.map(t=>`
-          <label style="display:flex;align-items:center;gap:10px;padding:6px 0;${closed?'':'cursor:pointer'}">
-            <input type="checkbox" ${d.actionTypes.includes(t)?'checked':''} ${closed?'disabled':''} onchange="toggleActionType('${d.no}','${t}')">
+          <label style="display:flex;align-items:center;gap:10px;padding:6px 0;${locked?'':'cursor:pointer'}">
+            <input type="checkbox" ${d.actionTypes.includes(t)?'checked':''} ${locked?'disabled':''} onchange="toggleActionType('${d.no}','${t}')">
             <span>${t}</span>
           </label>`).join('')}
       </div>
@@ -4867,10 +5034,10 @@ function renderWorkDoc(d){
             <div class="icbox" style="width:34px;height:34px;font-size:16px">🔧</div>
             <div class="grow"><div class="t">${esc(w.type)}</div></div>
             <div class="q">${w.qty}</div>
-            ${closed?'':`<button class="del" onclick="event.stopPropagation(); removeWork('${d.no}', ${n})">✕</button>`}
+            ${locked?'':`<button class="del" onclick="event.stopPropagation(); removeWork('${d.no}', ${n})">✕</button>`}
           </div>`).join('') || '<div class="s" style="padding:6px 0">Работы ещё не добавлены</div>'}
       </div>
-      ${closed?'':`
+      ${locked?'':`
       <div class="addmat addmat-works">
         <select id="addWorkType" onchange="$('addWorkCustomWrap').style.display = this.value==='__custom' ? 'block' : 'none'">
           ${WORK_TYPE_PRESETS.map(t=>`<option value="${esc(t)}">${esc(t)}</option>`).join('')}
@@ -4884,9 +5051,9 @@ function renderWorkDoc(d){
       </div>`}
       <div class="sec">Участники и выполненные работы</div>
       <div class="card static">
-        ${(d.participants||[]).map((p,n)=>`<div class="kv"><span class="k">${esc(p.worker)}</span><span class="v" style="text-align:left;flex:1;margin-left:8px;font-weight:500">${esc(p.work)}</span>${closed?'':`<button class="del" onclick="removeParticipant('${d.no}',${n})">✕</button>`}</div>`).join('') || '<div class="s">Не указаны</div>'}
+        ${(d.participants||[]).map((p,n)=>`<div class="kv"><span class="k">${esc(p.worker)}</span><span class="v" style="text-align:left;flex:1;margin-left:8px;font-weight:500">${esc(p.work)}</span>${locked?'':`<button class="del" onclick="removeParticipant('${d.no}',${n})">✕</button>`}</div>`).join('') || '<div class="s">Не указаны</div>'}
       </div>
-      ${closed?'':`<div class="addmat"><input id="participantName" placeholder="ФИО / позывной"><input id="participantWork" placeholder="Что выполнил"><button onclick="addParticipant('${d.no}')">＋</button></div>`}
+      ${locked?'':`<div class="addmat"><input id="participantName" placeholder="ФИО / позывной"><input id="participantWork" placeholder="Что выполнил"><button onclick="addParticipant('${d.no}')">＋</button></div>`}
       <div class="sec">Израсходованные материалы</div>
       <div class="card static" id="matList">
         ${sum.map((m,n)=>`
@@ -4894,26 +5061,31 @@ function renderWorkDoc(d){
             <div class="icbox" style="width:34px;height:34px;font-size:16px">${m.it.icon}</div>
             <div class="grow"><div class="t">${m.it.name}</div><div class="s">${m.it.sku} · с поста ${d.post}</div></div>
             <div class="q">${fmtQ(m.it,m.q)}</div>
-            ${closed?'':`<button class="del" onclick="event.stopPropagation(); removeMat('${d.no}', ${n})">✕</button>`}
+            ${locked?'':`<button class="del" onclick="event.stopPropagation(); removeMat('${d.no}', ${n})">✕</button>`}
           </div>`).join('')}
       </div>
-      ${closed?'':`
+      ${locked?'':`
       <div class="addmat addmat-materials">
         <select id="addSel">${items.filter(i=>(i.posts[d.post]||0)>0).map(i=>`<option value="${i.id}">${i.icon} ${esc(i.name)} · доступно ${i.posts[d.post]} ${esc(i.unit)}</option>`).join('')}</select>
         <input id="addQty" ${quantityInputAttrs()} placeholder="Кол-во">
         <button onclick="addMat('${d.no}')">＋</button>
       </div>
       <div class="s" style="margin:6px 2px 0">Или добавьте сканированием QR с этикетки материала</div>`}
+      <div class="sec">Аналитика: выдано на пост / фактический расход</div>
+      <div class="card static">
+        ${analytics.map(a=>`<div class="kv" style="${a.match?'':'background:rgba(255,77,109,.08);margin:0 -8px;padding:8px'}"><span class="k">${a.it?esc(a.it.name):esc(a.id)}</span><span class="v" style="color:${a.match?'var(--green)':'var(--red)'}">${a.issued} / ${a.actual} ${a.it?esc(a.it.unit):''} ${a.match?'✓':'⚠'}</span></div>`).join('')||'<div class="s">Нет выданных или израсходованных материалов</div>'}
+      </div>
+      <div class="s" style="margin:-6px 2px 12px">Сравнение видно только в приложении и не добавляется в PDF/Word.</div>
       <div class="sec">Результат выполненных работ</div>
       <div class="card static">
         <div class="s" style="margin-bottom:8px">Статус (по типу действия выше): <b style="color:var(--ink)">${esc(actResultStatus(d.actionTypes)) || '— выберите тип действия —'}</b></div>
-        ${closed
+        ${locked
           ? `<div class="s" style="color:var(--ink)">${d.resultText?esc(d.resultText):'Не заполнено'}</div>`
           : `<textarea id="resultTextInput" placeholder='Например: сброс «Яблоня» в количестве 1 ед.' onchange="setResultText('${d.no}', this.value)">${esc(d.resultText)}</textarea>`}
       </div>
       <div class="card static">
-        <label style="display:flex;align-items:center;gap:10px;${closed?'':'cursor:pointer'}">
-          <input type="checkbox" ${d.otkPassed?'checked':''} ${closed?'disabled':''} onchange="toggleOtk('${d.no}')">
+        <label style="display:flex;align-items:center;gap:10px;${locked?'':'cursor:pointer'}">
+          <input type="checkbox" ${d.otkPassed?'checked':''} ${locked?'disabled':''} onchange="toggleOtk('${d.no}')">
           <span>ОТК пройдено</span>
         </label>
       </div>
@@ -4928,7 +5100,11 @@ function renderWorkDoc(d){
                </select></div>
              <button class="btn red" id="mm_submit" disabled onclick="resolveMismatch('${d.no}')">Подтвердить решение администратора</button>`
           : `<button class="btn red" disabled>🔒 Закрыть может только администратор</button>`)
-        : (closed ? '' : `<button class="btn green" onclick="closeWork('${d.no}')">Закрыть акт · списать материалы</button>`)}
+        : (closed ? '' : pending
+          ? (currentRole==='admin'
+            ? `<div class="fld"><label>Комментарий администратора</label><textarea id="approvalReason" placeholder="Причина возврата или комментарий к согласованию"></textarea></div><button class="btn green" onclick="approveWork('${d.no}')">✓ Согласовать и закрыть</button><button class="btn red" onclick="rejectWork('${d.no}')">↩ Вернуть на доработку</button>`
+            : '<button class="btn primary" disabled>⏳ Ожидает согласования администратора</button>')
+          : `<button class="btn green" onclick="closeWork('${d.no}')">Отправить администратору на согласование</button>`)}
       <button class="btn ghost" onclick="printDoc('${d.no}')">⤓ Экспорт в PDF</button>
       <button class="btn ghost" onclick="exportWorkActDocx('${d.no}')">⤓ Экспорт акта в Word</button>
       <button class="btn ghost" onclick="exportWorkActExcel('${d.no}')">⤓ Экспорт акта в Excel</button>
@@ -5129,6 +5305,7 @@ function findMaterialShortfalls(d){
 function closeWork(no){
   const d=docs.find(x=>x.no===no);
   if(d.status==='Закрыт'){ toast('Акт уже закрыт'); return; }
+  if(d.status==='Ожидает согласования'){toast('Акт уже отправлен администратору');return;}
   const source=docs.find(x=>x.no===d.defektDoc);
   if(!source||source.status!=='Закрыт'){toast('Нарушен порядок: сначала должен быть закрыт акт дефектовки');return;}
   if(String(source.verdict||'').includes('Не подлежит')){toast('Ремонт запрещён: в дефектовке указано «Не подлежит ремонту»');return;}
@@ -5148,7 +5325,28 @@ function closeWork(no){
     toast(`Недостаточно на посту «${d.post}»: ${s0.it.name} — нужно ${s0.need}, есть ${s0.avail} ${s0.it.unit}`);
     return;
   }
-  performWorkClose(d);
+  d.status='Ожидает согласования';d.submittedAt=Date.now();
+  logAction('АВР отправлен на согласование',`${d.no}: ${d.item}`,d.post,d.itemId);
+  notifyAdmins('АВР на согласование',`${d.no} · ${d.item} · пост ${d.post}`,'work',d.no);
+  toast('✓ Акт отправлен администратору на согласование');
+  renderWorkDoc(d);
+}
+function approveWork(no){
+  if(currentRole!=='admin'){toast('Согласовать АВР может только администратор');return false;}
+  const d=docs.find(x=>x.no===no);if(!d||d.status!=='Ожидает согласования'){toast('Акт не ожидает согласования');return false;}
+  const shortfalls=findMaterialShortfalls(d);if(shortfalls.length){const s=shortfalls[0];toast(`Недостаточно на посту «${d.post}»: ${s.it.name} — нужно ${s.need}, есть ${s.avail}`);return false;}
+  d.approvedBy=accounts.find(a=>a.id===currentAccountId)?.login||'Администратор';d.approvedAt=Date.now();
+  performWorkClose(d,'согласовано администратором'+(($('approvalReason')?.value||'').trim()?' · '+$('approvalReason').value.trim():''));
+  return true;
+}
+function rejectWork(no){
+  if(currentRole!=='admin'){toast('Вернуть АВР может только администратор');return false;}
+  const d=docs.find(x=>x.no===no);if(!d||d.status!=='Ожидает согласования')return false;
+  const reason=($('approvalReason')?.value||'').trim();if(!reason){toast('Укажите причину возврата');return false;}
+  d.status='На доработке';d.approvalReason=reason;
+  logAction('АВР возвращён на доработку',`${d.no}: ${reason}`,d.post,d.itemId);
+  notifyPostUsers(d.post,'АВР возвращён на доработку',`${d.no}: ${reason}`,'work',d.no);
+  toast('↩ Акт возвращён на доработку');renderWorkDoc(d);return true;
 }
 function resolveMismatch(no){
   if(currentRole!=='admin'){ toast('🔒 Закрыть акт с расхождением может только администратор'); return; }
@@ -5282,7 +5480,7 @@ function submitDefekt(){
   const newNo='ДФ-'+(100+docs.filter(d=>d.kind==='defekt').length);
   let postName = $('f_post').value;
   if(isRabotnikRestrictedToPost()) postName = currentUserPost;
-  docs.unshift({no:newNo, kind:'defekt', status:'Закрыт', date,
+  docs.unshift({no:newNo, kind:'defekt', status:'Закрыт', date, createdAt:Date.now(),
     orderNo:$('f_order').value,
     serial:serial, item:itemLabel, itemId,
     from:$('f_from').value, callsign:$('f_callsign').value, post:postName,
@@ -5299,6 +5497,8 @@ function submitDefekt(){
     }
   }
   logAction('Акт дефектовки закрыт', `${newNo}: ${itemLabel||'изделие'}, заключение: ${verdict}`, postName);
+  notifyAdmins('Поступила новая заявка',`${$('f_order').value} · ${itemLabel} · пост ${postName}`,'application',$('f_order').value);
+  notifyAdmins('Создан акт дефектовки',`${newNo} · ${itemLabel} · пост ${postName}`,'defekt',newNo);
   if(verdict.includes('Не подлежит')){
     toast('✓ Акт закрыт: изделие уходит в списание');
     setTimeout(()=>go('docs'), 900);
@@ -5321,10 +5521,13 @@ function createWorkFromDefekt(defektNo){
   if(String(d.verdict||'').includes('Не подлежит')){toast('Для неремонтопригодного изделия акт ремонта создать нельзя — оформите списание');return;}
   if(d.workDoc){ toast('Акт выполненных работ уже создан: '+d.workDoc); setTimeout(()=>openDoc(docs.indexOf(docs.find(x=>x.no===d.workDoc))), 300); return; }
   const newNo = 'АВР-'+(200+docs.filter(x=>x.kind==='work').length);
-  docs.unshift({no:newNo, kind:'work', status:'Черновик', date:todayStr(), orderNo:d.orderNo,
+  const createdAt=Date.now();
+  const issuedSnapshot=items.filter(i=>i.id!==d.itemId&&(i.posts[d.post]||0)>0).map(i=>({id:i.id,q:i.posts[d.post]}));
+  docs.unshift({no:newNo, kind:'work', status:'Черновик', date:todayStr(), createdAt, orderNo:d.orderNo,
     serial:d.serial, item:d.item, itemId:d.itemId, defektDoc:defektNo, applicationPhotoSource:defektNo, post:d.post, planQty:null, factQty:null,
-    participants:[], works:[], materials:[], actionTypes:[], resultText:'', otkPassed:false});
+    participants:[], works:[], materials:[], issuedSnapshot, actionTypes:[], resultText:'', otkPassed:false});
   d.workDoc = newNo;
+  notifyAdmins('Создан акт выполненных работ',`${newNo} · ${d.item} · пост ${d.post}`,'work',newNo);
   toast('✓ Акт '+newNo+' создан, привязан к '+defektNo);
   setTimeout(()=>openDoc(docs.indexOf(docs.find(x=>x.no===newNo))), 400);
 }
