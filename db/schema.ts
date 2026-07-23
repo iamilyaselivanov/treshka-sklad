@@ -1,4 +1,5 @@
-import { index, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, index, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
 
 export const products = sqliteTable(
   "products",
@@ -29,7 +30,10 @@ export const users = sqliteTable(
     createdAt: text("created_at").notNull(),
     lastLoginAt: text("last_login_at"),
   },
-  (table) => [index("users_role_idx").on(table.role)],
+  (table) => [
+    index("users_role_idx").on(table.role),
+    uniqueIndex("single_owner_idx").on(table.role).where(sql`${table.role} = 'owner'`),
+  ],
 );
 
 export const sessions = sqliteTable(
@@ -56,3 +60,10 @@ export const auditLog = sqliteTable(
   },
   (table) => [index("audit_created_idx").on(table.createdAt)],
 );
+
+export const loginThrottle = sqliteTable("login_throttle", {
+  login: text("login").primaryKey(),
+  failures: integer("failures").notNull().default(0),
+  blockedUntil: text("blocked_until"),
+  lastAttemptAt: text("last_attempt_at").notNull(),
+});

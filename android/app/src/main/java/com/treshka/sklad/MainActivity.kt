@@ -19,7 +19,7 @@ private const val APP_URL = "https://sklad-ok-prototype.janfoody2016.chatgpt.sit
 private const val APP_HOST = "sklad-ok-prototype.janfoody2016.chatgpt.site"
 
 /**
- * Android-клиент версии 1.5. Интерфейс, авторизация и складские данные
+ * Android-клиент версии 1.6. Интерфейс, авторизация и складские данные
  * загружаются с единого сервера, поэтому сайт и APK всегда используют одну базу.
  */
 class MainActivity : AppCompatActivity() {

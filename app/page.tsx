@@ -2,7 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
-type Screen = "home" | "stock" | "repairs" | "issue" | "more" | "users";
+type Screen = "home" | "stock" | "repairs" | "issue" | "more" | "users" | "security" | "audit";
 
 type AuthUser = {
   id: string;
@@ -36,6 +36,7 @@ const EMPTY_FORM = {
 
 export default function Home() {
   const [status, setStatus] = useState<{ setupRequired: boolean; user: AuthUser | null } | null>(null);
+  const [recovering, setRecovering] = useState(false);
 
   const refresh = useCallback(async () => {
     const response = await fetch("/api/auth/status", { cache: "no-store" });
@@ -43,12 +44,23 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    // Initial server synchronization is intentionally performed once on mount.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
   }, [refresh]);
 
-  if (!status) return <AuthShell title="Проверяем доступ…" text="Подключаемся к серверу версии 1.5." />;
+  if (!status) return <AuthShell title="Проверяем доступ…" text="Подключаемся к серверу версии 1.6." />;
   if (status.setupRequired) return <CredentialsForm mode="setup" complete={(user) => setStatus({ setupRequired: false, user })} />;
-  if (!status.user) return <CredentialsForm mode="login" complete={(user) => setStatus({ setupRequired: false, user })} />;
+  if (!status.user) {
+    return (
+      <CredentialsForm
+        mode={recovering ? "recover" : "login"}
+        complete={(user) => setStatus({ setupRequired: false, user })}
+        recover={() => setRecovering(true)}
+        cancel={() => setRecovering(false)}
+      />
+    );
+  }
   return <WarehouseApp currentUser={status.user} loggedOut={() => setStatus({ setupRequired: false, user: null })} />;
 }
 
@@ -77,6 +89,8 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
   }, []);
 
   useEffect(() => {
+    // Initial server synchronization is intentionally performed once on mount.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadProducts();
   }, [loadProducts]);
 
@@ -98,6 +112,7 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
 
   const totalUnits = products.reduce((sum, product) => sum + product.quantity, 0);
   const lowCount = products.filter((product) => product.quantity <= product.minimum).length;
+  const canManageProducts = currentUser.role !== "worker";
 
   return (
     <main className="app-shell">
@@ -106,7 +121,7 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
           <div className="brandmark">Т</div>
           <div>
             <b>ТРЁШКА <i>СКЛАД</i></b>
-            <span>Версия 1.5 · сервер подключён</span>
+            <span>Версия 1.6 · сервер подключён</span>
           </div>
         </div>
         <div className="account-box">
@@ -132,7 +147,7 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
             </div>
             <h2>Быстрые действия</h2>
             <div className="actions">
-              <Action icon="＋" title="Добавить первый товар" sub="Создать карточку в серверной базе" click={() => setShowCreate(true)} />
+              {canManageProducts && <Action icon="＋" title="Добавить первый товар" sub="Создать карточку в серверной базе" click={() => setShowCreate(true)} />}
               <Action icon="▦" title="Открыть склад" sub="Поиск и управление номенклатурой" click={() => setScreen("stock")} />
               <Action icon="⌗" title="Сканировать QR" sub="Станет доступно после добавления товара" click={() => notify("Сначала добавьте товар")} />
             </div>
@@ -143,7 +158,7 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
 
         {screen === "stock" && (
           <>
-            <Title eyebrow="УЧЁТ ИМУЩЕСТВА" title="Склад" action={<button onClick={() => setShowCreate(true)}>＋ Товар</button>} />
+            <Title eyebrow="УЧЁТ ИМУЩЕСТВА" title="Склад" action={canManageProducts ? <button onClick={() => setShowCreate(true)}>＋ Товар</button> : undefined} />
             <div className="search">
               <span>⌕</span>
               <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск по товарам, артикулам и категориям" />
@@ -156,7 +171,7 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
               <EmptyState
                 title={products.length === 0 ? "На складе пока нет товаров" : "Ничего не найдено"}
                 text={products.length === 0 ? "Добавьте первую карточку — она сохранится в серверной базе." : "Измените поисковый запрос."}
-                action={products.length === 0 ? <button onClick={() => setShowCreate(true)}>＋ Добавить товар</button> : undefined}
+                action={products.length === 0 && canManageProducts ? <button onClick={() => setShowCreate(true)}>＋ Добавить товар</button> : undefined}
               />
             ) : (
               <div className="product-list">
@@ -172,7 +187,7 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
                       {product.quantity} {product.unit}
                       <small>{product.quantity <= product.minimum ? "Ниже минимума" : "В наличии"}</small>
                     </strong>
-                    <button className="delete-product" onClick={() => void removeProduct(product)}>Удалить</button>
+                    {canManageProducts && <button className="delete-product" onClick={() => void removeProduct(product)}>Удалить</button>}
                   </article>
                 ))}
               </div>
@@ -203,16 +218,20 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
             <Title eyebrow="СИСТЕМА" title="Ещё" />
             <div className="menu-card">
               <Menu icon="◉" title="Инвентаризация" sub="Пока нет товарных остатков" />
-              <Menu icon="≡" title="Журнал действий" sub="События начнут записываться после заполнения базы" />
+              {(currentUser.role === "owner" || currentUser.role === "admin") && (
+                <Menu icon="≡" title="Журнал действий" sub="Входы, аккаунты, товары и безопасность" click={() => setScreen("audit")} />
+              )}
               {(currentUser.role === "owner" || currentUser.role === "admin") && (
                 <Menu icon="♙" title="Сотрудники и доступ" sub="Позывные, логины, роли и пароли" click={() => setScreen("users")} />
               )}
-              <Menu icon="⚙" title="Настройки" sub="Категории, единицы измерения и минимальные остатки" />
+              <Menu icon="⚙" title="Безопасность" sub="Изменить свой постоянный пароль" click={() => setScreen("security")} />
             </div>
           </>
         )}
 
-        {screen === "users" && <UsersScreen currentUser={currentUser} />}
+        {screen === "users" && <UsersScreen currentUser={currentUser} ownershipTransferred={loggedOut} />}
+        {screen === "security" && <SecurityScreen currentUser={currentUser} passwordChanged={loggedOut} />}
+        {screen === "audit" && <AuditScreen />}
       </section>
 
       <nav className="bottom-nav">
@@ -220,7 +239,7 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
         <Nav icon="▦" text="Склад" active={screen === "stock"} click={() => setScreen("stock")} />
         <Nav icon="◫" text="Ремонты" active={screen === "repairs"} click={() => setScreen("repairs")} />
         <Nav icon="⇄" text="Выдача" active={screen === "issue"} click={() => setScreen("issue")} />
-        <Nav icon="•••" text="Ещё" active={screen === "more" || screen === "users"} click={() => setScreen("more")} />
+        <Nav icon="•••" text="Ещё" active={["more", "users", "security", "audit"].includes(screen)} click={() => setScreen("more")} />
       </nav>
 
       {showCreate && (
@@ -259,7 +278,7 @@ function AuthShell({ title, text, children }: { title: string; text: string; chi
   return (
     <main className="auth-shell">
       <section className="auth-card">
-        <div className="auth-brand"><span>Т</span><div><b>ТРЁШКА СКЛАД</b><small>Версия 1.5</small></div></div>
+        <div className="auth-brand"><span>Т</span><div><b>ТРЁШКА СКЛАД</b><small>Версия 1.6</small></div></div>
         <h1>{title}</h1>
         <p>{text}</p>
         {children}
@@ -268,10 +287,21 @@ function AuthShell({ title, text, children }: { title: string; text: string; chi
   );
 }
 
-function CredentialsForm({ mode, complete }: { mode: "setup" | "login"; complete: (user: AuthUser) => void }) {
+function CredentialsForm({
+  mode,
+  complete,
+  recover,
+  cancel,
+}: {
+  mode: "setup" | "login" | "recover";
+  complete: (user: AuthUser) => void;
+  recover?: () => void;
+  cancel?: () => void;
+}) {
   const [callsign, setCallsign] = useState("");
   const [login, setLogin] = useState("");
   const [password, setPassword] = useState("");
+  const [securityCode, setSecurityCode] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -279,10 +309,18 @@ function CredentialsForm({ mode, complete }: { mode: "setup" | "login"; complete
     event.preventDefault();
     setSaving(true);
     setError("");
-    const response = await fetch(`/api/auth/${mode}`, {
+    const endpoint = mode === "recover" ? "recover-owner" : mode;
+    const response = await fetch(`/api/auth/${endpoint}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ callsign, login, password }),
+      body: JSON.stringify({
+        callsign,
+        login,
+        password,
+        newPassword: password,
+        setupCode: mode === "setup" ? securityCode : undefined,
+        recoveryCode: mode === "recover" ? securityCode : undefined,
+      }),
     });
     const data = (await response.json()) as { user?: AuthUser; error?: string };
     setSaving(false);
@@ -295,15 +333,26 @@ function CredentialsForm({ mode, complete }: { mode: "setup" | "login"; complete
 
   return (
     <AuthShell
-      title={mode === "setup" ? "Создание владельца" : "Вход в систему"}
-      text={mode === "setup" ? "Первый аккаунт получает полный контроль над сотрудниками и ролями." : "Введите логин и постоянный пароль."}
+      title={mode === "setup" ? "Создание владельца" : mode === "recover" ? "Восстановление владельца" : "Вход в систему"}
+      text={
+        mode === "setup"
+          ? "Первый аккаунт получает полный контроль. Понадобится код первичной настройки."
+          : mode === "recover"
+            ? "Введите логин владельца, резервный код и новый постоянный пароль."
+            : "Введите логин и постоянный пароль."
+      }
     >
       <form className="auth-form" onSubmit={submit}>
         {mode === "setup" && <label>Позывной<input required minLength={2} value={callsign} onChange={(event) => setCallsign(event.target.value)} autoComplete="nickname" /></label>}
         <label>Логин<input required minLength={3} value={login} onChange={(event) => setLogin(event.target.value)} autoComplete="username" /></label>
-        <label>Пароль<input required minLength={8} type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "setup" ? "new-password" : "current-password"} /></label>
+        <label>{mode === "recover" ? "Новый пароль" : "Пароль"}<input required minLength={8} type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} /></label>
+        {mode !== "login" && (
+          <label>{mode === "setup" ? "Код первичной настройки" : "Резервный код владельца"}<input required value={securityCode} onChange={(event) => setSecurityCode(event.target.value)} autoComplete="off" /></label>
+        )}
         {error && <p className="form-error">{error}</p>}
-        <button className="primary" disabled={saving}>{saving ? "Подождите…" : mode === "setup" ? "Создать владельца" : "Войти"}</button>
+        <button className="primary" disabled={saving}>{saving ? "Подождите…" : mode === "setup" ? "Создать владельца" : mode === "recover" ? "Восстановить доступ" : "Войти"}</button>
+        {mode === "login" && <button className="secondary" type="button" onClick={recover}>Восстановить владельца</button>}
+        {mode === "recover" && <button className="secondary" type="button" onClick={cancel}>Вернуться ко входу</button>}
       </form>
     </AuthShell>
   );
@@ -311,7 +360,7 @@ function CredentialsForm({ mode, complete }: { mode: "setup" | "login"; complete
 
 type ManagedUser = AuthUser & { status: "active" | "blocked"; createdAt?: string; lastLoginAt?: string | null };
 
-function UsersScreen({ currentUser }: { currentUser: AuthUser }) {
+function UsersScreen({ currentUser, ownershipTransferred }: { currentUser: AuthUser; ownershipTransferred: () => void }) {
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [error, setError] = useState("");
@@ -324,6 +373,8 @@ function UsersScreen({ currentUser }: { currentUser: AuthUser }) {
   }, []);
 
   useEffect(() => {
+    // Initial server synchronization is intentionally performed once on mount.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, [load]);
 
@@ -352,6 +403,24 @@ function UsersScreen({ currentUser }: { currentUser: AuthUser }) {
     }
   }
 
+  async function transferOwner(user: ManagedUser) {
+    if (!window.confirm(`Передать полный контроль аккаунту «${user.callsign}»? Ваш аккаунт станет администратором.`)) return;
+    const currentPassword = window.prompt("Введите ваш текущий пароль для подтверждения:");
+    if (!currentPassword) return;
+    const response = await fetch("/api/users/transfer-owner", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetUserId: user.id, currentPassword }),
+    });
+    const data = (await response.json()) as { error?: string };
+    if (!response.ok) {
+      window.alert(data.error || "Не удалось передать права владельца");
+      return;
+    }
+    window.alert("Права владельца переданы. Все сеансы завершены — войдите заново.");
+    ownershipTransferred();
+  }
+
   return (
     <>
       <Title eyebrow="УПРАВЛЕНИЕ ДОСТУПОМ" title="Сотрудники" action={<button onClick={() => setShowForm(true)}>＋ Аккаунт</button>} />
@@ -367,12 +436,102 @@ function UsersScreen({ currentUser }: { currentUser: AuthUser }) {
               <div className="user-actions">
                 <button onClick={() => void resetPassword(user)}>Новый пароль</button>
                 <button onClick={() => void toggle(user)}>{user.status === "active" ? "Заблокировать" : "Включить"}</button>
+                {currentUser.role === "owner" && user.status === "active" && (
+                  <button onClick={() => void transferOwner(user)}>Сделать владельцем</button>
+                )}
               </div>
             )}
           </article>
         ))}
       </div>
       {showForm && <CreateUser currentUser={currentUser} close={() => setShowForm(false)} created={() => { setShowForm(false); void load(); }} />}
+    </>
+  );
+}
+
+function SecurityScreen({ currentUser, passwordChanged }: { currentUser: AuthUser; passwordChanged: () => void }) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    const response = await fetch("/api/auth/password", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ currentPassword, newPassword }),
+    });
+    const data = (await response.json()) as { error?: string };
+    setSaving(false);
+    if (!response.ok) {
+      setError(data.error || "Не удалось изменить пароль");
+      return;
+    }
+    window.alert("Пароль изменён. Войдите с новым паролем.");
+    passwordChanged();
+  }
+
+  return (
+    <>
+      <Title eyebrow="БЕЗОПАСНОСТЬ" title="Мой доступ" />
+      <div className="user-card">
+        <div className="user-badge">{currentUser.callsign.slice(0, 2).toUpperCase()}</div>
+        <span><b>{currentUser.callsign}</b><small>@{currentUser.login} · {roleLabel(currentUser.role)}</small></span>
+      </div>
+      <form className="auth-form security-form" onSubmit={submit}>
+        <label>Текущий пароль<input required minLength={8} type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} /></label>
+        <label>Новый постоянный пароль<input required minLength={8} type="password" autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /></label>
+        {error && <p className="form-error">{error}</p>}
+        <button className="primary" disabled={saving}>{saving ? "Сохраняем…" : "Изменить пароль"}</button>
+      </form>
+      {currentUser.role === "owner" && <p className="hint">Передача владельца находится в разделе «Сотрудники и доступ».</p>}
+    </>
+  );
+}
+
+type AuditEntry = {
+  id: string;
+  callsign: string;
+  action: string;
+  details: string;
+  createdAt: string;
+};
+
+function AuditScreen() {
+  const [entries, setEntries] = useState<AuditEntry[]>([]);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    void (async () => {
+      const response = await fetch("/api/audit", { cache: "no-store" });
+      const data = (await response.json()) as { entries?: AuditEntry[]; error?: string };
+      if (!response.ok) setError(data.error || "Не удалось загрузить журнал");
+      else setEntries(data.entries ?? []);
+    })();
+  }, []);
+
+  return (
+    <>
+      <Title eyebrow="КОНТРОЛЬ" title="Журнал действий" />
+      {error ? <p className="form-error">{error}</p> : entries.length === 0 ? (
+        <EmptyState title="Журнал пока пуст" text="Здесь появятся входы, изменения аккаунтов и операции с товарами." />
+      ) : (
+        <div className="users-list">
+          {entries.map((entry) => (
+            <article className="user-card audit-card" key={entry.id}>
+              <div className="user-badge">≡</div>
+              <span>
+                <b>{entry.action}</b>
+                <small>{entry.callsign} · {new Date(entry.createdAt).toLocaleString("ru-RU")}</small>
+                <em>{entry.details || "Без дополнительных данных"}</em>
+              </span>
+            </article>
+          ))}
+        </div>
+      )}
     </>
   );
 }

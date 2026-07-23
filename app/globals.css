@@ -30,3 +30,4 @@
 .user-actions{grid-column:2/4;display:flex;justify-content:flex-end;gap:8px}.user-actions button{border:1px solid #3a434d;border-radius:8px;background:#11161b;color:#aeb6bf;padding:7px 10px;cursor:pointer}
 .create-product-form select{width:100%;box-sizing:border-box;border:1px solid #353d47;border-radius:10px;background:#11161b;color:#fff;padding:13px;font:inherit}
 @media(max-width:620px){.account-box{gap:3px}.logout{display:none}.user-card{grid-template-columns:42px 1fr}.user-card>i{grid-column:2;justify-self:start}.user-actions{grid-column:2;justify-content:flex-start;flex-wrap:wrap}}
+.security-form{margin-top:14px}.audit-card{grid-template-columns:42px 1fr}.audit-card>span{min-width:0}.audit-card>span em{overflow-wrap:anywhere}

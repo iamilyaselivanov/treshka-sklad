@@ -49,16 +49,35 @@ const auditSql = `
   )
 `;
 
+const throttleSql = `
+  CREATE TABLE IF NOT EXISTS login_throttle (
+    login TEXT PRIMARY KEY NOT NULL,
+    failures INTEGER NOT NULL DEFAULT 0,
+    blocked_until TEXT,
+    last_attempt_at TEXT NOT NULL
+  )
+`;
+
 export async function ensureAuthSchema() {
   const db = env.DB;
   await db.batch([
     db.prepare(usersSql),
     db.prepare(sessionsSql),
     db.prepare(auditSql),
+    db.prepare(throttleSql),
     db.prepare("CREATE INDEX IF NOT EXISTS users_role_idx ON users(role)"),
+    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS single_owner_idx ON users(role) WHERE role = 'owner'"),
     db.prepare("CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions(user_id)"),
     db.prepare("CREATE INDEX IF NOT EXISTS audit_created_idx ON audit_log(created_at)"),
   ]);
+}
+
+export async function secureEqual(left: string, right: string) {
+  const leftHash = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(left)));
+  const rightHash = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(right)));
+  let difference = leftHash.length ^ rightHash.length;
+  for (let index = 0; index < leftHash.length; index += 1) difference |= leftHash[index] ^ rightHash[index];
+  return difference === 0;
 }
 
 function bytesToBase64(bytes: Uint8Array) {

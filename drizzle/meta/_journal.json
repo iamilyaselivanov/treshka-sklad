@@ -15,6 +15,13 @@
       "when": 1784814392338,
       "tag": "0001_famous_the_hunter",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1784821666064,
+      "tag": "0002_quick_bloodscream",
+      "breakpoints": true
     }
   ]
 }
