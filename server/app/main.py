@@ -1,8 +1,10 @@
 import hashlib
 import json
+import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
@@ -21,8 +23,42 @@ async def lifespan(_: FastAPI):
     pool.close()
 
 
-app = FastAPI(title="ТРЁШКА склад API", version="1.0", lifespan=lifespan)
+app = FastAPI(
+    title="ТРЁШКА склад API",
+    version="1.0",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+_login_failures: dict[str, list[float]] = {}
+_login_lock = threading.Lock()
+_login_window_seconds = 15 * 60
+_login_attempt_limit = 8
+
+
+def _login_client_key(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+    return forwarded or (request.client.host if request.client else "unknown")
+
+
+def _check_login_limit(client_key: str) -> None:
+    cutoff = time.monotonic() - _login_window_seconds
+    with _login_lock:
+        attempts = [stamp for stamp in _login_failures.get(client_key, []) if stamp >= cutoff]
+        _login_failures[client_key] = attempts
+        if len(attempts) >= _login_attempt_limit:
+            raise HTTPException(status_code=429, detail="Слишком много попыток входа. Повторите позже")
+
+
+def _record_login_result(client_key: str, successful: bool) -> None:
+    with _login_lock:
+        if successful:
+            _login_failures.pop(client_key, None)
+        else:
+            _login_failures.setdefault(client_key, []).append(time.monotonic())
 
 
 class LoginRequest(BaseModel):
@@ -62,10 +98,14 @@ def health():
 
 
 @app.post("/v1/auth/login")
-def login(request: LoginRequest):
-    user = authenticate(request.login, request.password)
+def login(payload: LoginRequest, request: Request):
+    client_key = _login_client_key(request)
+    _check_login_limit(client_key)
+    user = authenticate(payload.login, payload.password)
     if user is None:
+        _record_login_result(client_key, False)
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
+    _record_login_result(client_key, True)
     return {"token": issue_token(user), "user": {"login": user["login"], "role": user["role"], "post": user["post"]}}
 
 
