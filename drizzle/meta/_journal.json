@@ -8,6 +8,13 @@
       "when": 1784797263818,
       "tag": "0000_unique_vampiro",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1784814392338,
+      "tag": "0001_famous_the_hunter",
+      "breakpoints": true
     }
   ]
 }

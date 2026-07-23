@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { audit, requireUser } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -50,7 +51,9 @@ function product(row: ProductRow) {
   };
 }
 
-export async function GET() {
+export async function GET(request: Request) {
+  const auth = await requireUser(request);
+  if (auth.response) return auth.response;
   await ensureSchema();
   const result = await env.DB.prepare(
     "SELECT id, name, sku, category, quantity, unit, location, minimum, created_at FROM products ORDER BY created_at DESC",
@@ -59,6 +62,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const auth = await requireUser(request, ["owner", "admin", "storekeeper"]);
+  if (auth.response || !auth.user) return auth.response;
   await ensureSchema();
   const body = (await request.json()) as Record<string, unknown>;
   const name = String(body.name ?? "").trim();
@@ -96,13 +101,18 @@ export async function POST(request: Request) {
     throw cause;
   }
 
+  await audit(auth.user, "product_created", `${row.name} · ${row.sku}`);
   return Response.json({ product: product(row) }, { status: 201 });
 }
 
 export async function DELETE(request: Request) {
+  const auth = await requireUser(request, ["owner", "admin", "storekeeper"]);
+  if (auth.response || !auth.user) return auth.response;
   await ensureSchema();
   const id = new URL(request.url).searchParams.get("id");
   if (!id) return Response.json({ error: "Не указан товар" }, { status: 400 });
+  const existing = await env.DB.prepare("SELECT name, sku FROM products WHERE id = ?").bind(id).first<{ name: string; sku: string }>();
   await env.DB.prepare("DELETE FROM products WHERE id = ?").bind(id).run();
+  if (existing) await audit(auth.user, "product_deleted", `${existing.name} · ${existing.sku}`);
   return Response.json({ ok: true });
 }
