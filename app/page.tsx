@@ -1,80 +1,288 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
 type Screen = "home" | "stock" | "repairs" | "issue" | "more";
-type Modal = null | "scan" | "product" | "defect" | "work" | "inventory" | "journal" | "roles" | "verify";
 
-const goods = [
-  {name:"Аккумуляторная батарея 12V 18Ah",sku:"АКБ-1218",cat:"Аккумуляторы",qty:"24 шт",date:"20.07.2026",place:"Стеллаж B-04",low:false},
-  {name:"Усилитель ACASOM 20W",sku:"УСЛ-0020",cat:"Радиокомпоненты",qty:"3 шт",date:"18.07.2026",place:"Шкаф 2-06",low:true},
-  {name:"Провод AWG24",sku:"ПРВ-0024",cat:"Кабельная продукция",qty:"86 м",date:"19.07.2026",place:"Стеллаж A-11",low:false},
-  {name:"Припой ПОС-61",sku:"МАТ-0061",cat:"Расходные материалы",qty:"1 240 г",date:"18.07.2026",place:"Стеллаж A-03",low:false},
-  {name:"Аттенюатор 10 дБ",sku:"АТТ-0010",cat:"Радиокомпоненты",qty:"18 шт",date:"15.07.2026",place:"Шкаф 2-08",low:false},
-];
+type Product = {
+  id: string;
+  name: string;
+  sku: string;
+  category: string;
+  quantity: number;
+  unit: string;
+  location: string;
+  minimum: number;
+  createdAt: string;
+};
 
-const events = [
-  {time:"Сегодня · 10:42",type:"Передача",title:"Аккумуляторная батарея 12V 18Ah",meta:"Основной склад → Пост НРТК · 4 шт",doc:"Накладная OUT-0254"},
-  {time:"Сегодня · 09:36",type:"Дефектовка",title:"Аккумуляторная батарея № АКБ-00418",meta:"Пост НРТК · Не держит заряд",doc:"Акт DF-0248"},
-  {time:"Вчера · 17:20",type:"Акт работ",title:"Аккумуляторная батарея № АКБ-00391",meta:"Пост НРТК · Восстановление контактов",doc:"Акт RW-0241"},
-  {time:"19 июля · 12:10",type:"Приход",title:"Аккумуляторная батарея 12V 18Ah",meta:"ООО «Энергоком» → Основной склад · 20 шт",doc:"Накладная IN-1842"},
-];
+const EMPTY_FORM = {
+  name: "",
+  sku: "",
+  category: "",
+  quantity: "0",
+  unit: "шт",
+  location: "",
+  minimum: "0",
+};
 
-export default function Home(){
-  const [screen,setScreen]=useState<Screen>("home");
-  const [modal,setModal]=useState<Modal>(null);
-  const [query,setQuery]=useState("");
-  const [category,setCategory]=useState("Все категории");
-  const [sort,setSort]=useState("По названию");
-  const [toast,setToast]=useState("");
-  const notify=(s:string)=>{setToast(s);setTimeout(()=>setToast(""),2600)};
-  const filtered=useMemo(()=>goods.filter(g=>(g.name+g.sku+g.cat).toLowerCase().includes(query.toLowerCase())&&(category==="Все категории"||g.cat===category)).sort((a,b)=>sort==="По дате"?b.date.localeCompare(a.date):sort==="По остатку"?parseFloat(a.qty)-parseFloat(b.qty):a.name.localeCompare(b.name)),[query,category,sort]);
-  return <main className="app-shell">
-    <header className="topbar"><div className="brand"><div className="brandmark">Т</div><div><b>ТРЁШКА <i>СКЛАД</i></b><span>Основной склад · онлайн</span></div></div><button className="avatar" onClick={()=>notify("Алексей Морозов · Кладовщик")}>АМ</button></header>
-    <section className="content">
-      {screen==="home"&&<HomeScreen setScreen={setScreen} setModal={setModal}/>} 
-      {screen==="stock"&&<StockScreen data={filtered} query={query} setQuery={setQuery} category={category} setCategory={setCategory} sort={sort} setSort={setSort} setModal={setModal}/>} 
-      {screen==="repairs"&&<RepairsScreen setModal={setModal}/>} 
-      {screen==="issue"&&<IssueScreen data={filtered} query={query} setQuery={setQuery} category={category} setCategory={setCategory} sort={sort} setSort={setSort} notify={notify}/>} 
-      {screen==="more"&&<MoreScreen setModal={setModal}/>} 
-    </section>
-    <nav className="bottom-nav">
-      <Nav icon="⌂" text="Главная" active={screen==="home"} click={()=>setScreen("home")}/><Nav icon="▦" text="Склад" active={screen==="stock"} click={()=>setScreen("stock")}/><Nav icon="◫" text="Ремонты" active={screen==="repairs"} click={()=>setScreen("repairs")}/><Nav icon="⇄" text="Выдача" active={screen==="issue"} click={()=>setScreen("issue")}/><Nav icon="•••" text="Ещё" active={screen==="more"} click={()=>setScreen("more")}/>
-    </nav>
-    {modal&&<Overlay modal={modal} close={()=>setModal(null)} setModal={setModal} notify={notify}/>} {toast&&<div className="toast">✓ {toast}</div>}
-  </main>
+export default function Home() {
+  const [screen, setScreen] = useState<Screen>("home");
+  const [products, setProducts] = useState<Product[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [query, setQuery] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [toast, setToast] = useState("");
+
+  const loadProducts = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetch("/api/products", { cache: "no-store" });
+      if (!response.ok) throw new Error("Не удалось получить данные склада");
+      const data = (await response.json()) as { products: Product[] };
+      setProducts(data.products);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Ошибка сервера");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadProducts();
+  }, [loadProducts]);
+
+  const notify = (message: string) => {
+    setToast(message);
+    window.setTimeout(() => setToast(""), 2600);
+  };
+
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase("ru");
+    if (!needle) return products;
+    return products.filter((product) =>
+      [product.name, product.sku, product.category, product.location]
+        .join(" ")
+        .toLocaleLowerCase("ru")
+        .includes(needle),
+    );
+  }, [products, query]);
+
+  const totalUnits = products.reduce((sum, product) => sum + product.quantity, 0);
+  const lowCount = products.filter((product) => product.quantity <= product.minimum).length;
+
+  return (
+    <main className="app-shell">
+      <header className="topbar">
+        <div className="brand">
+          <div className="brandmark">Т</div>
+          <div>
+            <b>ТРЁШКА <i>СКЛАД</i></b>
+            <span>Версия 1.4 · сервер подключён</span>
+          </div>
+        </div>
+        <button className="avatar" onClick={() => notify("Серверная версия активна")}>АМ</button>
+      </header>
+
+      <section className="content">
+        {screen === "home" && (
+          <>
+            <div className="eyebrow">НОВАЯ БАЗА</div>
+            <div className="hello">
+              <h1>Склад готов к заполнению</h1>
+              <span><i /> Данные сохраняются на сервере</span>
+            </div>
+            <div className="stats">
+              <div><small>Позиций на складе</small><b>{products.length}</b><em>База заведена с нуля</em></div>
+              <div><small>Требуют внимания</small><b className={lowCount ? "warn" : ""}>{lowCount}</b><em>Остаток ниже минимума</em></div>
+              <div><small>Всего единиц</small><b>{totalUnits}</b><em>По всем позициям</em></div>
+            </div>
+            <h2>Быстрые действия</h2>
+            <div className="actions">
+              <Action icon="＋" title="Добавить первый товар" sub="Создать карточку в серверной базе" click={() => setShowCreate(true)} />
+              <Action icon="▦" title="Открыть склад" sub="Поиск и управление номенклатурой" click={() => setScreen("stock")} />
+              <Action icon="⌗" title="Сканировать QR" sub="Станет доступно после добавления товара" click={() => notify("Сначала добавьте товар")} />
+            </div>
+            <div className="section-head"><h2>Последние действия</h2></div>
+            <EmptyState title="Журнал пока пуст" text="События появятся после добавления и движения товаров." />
+          </>
+        )}
+
+        {screen === "stock" && (
+          <>
+            <Title eyebrow="УЧЁТ ИМУЩЕСТВА" title="Склад" action={<button onClick={() => setShowCreate(true)}>＋ Товар</button>} />
+            <div className="search">
+              <span>⌕</span>
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск по товарам, артикулам и категориям" />
+            </div>
+            {loading ? (
+              <EmptyState title="Загружаем склад" text="Получаем актуальные данные с сервера." />
+            ) : error ? (
+              <EmptyState title="Сервер временно недоступен" text={error} action={<button onClick={() => void loadProducts()}>Повторить</button>} />
+            ) : filtered.length === 0 ? (
+              <EmptyState
+                title={products.length === 0 ? "На складе пока нет товаров" : "Ничего не найдено"}
+                text={products.length === 0 ? "Добавьте первую карточку — она сохранится в серверной базе." : "Измените поисковый запрос."}
+                action={products.length === 0 ? <button onClick={() => setShowCreate(true)}>＋ Добавить товар</button> : undefined}
+              />
+            ) : (
+              <div className="product-list">
+                {filtered.map((product) => (
+                  <article className="server-product" key={product.id}>
+                    <i>{product.category.slice(0, 2).toUpperCase() || "ТВ"}</i>
+                    <span>
+                      <b>{product.name}</b>
+                      <small>{product.category || "Без категории"} · {product.sku}</small>
+                      <em>{product.location || "Место не указано"}</em>
+                    </span>
+                    <strong className={product.quantity <= product.minimum ? "red" : ""}>
+                      {product.quantity} {product.unit}
+                      <small>{product.quantity <= product.minimum ? "Ниже минимума" : "В наличии"}</small>
+                    </strong>
+                    <button className="delete-product" onClick={() => void removeProduct(product)}>Удалить</button>
+                  </article>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {screen === "repairs" && (
+          <>
+            <Title eyebrow="РЕМОНТНЫЙ КОНТУР" title="Ремонты" />
+            <EmptyState title="Ремонтов пока нет" text="Новая база не содержит демонстрационных актов и изделий." />
+          </>
+        )}
+
+        {screen === "issue" && (
+          <>
+            <Title eyebrow="ДВИЖЕНИЕ ТОВАРОВ" title="Выдача" />
+            <EmptyState
+              title={products.length ? "Выберите товар на складе" : "Выдавать пока нечего"}
+              text={products.length ? "Откройте склад и выберите карточку товара." : "Добавьте товары в серверную базу, затем оформляйте движения."}
+              action={<button onClick={() => setScreen("stock")}>Открыть склад</button>}
+            />
+          </>
+        )}
+
+        {screen === "more" && (
+          <>
+            <Title eyebrow="СИСТЕМА" title="Ещё" />
+            <div className="menu-card">
+              <Menu icon="◉" title="Инвентаризация" sub="Пока нет товарных остатков" />
+              <Menu icon="≡" title="Журнал действий" sub="События начнут записываться после заполнения базы" />
+              <Menu icon="⚙" title="Настройки" sub="Категории, единицы измерения и минимальные остатки" />
+            </div>
+          </>
+        )}
+      </section>
+
+      <nav className="bottom-nav">
+        <Nav icon="⌂" text="Главная" active={screen === "home"} click={() => setScreen("home")} />
+        <Nav icon="▦" text="Склад" active={screen === "stock"} click={() => setScreen("stock")} />
+        <Nav icon="◫" text="Ремонты" active={screen === "repairs"} click={() => setScreen("repairs")} />
+        <Nav icon="⇄" text="Выдача" active={screen === "issue"} click={() => setScreen("issue")} />
+        <Nav icon="•••" text="Ещё" active={screen === "more"} click={() => setScreen("more")} />
+      </nav>
+
+      {showCreate && (
+        <CreateProduct
+          close={() => setShowCreate(false)}
+          created={(product) => {
+            setProducts((current) => [product, ...current]);
+            setShowCreate(false);
+            setScreen("stock");
+            notify("Товар сохранён на сервере");
+          }}
+        />
+      )}
+      {toast && <div className="toast">✓ {toast}</div>}
+    </main>
+  );
+
+  async function removeProduct(product: Product) {
+    if (!window.confirm(`Удалить карточку «${product.name}»?`)) return;
+    const response = await fetch(`/api/products?id=${encodeURIComponent(product.id)}`, { method: "DELETE" });
+    if (!response.ok) {
+      notify("Не удалось удалить товар");
+      return;
+    }
+    setProducts((current) => current.filter((item) => item.id !== product.id));
+    notify("Карточка удалена");
+  }
 }
 
-function HomeScreen({setScreen,setModal}:any){return <><div className="eyebrow">ВТОРНИК, 21 ИЮЛЯ</div><div className="hello"><h1>Доброе утро, Алексей</h1><span><i/> Синхронизировано</span></div><div className="stats"><div><small>Позиций на складе</small><b>1 284</b><em>+24 за неделю</em></div><div><small>Требуют внимания</small><b className="warn">7</b><em>Ниже минимума</em></div><div><small>На постах</small><b>316</b><em>8 активных постов</em></div></div><h2>Быстрые действия</h2><div className="actions"><Action icon="⌗" title="Сканировать QR" sub="Найти товар или изделие" click={()=>setModal("scan")}/><Action icon="⇄" title="Оформить выдачу" sub="На пост или обратно на склад" click={()=>setScreen("issue")}/><Action icon="＋" title="Новая дефектовка" sub="Принять изделие в ремонт" click={()=>setModal("defect")}/></div><div className="section-head"><h2>Сегодня</h2><button onClick={()=>setModal("journal")}>Весь журнал</button></div><div className="activity"><EventRow e={events[0]}/><EventRow e={{time:"09:18",type:"Приход",title:"Поставка от ООО «Радиокомплект»",meta:"8 позиций · 184 единицы",doc:"IN-1842"}}/><EventRow e={{time:"08:55",type:"Возврат",title:"Возврат с поста № 1",meta:"Аттенюатор 10 дБ · 2 шт",doc:"RET-0081"}}/></div></>}
+function CreateProduct({ close, created }: { close: () => void; created: (product: Product) => void }) {
+  const [form, setForm] = useState(EMPTY_FORM);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
 
-function Filters({query,setQuery,category,setCategory,sort,setSort}:any){return <><div className="search"><span>⌕</span><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Поиск по всей базе данных"/><button>⌗</button></div><div className="filter-grid"><select value={category} onChange={e=>setCategory(e.target.value)}><option>Все категории</option><option>Аккумуляторы</option><option>Радиокомпоненты</option><option>Кабельная продукция</option><option>Расходные материалы</option></select><select value={sort} onChange={e=>setSort(e.target.value)}><option>По названию</option><option>По дате</option><option>По остатку</option></select></div></>}
-function StockScreen(p:any){return <><Title eyebrow="УЧЕТ ИМУЩЕСТВА" title="Склад" action={<button onClick={()=>p.setModal("scan")}>⌗ QR</button>}/><Filters {...p}/><div className="chips"><button className="active">Все · 1 284</button><button>Комплектующие</button><button>Изделия</button></div><ProductList data={p.data} click={()=>p.setModal("product")}/></>}
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      const response = await fetch("/api/products", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...form,
+          quantity: Number(form.quantity),
+          minimum: Number(form.minimum),
+        }),
+      });
+      const data = (await response.json()) as { product?: Product; error?: string };
+      if (!response.ok || !data.product) throw new Error(data.error || "Не удалось сохранить товар");
+      created(data.product);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Ошибка сервера");
+    } finally {
+      setSaving(false);
+    }
+  }
 
-function RepairsScreen({setModal}:any){return <><Title eyebrow="РЕМОНТНЫЙ КОНТУР" title="Ремонты" action={<button onClick={()=>setModal("defect")}>＋ Акт</button>}/><div className="repair-summary"><span><b>4</b>Дефектовка</span><span><b>11</b>В работе</span><span><b>6</b>Готовы</span></div><div className="notice danger"><b>!</b><span><strong>1 акт требует решения администратора</strong><small>Получено 150 изделий, выполнено 147</small></span><button onClick={()=>setModal("verify")}>Открыть</button></div><div className="chips"><button className="active">Активные</button><button>Завершенные</button><button>Пост НРТК</button></div><div className="repair-list"><Repair id="DF-0248" status="Дефектовка" item="Аккумуляторная батарея № АКБ-00418" meta="Пост НРТК · сегодня, 09:36" click={()=>setModal("defect")}/><Repair id="RW-0241" status="В работе" item="Модуль связи № 001245" meta="Пост № 2 · Сергей Петров" click={()=>setModal("work")}/><Repair id="RW-0238" status="Верификация" item="Партия изделий · 150 шт" meta="Выполнено 147 · расхождение 3 шт" click={()=>setModal("verify")}/></div></>}
+  const field = (name: keyof typeof EMPTY_FORM, value: string) => setForm((current) => ({ ...current, [name]: value }));
 
-function IssueScreen(p:any){const [mode,setMode]=useState("post");const [selected,setSelected]=useState<string[]>([]);return <><Title eyebrow="ДВИЖЕНИЕ ТОВАРОВ" title="Выдача"/><div className="segmented"><button className={mode==="post"?"active":""} onClick={()=>setMode("post")}>Выдать на пост</button><button className={mode==="warehouse"?"active":""} onClick={()=>setMode("warehouse")}>Выдать на склад</button></div><div className="issue-destination"><small>{mode==="post"?"ПОЛУЧАТЕЛЬ":"ОТКУДА ВОЗВРАЩАЕМ"}</small><select><option>Пост НРТК</option><option>Пост № 1</option><option>Пост № 2</option></select></div><Filters {...p}/><div className="chips"><button className="active">Вся номенклатура</button><button>Изделия</button><button>Комплектующие</button></div><div className="select-list">{p.data.map((g:any)=><button key={g.sku} className={selected.includes(g.sku)?"selected":""} onClick={()=>setSelected((s:string[])=>s.includes(g.sku)?s.filter(x=>x!==g.sku):[...s,g.sku])}><i>{selected.includes(g.sku)?"✓":""}</i><span><b>{g.name}</b><small>{g.cat} · {g.sku}</small></span><em>{g.qty}</em></button>)}</div>{selected.length>0&&<div className="issue-bar"><span><b>{selected.length}</b> выбрано</span><button onClick={()=>{setSelected([]);p.notify(mode==="post"?"Выдача на пост НРТК оформлена":"Возврат на склад оформлен")}}>Продолжить →</button></div>}</>}
-
-function MoreScreen({setModal}:any){return <><Title eyebrow="СИСТЕМА" title="Ещё"/><div className="menu-card"><Menu icon="◉" title="Инвентаризация" sub="Сверка фактических остатков" click={()=>setModal("inventory")}/><Menu icon="≡" title="Журнал действий" sub="Движения, дефектовки и акты работ" click={()=>setModal("journal")}/><Menu icon="♙" title="Роли и доступ" sub="Администратор, кладовщик, работник" click={()=>setModal("roles")}/></div><h2>Дополнительно</h2><div className="menu-card"><Menu icon="▤" title="Отчеты и выгрузки" sub="Excel, документы и сводки" click={()=>setModal("journal")}/><Menu icon="⌂" title="Посты" sub="8 активных · создает администратор" click={()=>setModal("roles")}/><Menu icon="⚙" title="Настройки" sub="Категории и справочники" click={()=>setModal("roles")}/></div></>}
-
-function Overlay({modal,close,setModal,notify}:any){
-  if(modal==="scan")return <div className="overlay scanner-screen"><button className="x" onClick={close}>×</button><div className="scan-frame"><i/><i/><i/><i/><b>⌗</b></div><h2>Наведите камеру на QR-код</h2><p>Код закреплен за номенклатурой</p><button className="primary" onClick={()=>setModal("product")}>Демо: распознать товар</button></div>;
-  if(modal==="product")return <Sheet title="Карточка товара" close={close}><div className="product-hero"><div>АКБ</div><small>АККУМУЛЯТОРЫ</small><h2>Аккумуляторная батарея 12V 18Ah</h2><span>АКБ-1218 · QR-АКБ-1218</span></div><div className="balance"><small>Основной склад</small><b>24 шт</b><em>Доступно к выдаче</em></div><div className="info"><span>Дата прихода<b>20 июля 2026</b></span><span>Откуда пришло<b>ООО «Энергоком»</b></span><span>Место хранения<b>Стеллаж B-04</b></span><span>Категория<b>Аккумуляторы</b></span></div><button className="primary" onClick={()=>{close();notify("Товар добавлен в выдачу")}}>Добавить в выдачу</button><button className="secondary" onClick={()=>notify("QR-код готов к печати")}>Показать QR-код</button></Sheet>;
-  if(modal==="inventory")return <Sheet title="Инвентаризация" close={close}><div className="doc-head"><span>INV-0072</span><i>В процессе</i></div><div className="progress"><span><b>342</b> проверено</span><span><b>18</b> осталось</span><span><b className="red">3</b> расхождения</span></div><label>Локация<select><option>Основной склад</option><option>Пост НРТК</option></select></label><button className="primary" onClick={()=>notify("Сканер инвентаризации открыт")}>⌗ Сканировать следующий товар</button><div className="notice danger"><b>!</b><span><strong>Усилитель ACASOM 20W</strong><small>По учету 3 шт · Фактически 2 шт</small></span></div><button className="secondary" onClick={()=>{close();notify("Инвентаризация сохранена")}}>Сохранить черновик</button></Sheet>;
-  if(modal==="journal")return <Journal close={close}/>;
-  if(modal==="roles")return <Roles close={close}/>;
-  if(modal==="verify")return <Sheet title="Верификация акта" close={close}><div className="notice danger"><b>!</b><span><strong>Количественное расхождение</strong><small>Закрытие доступно только администратору</small></span></div><div className="verify-grid"><span>Получено<b>150 шт</b></span><span>Выполнено<b>147 шт</b></span><span>Расхождение<b className="red">−3 шт</b></span></div><label>Причина расхождения<textarea defaultValue="3 изделия признаны неремонтопригодными"/></label><label>Решение<select><option>Принять акт с расхождением</option><option>Вернуть на доработку</option></select></label><button className="primary admin" onClick={()=>{close();notify("Акт принят администратором")}}>◆ Подтвердить как администратор</button></Sheet>;
-  if(modal==="defect")return <Sheet title="Акт дефектовки" close={close}><div className="doc-head"><span>DF-0249</span><i>Черновик</i></div><label>Изделие / серийный номер<input defaultValue="Аккумуляторная батарея № АКБ-00418"/></label><label>Пост<select><option>Пост НРТК</option></select></label><label>Описание неисправности<textarea defaultValue="Не держит заряд, падение напряжения под нагрузкой"/></label><label>Выявленные дефекты<textarea placeholder="Обязательное поле"/></label><label>Заключение<select><option>Ремонтопригодно</option><option>Не подлежит ремонту</option></select></label><button className="primary" onClick={()=>setModal("work")}>Закрыть дефектовку и создать акт работ</button></Sheet>;
-  return <Sheet title="Акт выполненных работ" close={close}><div className="doc-head"><span>RW-0249</span><i>Черновик</i></div><div className="linked">Связан с актом дефектовки <b>DF-0249</b></div><label>Выполненные работы<textarea defaultValue="Восстановление контактов, контрольный цикл заряда-разряда"/></label><h3>Израсходованные товары</h3><div className="line"><span><b>Припой ПОС-61</b><small>Найдено по всей базе</small></span><strong>20 г</strong></div><div className="line"><span><b>Провод AWG24</b><small>Остаток поста НРТК</small></span><strong>0,5 м</strong></div><button className="secondary">＋ Найти и добавить товар</button><button className="primary" onClick={()=>{close();notify("Акт сохранен и отправлен на верификацию")}}>Сохранить акт</button></Sheet>
+  return (
+    <div className="overlay shade">
+      <section className="sheet">
+        <header><button onClick={close}>←</button><h2>Новая карточка товара</h2><button onClick={close}>×</button></header>
+        <form className="sheet-body create-product-form" onSubmit={submit}>
+          <label>Название<input required value={form.name} onChange={(event) => field("name", event.target.value)} placeholder="Например, крепёж М6" /></label>
+          <label>Артикул<input required value={form.sku} onChange={(event) => field("sku", event.target.value)} placeholder="Уникальный код" /></label>
+          <label>Категория<input value={form.category} onChange={(event) => field("category", event.target.value)} placeholder="Расходные материалы" /></label>
+          <div className="form-row">
+            <label>Количество<input min="0" step="0.01" type="number" required value={form.quantity} onChange={(event) => field("quantity", event.target.value)} /></label>
+            <label>Единица<input required value={form.unit} onChange={(event) => field("unit", event.target.value)} /></label>
+          </div>
+          <label>Место хранения<input value={form.location} onChange={(event) => field("location", event.target.value)} placeholder="Стеллаж, шкаф или ячейка" /></label>
+          <label>Минимальный остаток<input min="0" step="0.01" type="number" value={form.minimum} onChange={(event) => field("minimum", event.target.value)} /></label>
+          {error && <p className="form-error">{error}</p>}
+          <button className="primary" disabled={saving}>{saving ? "Сохраняем…" : "Сохранить на сервере"}</button>
+        </form>
+      </section>
+    </div>
+  );
 }
 
-function Journal({close}:any){const [post,setPost]=useState("Пост НРТК"),[item,setItem]=useState("Аккумуляторная батарея");return <Sheet title="Журнал действий" close={close}><p className="hint">Фильтры применяются одновременно ко всем документам и движениям.</p><div className="filter-stack"><label>Пост<select value={post} onChange={e=>setPost(e.target.value)}><option>Пост НРТК</option><option>Все посты</option><option>Пост № 1</option></select></label><label>Товар или изделие<input value={item} onChange={e=>setItem(e.target.value)}/></label><label>Тип события<select><option>Все события</option><option>Движения товара</option><option>Акты дефектовки</option><option>Акты выполненных работ</option></select></label></div><div className="found">Найдено: <b>4 события</b></div><div className="journal-list">{events.map((e,i)=><EventRow e={e} key={i}/>)}</div></Sheet>}
-function Roles({close}:any){const roles=[{n:"Администратор",c:"admin",d:"Полный доступ · управление постами · верификация расхождений",rights:["Карточки и категории","Все перемещения","Отчеты и инвентаризация","Создание постов","Принятие актов с расхождением"]},{n:"Кладовщик",c:"store",d:"Складской учет, акты и выгрузки",rights:["Карточки и категории","Акты дефектовки и работ","Выгрузка актов в Excel","Инвентаризация"]},{n:"Работник · старший поста",c:"worker",d:"Доступ только к назначенному посту",rights:["Акты дефектовки","Акты выполненных работ","Добавление расхода материалов"]}];return <Sheet title="Роли и доступ" close={close}><p className="hint">Права применяются на сервере и определяют доступные действия в приложении.</p>{roles.map(r=><details className="role" key={r.n} open={r.c==="admin"}><summary><i className={r.c}>♙</i><span><b>{r.n}</b><small>{r.d}</small></span><em>⌄</em></summary><ul>{r.rights.map(x=><li key={x}>✓ {x}</li>)}</ul>{r.c!=="admin"&&<p>× Создание постов недоступно</p>}</details>)}</Sheet>}
+function EmptyState({ title, text, action }: { title: string; text: string; action?: React.ReactNode }) {
+  return <div className="empty-state"><div>□</div><h3>{title}</h3><p>{text}</p>{action}</div>;
+}
 
-function ProductList({data,click}:any){return <div className="product-list">{data.map((g:any)=><button key={g.sku} onClick={click}><i>{g.cat.slice(0,2).toUpperCase()}</i><span><b>{g.name}</b><small>{g.cat} · {g.sku}</small><em>{g.date} · {g.place}</em></span><strong className={g.low?"red":""}>{g.qty}<small>{g.low?"Ниже минимума":"В наличии"}</small></strong></button>)}</div>}
-function Title({eyebrow,title,action}:any){return <div className="title"><div><span>{eyebrow}</span><h1>{title}</h1></div>{action}</div>}
-function Nav({icon,text,active,click}:any){return <button className={active?"active":""} onClick={click}><b>{icon}</b><span>{text}</span></button>}
-function Action({icon,title,sub,click}:any){return <button onClick={click}><i>{icon}</i><span><b>{title}</b><small>{sub}</small></span><em>›</em></button>}
-function EventRow({e}:any){return <div className="event"><i>{e.type.slice(0,1)}</i><span><small>{e.time} · {e.type}</small><b>{e.title}</b><em>{e.meta}</em></span><strong>{e.doc}</strong></div>}
-function Repair({id,status,item,meta,click}:any){return <button onClick={click}><span><small>{id}</small><i>{status}</i></span><b>{item}</b><em>{meta}</em><strong>Открыть ›</strong></button>}
-function Menu({icon,title,sub,click}:any){return <button onClick={click}><i>{icon}</i><span><b>{title}</b><small>{sub}</small></span><em>›</em></button>}
-function Sheet({title,close,children}:any){return <div className="overlay shade"><section className="sheet"><header><button onClick={close}>←</button><h2>{title}</h2><button onClick={close}>×</button></header><div className="sheet-body">{children}</div></section></div>}
+function Title({ eyebrow, title, action }: { eyebrow: string; title: string; action?: React.ReactNode }) {
+  return <div className="title"><div><span>{eyebrow}</span><h1>{title}</h1></div>{action}</div>;
+}
+
+function Nav({ icon, text, active, click }: { icon: string; text: string; active: boolean; click: () => void }) {
+  return <button className={active ? "active" : ""} onClick={click}><b>{icon}</b><span>{text}</span></button>;
+}
+
+function Action({ icon, title, sub, click }: { icon: string; title: string; sub: string; click: () => void }) {
+  return <button onClick={click}><i>{icon}</i><span><b>{title}</b><small>{sub}</small></span><em>›</em></button>;
+}
+
+function Menu({ icon, title, sub }: { icon: string; title: string; sub: string }) {
+  return <button><i>{icon}</i><span><b>{title}</b><small>{sub}</small></span><em>›</em></button>;
+}
