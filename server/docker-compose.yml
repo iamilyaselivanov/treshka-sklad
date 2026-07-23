@@ -1,0 +1,51 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-treshka_sklad}
+      POSTGRES_USER: ${POSTGRES_USER:-treshka}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-treshka} -d ${POSTGRES_DB:-treshka_sklad}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-treshka}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-treshka_sklad}
+    volumes:
+      - media_data:/data/media
+      - backup_data:/backups
+      - ./secrets:/run/secrets:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  postgres_data:
+  media_data:
+  caddy_data:
+  caddy_config:
+  backup_data:

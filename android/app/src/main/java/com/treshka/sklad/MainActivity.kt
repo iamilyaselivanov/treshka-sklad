@@ -33,6 +33,9 @@ import androidx.core.content.ContextCompat
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import org.json.JSONObject
+import com.google.firebase.FirebaseApp
+import com.google.firebase.messaging.FirebaseMessaging
 
 /**
  * ТРЁШКА склад — нативная Android-обёртка над однофайловым HTML/JS прототипом
@@ -56,11 +59,12 @@ import java.io.FileOutputStream
  */
 class MainActivity : AppCompatActivity() {
     companion object {
-        private const val NOTIFICATION_CHANNEL_ID = "treshka_sklad_events"
+        const val NOTIFICATION_CHANNEL_ID = "treshka_sklad_events"
     }
 
     private lateinit var webView: WebView
     private lateinit var appStateStore: AppStateStore
+    private lateinit var serverSyncManager: ServerSyncManager
 
     private val scanLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -178,6 +182,25 @@ class MainActivity : AppCompatActivity() {
 
         webView = WebView(this)
         setContentView(webView)
+        serverSyncManager = ServerSyncManager(
+            appStateStore,
+            onStatus = { json ->
+                runOnUiThread {
+                    webView.evaluateJavascript(
+                        "window.onNativeSyncStatus && window.onNativeSyncStatus(${jsStringLiteral(json)});",
+                        null,
+                    )
+                }
+            },
+            onRemoteState = { payload, revision ->
+                runOnUiThread {
+                    webView.evaluateJavascript(
+                        "window.onNativeRemoteState && window.onNativeRemoteState(${jsStringLiteral(payload)}, $revision);",
+                        null,
+                    )
+                }
+            },
+        )
 
         webView.settings.apply {
             javaScriptEnabled = true
@@ -188,7 +211,8 @@ class MainActivity : AppCompatActivity() {
             allowFileAccess = true
         }
 
-        webView.addJavascriptInterface(WebAppInterface(appStateStore), "AndroidStorage")
+        webView.addJavascriptInterface(WebAppInterface(appStateStore, serverSyncManager), "AndroidStorage")
+        webView.addJavascriptInterface(SyncBridge(), "AndroidSync")
         webView.addJavascriptInterface(ScannerBridge(), "AndroidScanner")
         webView.addJavascriptInterface(FileExportBridge(), "AndroidFiles")
         webView.addJavascriptInterface(PrintBridge(), "AndroidPrint")
@@ -199,6 +223,12 @@ class MainActivity : AppCompatActivity() {
         webView.webChromeClient = PrintPopupChromeClient()
 
         webView.loadUrl("file:///android_asset/prototype.html")
+
+        if (FirebaseApp.getApps(this).isNotEmpty()) {
+            FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
+                serverSyncManager.registerPushToken(token)
+            }
+        }
 
         if (Build.VERSION.SDK_INT in Build.VERSION_CODES.O..Build.VERSION_CODES.P) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
@@ -212,6 +242,70 @@ class MainActivity : AppCompatActivity() {
         ) {
             requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+    }
+
+    inner class SyncBridge {
+        @JavascriptInterface
+        fun configure(baseUrl: String, token: String): Boolean {
+            val normalized = baseUrl.trim().trimEnd('/')
+            if (!normalized.startsWith("https://")) return false
+            appStateStore.configureSync(normalized, token.trim())
+            serverSyncManager.syncNow()
+            return true
+        }
+
+        @JavascriptInterface
+        fun login(baseUrl: String, login: String, password: String): String = try {
+            val result = serverSyncManager.login(baseUrl, login, password)
+            if (FirebaseApp.getApps(this@MainActivity).isNotEmpty()) {
+                FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
+                    serverSyncManager.registerPushToken(token)
+                }
+            }
+            result
+        } catch (e: Exception) {
+            JSONObject().put("error", e.message ?: "Ошибка входа").toString()
+        }
+
+        @JavascriptInterface
+        fun createUser(json: String): String = try {
+            serverSyncManager.createUser(json)
+        } catch (e: Exception) {
+            JSONObject().put("error", e.message ?: "Ошибка создания пользователя").toString()
+        }
+
+        @JavascriptInterface
+        fun listConflicts(): String = try {
+            serverSyncManager.listConflicts()
+        } catch (e: Exception) {
+            JSONObject().put("error", e.message ?: "Ошибка загрузки конфликтов").toString()
+        }
+
+        @JavascriptInterface
+        fun resolveConflict(id: Long, decision: String): String = try {
+            serverSyncManager.resolveConflict(id, decision)
+        } catch (e: Exception) {
+            JSONObject().put("error", e.message ?: "Ошибка решения конфликта").toString()
+        }
+
+        @JavascriptInterface
+        fun registerPushToken(token: String): Boolean = serverSyncManager.registerPushToken(token)
+
+        @JavascriptInterface
+        fun uploadImage(dataUrl: String): String = try {
+            serverSyncManager.uploadImage(dataUrl)
+        } catch (e: Exception) {
+            JSONObject().put("error", e.message ?: "Ошибка загрузки фотографии").toString()
+        }
+
+        @JavascriptInterface
+        fun status(): String = appStateStore.syncStatusJson()
+
+        @JavascriptInterface
+        fun syncNow() = serverSyncManager.syncNow()
+
+        @JavascriptInterface
+        fun disconnect() = appStateStore.clearSyncAuth()
     }
 
     private fun createNotificationChannel() {
@@ -508,11 +602,17 @@ class MainActivity : AppCompatActivity() {
         flushWebAppState()
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (::serverSyncManager.isInitialized) serverSyncManager.syncNow()
+    }
+
     override fun onStop() {
         super.onStop()
         flushWebAppState()
     }
 
+    @Suppress("MissingSuperCall")
     override fun onBackPressed() {
         // #8 ревью: раньше здесь проверялась только webView.canGoBack() — реальная
         // история навигации WebView, которая в этом SPA почти не продвигается

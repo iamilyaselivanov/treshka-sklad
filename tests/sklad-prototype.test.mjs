@@ -447,15 +447,15 @@ test('regression — app version is shown to the user on the "Ещё" screen', a
     render({ fn: views.more });
     return { version: APP_VERSION, html: document.getElementById('content').innerHTML };
   });
-  assert.equal(r.version, '1.3');
-  assert.ok(r.html.includes('версия 1.3'), 'more() screen must render the current app version');
+  assert.equal(r.version, '1.4');
+  assert.ok(r.html.includes('версия 1.4'), 'more() screen must render the current app version');
   await ctx.close();
 });
 
 test('regression — app version is also shown in the persistent top masthead on every screen', async () => {
   const { ctx, page } = await newPage();
   const text = await page.evaluate(() => document.getElementById('mastVersion').textContent);
-  assert.equal(text, 'v1.3');
+  assert.equal(text, 'v1.4');
   await ctx.close();
 });
 
@@ -1300,4 +1300,81 @@ test('v1.3 — every ordinary work act waits for admin approval; analytics stays
   assert.equal(r.appHasAnalytics, true);
   assert.equal(r.printHasAnalytics, false);
   await ctx.close();
+});
+
+test('v1.4 — a compatible remote snapshot is migrated and atomically persisted without creating a sync loop', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.__remoteSaves = [];
+    window.AndroidStorage = {
+      loadState: () => 'null',
+      loadBackupState: () => 'null',
+      saveState: () => true,
+      saveRemoteState: (json, schema, revision) => {
+        window.__remoteSaves.push({ json, schema, revision });
+        return true;
+      },
+    };
+  });
+  const result = await page.evaluate(() => {
+    const remote = serializeAppState();
+    remote.items[0].stock += 7;
+    const expected = remote.items[0].stock;
+    const ok = window.onNativeRemoteState(JSON.stringify(remote), 77);
+    return {
+      ok,
+      stock: items[0].stock,
+      expected,
+      saves: window.__remoteSaves.map((x) => ({ schema: x.schema, revision: x.revision })),
+      lastPayloadMatches: _lastSavedPayload === window.__remoteSaves[0]?.json,
+    };
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.stock, result.expected);
+  assert.deepEqual(result.saves, [{ schema: 4, revision: 77 }]);
+  assert.equal(result.lastPayloadMatches, true);
+  await ctx.close();
+});
+
+test('v1.4 — a newer incompatible server schema never overwrites the local database', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.__remoteSaves = 0;
+    window.AndroidStorage = {
+      loadState: () => 'null',
+      loadBackupState: () => 'null',
+      saveState: () => true,
+      saveRemoteState: () => { window.__remoteSaves += 1; return true; },
+    };
+  });
+  const result = await page.evaluate(() => {
+    const before = JSON.stringify(serializeAppState());
+    const incompatible = JSON.parse(before);
+    incompatible.schemaVersion = APP_SCHEMA_VERSION + 1;
+    incompatible.items[0].stock = 999999;
+    const ok = window.onNativeRemoteState(JSON.stringify(incompatible), 88);
+    return {
+      ok,
+      unchanged: JSON.stringify(serializeAppState()) === before,
+      remoteSaves: window.__remoteSaves,
+      error: _nativeSyncStatus.lastError,
+    };
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.unchanged, true);
+  assert.equal(result.remoteSaves, 0);
+  assert.match(result.error, /несовместимую схему/);
+  await ctx.close();
+});
+
+test('v1.4 — server foundation contains idempotency, conflict preservation and additive migrations', () => {
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const sql = readFileSync(path.join(root, 'server', 'migrations', '001_initial.sql'), 'utf8');
+  const sync = readFileSync(path.join(root, 'android', 'app', 'src', 'main', 'java', 'com', 'treshka', 'sklad', 'AppStateStore.kt'), 'utf8');
+  const api = readFileSync(path.join(root, 'server', 'app', 'main.py'), 'utf8');
+  assert.match(sql, /PRIMARY KEY\(tenant_id, mutation_id\)/);
+  assert.match(sql, /conflict_snapshots/);
+  assert.doesNotMatch(sql, /DROP\s+TABLE/i);
+  assert.match(sync, /sync_outbox/);
+  assert.match(sync, /db\.beginTransaction\(\)/);
+  assert.match(api, /status_code=409/);
+  assert.match(api, /sync_mutations/);
 });

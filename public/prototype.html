@@ -3040,12 +3040,12 @@ function addNotification(target,title,body,type,entityNo){
 }
 function notifyAdmins(title,body,type,entityNo){
   const recipients=accounts.filter(a=>a.active!==false&&a.role==='admin');
-  if(recipients.length) recipients.forEach(a=>addNotification({recipientAccountId:a.id},title,body,type,entityNo));
+  if(recipients.length) recipients.forEach(a=>addNotification({recipientAccountId:a.id,recipientLogin:a.login,recipientRole:a.role},title,body,type,entityNo));
   else addNotification({recipientRole:'admin'},title,body,type,entityNo);
 }
 function notifyPostUsers(post,title,body,type,entityNo){
   const recipients=accounts.filter(a=>a.active!==false&&a.post===post);
-  if(recipients.length) recipients.forEach(a=>addNotification({recipientAccountId:a.id},title,body,type,entityNo));
+  if(recipients.length) recipients.forEach(a=>addNotification({recipientAccountId:a.id,recipientLogin:a.login,recipientRole:a.role,post},title,body,type,entityNo));
   else addNotification({recipientRole:'rabotnik',post},title,body,type,entityNo);
 }
 function visibleNotifications(){
@@ -3083,7 +3083,7 @@ const STORAGE_FALLBACK_KEY = 'treshka_sklad_state_v1';
    дублируется на экране "Ещё"). Держим синхронно с android/app/build.gradle →
    defaultConfig.versionName; отдельно от APP_SCHEMA_VERSION, который
    версионирует структуру данных, а не саму сборку приложения. */
-const APP_VERSION = '1.3';
+const APP_VERSION = '1.4';
 
 function nativeStorageBridge(){
   return (typeof window!=='undefined' && window.AndroidStorage && typeof window.AndroidStorage.saveState==='function')
@@ -3238,6 +3238,32 @@ let _saveIsHealthy = true;
 // нельзя — это единственный шанс администратора вручную восстановить "сырой"
 // повреждённый JSON из SQLite/localStorage для форензики.
 let _autosaveSuspended = false;
+let _nativeSyncStatus = {configured:false,pending:0,serverRevision:0,lastError:null};
+function nativeSyncBridge(){
+  return typeof window!=='undefined'&&window.AndroidSync?window.AndroidSync:null;
+}
+function refreshNativeSyncStatus(){
+  const bridge=nativeSyncBridge();if(!bridge||typeof bridge.status!=='function')return _nativeSyncStatus;
+  try{_nativeSyncStatus=JSON.parse(bridge.status());}catch(e){console.warn('Не удалось прочитать статус sync',e);}
+  return _nativeSyncStatus;
+}
+window.onNativeSyncStatus=function(raw){
+  try{_nativeSyncStatus=JSON.parse(raw);if(currentTab==='more'&&$('content'))views.more();}catch(e){console.error('Некорректный статус sync',e);}
+};
+window.onNativeRemoteState=function(raw,revision){
+  try{
+    const incoming=JSON.parse(raw);
+    if(!applyAppState(incoming)){_nativeSyncStatus.lastError='Сервер прислал несовместимую схему; локальные данные сохранены';return false;}
+    const migratedPayload=JSON.stringify(serializeAppState());
+    const storage=nativeStorageBridge();
+    if(!storage||typeof storage.saveRemoteState!=='function'||!storage.saveRemoteState(migratedPayload,APP_SCHEMA_VERSION,revision)){
+      _nativeSyncStatus.lastError='Не удалось атомарно сохранить серверный снимок';return false;
+    }
+    _lastSavedPayload=migratedPayload;_saveIsHealthy=true;_nativeSyncStatus.serverRevision=revision;
+    if(currentTab&&views[currentTab])render({fn:views[currentTab]},false);
+    toast('✓ Данные синхронизированы с сервером');return true;
+  }catch(e){console.error('Серверный снимок отклонён',e);_nativeSyncStatus.lastError='Серверный снимок повреждён';return false;}
+};
 function flushSave(){
   if(_autosaveSuspended) return;
   const payload = JSON.stringify(serializeAppState());
@@ -3254,6 +3280,7 @@ function flushSave(){
     if(ok){
       _lastSavedPayload = payload;
       _saveIsHealthy = true;
+      const sync=nativeSyncBridge();if(sync&&typeof sync.syncNow==='function')sync.syncNow();
     } else {
       // Нативное хранилище вернуло false (например, SQLite не смог записать) —
       // НЕ считаем это успехом и НЕ запоминаем payload, чтобы следующий тик
@@ -3586,6 +3613,13 @@ function nativePhotoBridge(){
 }
 const DEFECT_PHOTO_PICK_TARGET = '__defekt_application_photo__';
 let draftDefektPhoto = null;
+let draftDefektPhotoMedia = null;
+function uploadPhotoToServer(dataUrl){
+  const sync=nativeSyncBridge(),status=refreshNativeSyncStatus();
+  if(!status.configured||!sync||typeof sync.uploadImage!=='function')return null;
+  try{const result=JSON.parse(sync.uploadImage(dataUrl));if(result.error){console.warn(result.error);return null;}return result;}
+  catch(e){console.warn('Фото осталось локально и будет сохранено в снимке:',e);return null;}
+}
 
 function requestPhotoFromDevice(target){
   const bridge = nativePhotoBridge();
@@ -3622,6 +3656,7 @@ function renderDefektPhotoDraft(){
 }
 function removeDefektApplicationPhoto(){
   draftDefektPhoto = null;
+  draftDefektPhotoMedia = null;
   renderDefektPhotoDraft();
   toast('Фото заявки удалено из черновика');
 }
@@ -3642,6 +3677,7 @@ window.onPhotoPicked = function(itemId, dataUrl, error){
     if(error){ toast('⚠ '+error); return; }
     if(!dataUrl) return;
     draftDefektPhoto = dataUrl;
+    draftDefektPhotoMedia = uploadPhotoToServer(dataUrl);
     renderDefektPhotoDraft();
     toast('✓ Фото заявки добавлено в дефектовку');
     return;
@@ -3651,6 +3687,7 @@ window.onPhotoPicked = function(itemId, dataUrl, error){
   if(error){ toast('⚠ '+error); return; }
   if(!dataUrl) return;
   i.photo = dataUrl;
+  i.photoMedia = uploadPhotoToServer(dataUrl);
   logAction('Фото товара', esc(i.name)+' — фото добавлено/заменено');
   toast('✓ Фото сохранено');
   openItem(itemId);
@@ -3877,6 +3914,7 @@ issueExt(){
 
 newDefekt(){
   draftDefektPhoto = null;
+  draftDefektPhotoMedia = null;
   const scoped = isRabotnikRestrictedToPost();
   setHdr('Новый акт дефектовки', scoped?`Пост «${currentUserPost}»`:'Все поля обязательны', true, false);
   $('content').innerHTML = `
@@ -3919,7 +3957,11 @@ more(){
   currentTab='more'; setTab('more');
   setHdr('Ещё', 'Роли, журнал, инвентаризация', false, false);
   const r = ROLES[currentRole];
+  const syncStatus=refreshNativeSyncStatus();
   $('content').innerHTML = `
+    <div class="card" onclick="render({fn:renderServerSettings})">
+      <div class="row"><div class="icbox">☁️</div><div class="grow"><div class="t">Сервер и синхронизация</div><div class="s">${syncStatus.configured?(syncStatus.lastError?'Ошибка · локальные данные защищены':`Подключено · очередь ${syncStatus.pending||0}`):'Работа офлайн · сервер не настроен'}</div></div><div style="color:${syncStatus.lastError?'var(--red)':'var(--muted)'}">›</div></div>
+    </div>
     <div class="card" onclick="render({fn:views.roles})">
       <div class="row">
         <div class="icbox">👤</div>
@@ -4034,6 +4076,52 @@ function renderNotifications(){
     ${list.length?`<button class="fbtn" style="width:100%;margin-bottom:10px" onclick="markNotificationsRead()">✓ Отметить всё прочитанным</button>`:''}
     ${list.map(n=>`<div class="card static" style="${n.read?'opacity:.7':'border-color:var(--accent)'}"><div class="t">${esc(n.title)}</div><div class="s" style="margin-top:4px;color:var(--ink)">${esc(n.body)}</div><div class="s" style="margin-top:6px">${esc(n.date)}</div></div>`).join('')||'<div class="s" style="text-align:center;padding:32px">Уведомлений пока нет</div>'}`;
 }
+function renderServerSettings(){
+  const s=refreshNativeSyncStatus();
+  let conflicts=[];
+  const bridge=nativeSyncBridge();
+  if(s.configured&&currentRole==='admin'&&bridge&&typeof bridge.listConflicts==='function'){
+    try{const loaded=JSON.parse(bridge.listConflicts());if(Array.isArray(loaded))conflicts=loaded;}catch(e){console.warn(e);}
+  }
+  setHdr('Сервер и синхронизация','Offline-first: локальная база работает всегда',true,false);
+  $('content').innerHTML=`
+    <div class="progress-note ${s.lastError?'bad':s.configured?'ok':''}">${s.configured
+      ? (s.lastError?`⚠ ${esc(s.lastError)}. Неотправленные изменения остаются в защищённой очереди.`:`✓ Сервер подключён. Ревизия ${s.serverRevision||0}, в очереди ${s.pending||0}.`)
+      :'Сейчас данные сохраняются только на устройстве. Подключение не очищает локальную базу: первый снимок загружается на пустой сервер.'}</div>
+    <div class="card static">
+      <div class="fld"><label>Адрес API (только HTTPS)</label><input id="serverUrl" value="${esc(s.baseUrl||'')}" placeholder="https://sklad.example.ru"></div>
+      <div class="fld"><label>Логин</label><input id="serverLogin" autocomplete="username"></div>
+      <div class="fld"><label>Пароль</label><input id="serverPassword" type="password" autocomplete="current-password"></div>
+      <button class="btn primary" onclick="connectServer()">Подключить и синхронизировать</button>
+    </div>
+    ${s.configured?`<button class="btn green" onclick="nativeSyncBridge().syncNow();toast('Синхронизация запущена')">⟳ Синхронизировать сейчас</button><button class="btn ghost" onclick="disconnectServer()">Отключить сервер на этом устройстве</button>`:''}
+    ${conflicts.length?`<div class="sec">Конфликты без потери данных</div>${conflicts.map(c=>`<div class="card static"><div class="t">Устройство ${esc(c.deviceId)}</div><div class="s">Локальная ревизия ${c.baseRevision}, серверная ${c.serverRevision}. Обе копии сохранены.</div><button class="fbtn" style="width:100%;margin-top:8px" onclick="resolveServerConflict(${c.id},'server')">Оставить серверную версию</button><button class="fbtn" style="width:100%;margin-top:6px" onclick="resolveServerConflict(${c.id},'local')">Принять сохранённую локальную версию</button></div>`).join('')}`:''}
+    <div class="sec">Защита данных</div>
+    <div class="card static"><div class="s" style="color:var(--ink);line-height:1.55">Каждое изменение сначала атомарно записывается в SQLite вместе с durable outbox. Сервер принимает mutationId только один раз. При конфликте ни одна версия не перезаписывается: локальный снимок остаётся в очереди, а копия сохраняется на сервере для разбора.</div></div>`;
+}
+function resolveServerConflict(id,decision){
+  if(currentRole!=='admin'){toast('Решение конфликтов доступно только администратору');return false;}
+  if(!confirm(decision==='local'?'Сделать локальную конфликтную копию новой серверной версией?':'Оставить серверную версию? Локальная копия сохранится в архиве конфликтов.'))return false;
+  const bridge=nativeSyncBridge();
+  try{const result=JSON.parse(bridge.resolveConflict(id,decision));if(result.error){toast(result.error);return false;}toast('✓ Конфликт решён, данные сохранены');renderServerSettings();return true;}
+  catch(e){toast('Ошибка: '+e.message);return false;}
+}
+function connectServer(){
+  const bridge=nativeSyncBridge();if(!bridge||typeof bridge.login!=='function'){toast('Подключение сервера доступно в Android-приложении');return false;}
+  const url=$('serverUrl').value.trim(),login=$('serverLogin').value.trim(),password=$('serverPassword').value;
+  if(!url.startsWith('https://')){toast('Адрес сервера должен начинаться с https://');return false;}
+  if(!login||!password){toast('Введите логин и пароль');return false;}
+  try{
+    const response=JSON.parse(bridge.login(url,login,password));
+    if(response.error){toast(response.error);return false;}
+    if(response.user){currentRole=response.user.role||currentRole;if(response.user.post)currentUserPost=response.user.post;}
+    refreshNativeSyncStatus();updateNavForRole();toast('✓ Сервер подключён');renderServerSettings();return true;
+  }catch(e){toast('Ошибка подключения: '+e.message);return false;}
+}
+function disconnectServer(){
+  const bridge=nativeSyncBridge();if(bridge&&typeof bridge.disconnect==='function')bridge.disconnect();
+  refreshNativeSyncStatus();toast('Сервер отключён. Локальные данные сохранены.');renderServerSettings();
+}
 function markNotificationsRead(){visibleNotifications().forEach(n=>n.read=true);renderNotifications();}
 function renderAccounts(){
   if(currentRole!=='admin'){toast('Доступно только администратору');return;}
@@ -4060,6 +4148,13 @@ async function createAccount(){
   if(!ROLES[role]){toast('Некорректная роль');return false;}
   if(role==='rabotnik'&&!posts.some(p=>p.name===post)){toast('Выберите пост работника');return false;}
   const salt=newSalt(),passwordHash=await hashPassword(password,salt);
+  const sync=nativeSyncBridge(),syncStatus=refreshNativeSyncStatus();
+  if(syncStatus.configured&&sync&&typeof sync.createUser==='function'){
+    try{
+      const remote=JSON.parse(sync.createUser(JSON.stringify({login,password,role,post:post||null})));
+      if(remote.error){toast('Сервер: '+remote.error);return false;}
+    }catch(e){toast('Аккаунт не создан: сервер недоступен. Локальная копия не изменена.');return false;}
+  }
   accounts.push({id:'ACC-'+(++accountSeq),login,passwordHash,salt,role,post:post||null,active:true,createdAt:Date.now()});
   logAction('Создан аккаунт',`${login}: ${ROLES[role].label}${post?' · '+post:''}`);
   toast('✓ Аккаунт создан');renderAccounts();return true;
@@ -5485,7 +5580,7 @@ function submitDefekt(){
     serial:serial, item:itemLabel, itemId,
     from:$('f_from').value, callsign:$('f_callsign').value, post:postName,
     fault:$('f_fault').value, defects:$('f_defects').value.split('\n').filter(Boolean),
-    verdict:verdict, applicationPhoto:draftDefektPhoto, workDoc:null});
+    verdict:verdict, applicationPhoto:draftDefektPhoto, applicationPhotoMedia:draftDefektPhotoMedia, workDoc:null});
   if(!verdict.includes('Не подлежит')){
     const p = posts.find(pp=>pp.name===postName);
     if(p) p.repairs.push({serial, item:itemLabel, status:'В ремонте', doc:newNo});
