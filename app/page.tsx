@@ -357,7 +357,7 @@ function CredentialsForm({
       }
     >
       <form className="auth-form" onSubmit={submit}>
-        {mode === "setup" && <label>Позывной<input required minLength={2} value={callsign} onChange={(event) => setCallsign(event.target.value)} autoComplete="nickname" /></label>}
+        {(mode === "setup" || mode === "recover") && <label>Позывной<input required minLength={2} value={callsign} onChange={(event) => setCallsign(event.target.value)} autoComplete="nickname" /></label>}
         <label>Логин<input required minLength={3} value={login} onChange={(event) => setLogin(event.target.value)} autoComplete="username" /></label>
         <label>{mode === "recover" ? "Новый пароль" : "Пароль"}<input required minLength={8} type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} /></label>
         {mode !== "login" && (

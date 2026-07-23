@@ -7,6 +7,7 @@ export async function POST(request: Request) {
   const body = (await request.json()) as Record<string, unknown>;
   const loginInput = String(body.login ?? "").trim();
   const login = loginInput.toLocaleLowerCase("ru");
+  const callsign = String(body.callsign ?? "").trim() || loginInput;
   const recoveryCode = String(body.recoveryCode ?? "");
   const password = String(body.password ?? "");
   const throttleKey = `recovery:${login}`;
@@ -32,36 +33,48 @@ export async function POST(request: Request) {
     return Response.json({ error: "Неверный код аварийного восстановления" }, { status: 403 });
   }
   let owner = await env.DB.prepare(
-    "SELECT id, callsign, login, role, assignment FROM users WHERE login = ? AND role = 'owner'",
-  ).bind(login).first<{ id: string; callsign: string; login: string; role: "owner"; assignment: string }>();
+    "SELECT id, callsign, login, role, assignment FROM users WHERE role = 'owner' LIMIT 1",
+  ).first<{ id: string; callsign: string; login: string; role: "owner"; assignment: string }>();
 
   let created = false;
+  const passwordHash = await hashPassword(password);
   if (!owner) {
-    const ownerCount = await env.DB.prepare(
-      "SELECT COUNT(*) AS count FROM users WHERE role = 'owner'",
-    ).first<{ count: number }>();
-    if (Number(ownerCount?.count ?? 0) > 0) {
-      return Response.json({ error: "Аккаунт владельца с таким логином не найден" }, { status: 404 });
-    }
-
     const id = crypto.randomUUID();
     try {
       await env.DB.prepare(
         "INSERT INTO users (id, callsign, login, password_hash, role, assignment, status, created_at) VALUES (?, ?, ?, ?, 'owner', '', 'active', ?)",
-      ).bind(id, loginInput, login, await hashPassword(password), now.toISOString()).run();
+      ).bind(id, callsign, login, passwordHash, now.toISOString()).run();
+      owner = { id, callsign, login, role: "owner", assignment: "" };
+      created = true;
     } catch {
-      return Response.json({ error: "Владелец уже появился. Вернитесь ко входу" }, { status: 409 });
+      owner = await env.DB.prepare(
+        "SELECT id, callsign, login, role, assignment FROM users WHERE role = 'owner' LIMIT 1",
+      ).first<{ id: string; callsign: string; login: string; role: "owner"; assignment: string }>();
+      if (!owner) {
+        return Response.json(
+          { error: "Не удалось сохранить владельца. Повторите через несколько секунд" },
+          { status: 503, headers: { "cache-control": "no-store" } },
+        );
+      }
     }
-    owner = { id, callsign: loginInput, login, role: "owner", assignment: "" };
-    created = true;
   }
 
   await env.DB.prepare("DELETE FROM login_throttle WHERE login = ?").bind(throttleKey).run();
   if (!created) {
-    await env.DB.batch([
-      env.DB.prepare("UPDATE users SET password_hash = ?, status = 'active' WHERE id = ?").bind(await hashPassword(password), owner.id),
-      env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(owner.id),
-    ]);
+    try {
+      await env.DB.batch([
+        env.DB.prepare(
+          "UPDATE users SET callsign = ?, login = ?, password_hash = ?, status = 'active' WHERE id = ?",
+        ).bind(callsign, login, passwordHash, owner.id),
+        env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(owner.id),
+      ]);
+    } catch {
+      return Response.json(
+        { error: "Этот логин занят другим аккаунтом. Укажите другой логин" },
+        { status: 409, headers: { "cache-control": "no-store" } },
+      );
+    }
+    owner = { ...owner, callsign, login };
   }
   await audit(null, created ? "owner_created_from_recovery" : "owner_recovered", `${created ? "Создан" : "Восстановлен доступ"} владельца ${owner.callsign}`);
   const session = await createSession(owner.id);
