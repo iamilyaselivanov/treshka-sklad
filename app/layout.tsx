@@ -3,7 +3,8 @@ import "./globals.css";
 export const metadata:Metadata={
   metadataBase:new URL("https://sklad-ok-prototype.janfoody2016.chatgpt.site"),
   title:"ТРЁШКА СКЛАД",
-  description:"Система складского учета и выдачи",
+  description:"Система складского учета, постов и документов",
+  icons:{icon:"/favicon.svg"},
   openGraph:{title:"ТРЁШКА СКЛАД",description:"Учет товаров и выдача",images:["/og.png"]},
   twitter:{card:"summary_large_image",title:"ТРЁШКА СКЛАД",description:"Учет товаров и выдача",images:["/og.png"]}
 };
