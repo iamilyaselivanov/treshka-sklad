@@ -1381,4 +1381,46 @@ test('v1.6 — server foundation keeps one bounded shared snapshot and durable A
   assert.doesNotMatch(api, /DROP\s+TABLE/i);
   assert.match(browserSync, /uploadIfChanged/);
   assert.match(browserSync, /state\.accounts = \[\]/);
+  assert.match(browserSync, /items\.length = 0/);
+});
+
+test('v1.6 — every initially rendered control is wired to an existing function and navigation target', async () => {
+  const { ctx, page, pageErrors } = await newPage();
+  const result = await page.evaluate(() => {
+    const ids = Array.from(document.querySelectorAll('[id]'), (element) => element.id);
+    const duplicateIds = ids.filter((id, index) => ids.indexOf(id) !== index);
+    const missingFunctions = [];
+    const missingPages = [];
+    const checkedHandlers = [];
+
+    for (const element of document.querySelectorAll('[onclick], [onchange], [oninput]')) {
+      for (const attribute of ['onclick', 'onchange', 'oninput']) {
+        const source = element.getAttribute(attribute);
+        if (!source) continue;
+        const functionMatch = source.trim().match(/^([A-Za-z_$][\w$]*)\s*\(/);
+        if (functionMatch) {
+          checkedHandlers.push(functionMatch[1]);
+          if (typeof window[functionMatch[1]] !== 'function') {
+            missingFunctions.push(`${attribute}:${functionMatch[1]}`);
+          }
+        }
+        for (const match of source.matchAll(/\bgo\(['"]([^'"]+)['"]/g)) {
+          if (typeof views[match[1]] !== 'function') missingPages.push(match[1]);
+        }
+      }
+    }
+
+    return {
+      duplicateIds: [...new Set(duplicateIds)],
+      missingFunctions: [...new Set(missingFunctions)],
+      missingPages: [...new Set(missingPages)],
+      checkedHandlers: [...new Set(checkedHandlers)].length,
+    };
+  });
+  assert.deepEqual(result.duplicateIds, [], `duplicate DOM ids: ${result.duplicateIds.join(', ')}`);
+  assert.deepEqual(result.missingFunctions, [], `missing event functions: ${result.missingFunctions.join(', ')}`);
+  assert.deepEqual(result.missingPages, [], `missing navigation pages: ${result.missingPages.join(', ')}`);
+  assert.ok(result.checkedHandlers >= 5, `expected the five main navigation controls, got ${result.checkedHandlers}`);
+  assert.equal(pageErrors.length, 0, `page errors: ${pageErrors.join('; ')}`);
+  await ctx.close();
 });
