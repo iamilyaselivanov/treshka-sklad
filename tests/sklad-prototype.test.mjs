@@ -1368,6 +1368,31 @@ test('v1.4 — a newer incompatible server schema never overwrites the local dat
   await ctx.close();
 });
 
+test('v1.6 — a new server database starts without products while keeping posts and a compact snapshot', async () => {
+  const { ctx, page } = await newPage();
+  const result = await page.evaluate(() => {
+    items.length = 0;
+    posts.forEach((post) => { post.stock = []; });
+    stockTransfers.length = 0;
+    inventoryActs.length = 0;
+    const state = serializeAppState();
+    state.accounts = [];
+    state.currentAccountId = null;
+    return {
+      itemCount: state.items.length,
+      postCount: state.posts.length,
+      postNames: state.posts.map((post) => post.name),
+      payloadBytes: new TextEncoder().encode(JSON.stringify(state)).byteLength,
+    };
+  });
+  assert.equal(result.itemCount, 0);
+  assert.ok(result.postCount >= 11, `all prescribed posts must remain, got ${result.postCount}`);
+  assert.ok(result.postNames.includes('ТЭЧ'));
+  assert.ok(result.postNames.includes('Намотки оптоволокна'));
+  assert.ok(result.payloadBytes < 500_000, `empty-catalog snapshot is unexpectedly large: ${result.payloadBytes} bytes`);
+  await ctx.close();
+});
+
 test('v1.6 — server foundation keeps one bounded shared snapshot and durable Android outbox', () => {
   const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
   const sync = readFileSync(path.join(root, 'android', 'app', 'src', 'main', 'java', 'com', 'treshka', 'sklad', 'AppStateStore.kt'), 'utf8');
