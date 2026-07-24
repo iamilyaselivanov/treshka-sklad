@@ -30,6 +30,24 @@ test("security endpoints and server-connected APK are present", async () => {
   assert.match(activity, /WebView/);
 });
 
+test("server release keeps the complete warehouse interface and prescribed posts", async () => {
+  const [page, prototype, stateRoute] = await Promise.all([
+    text("app/page.tsx"),
+    text("public/prototype.html"),
+    text("app/api/state/route.ts"),
+  ]);
+  assert.match(page, /prototype\.html\?server=1/);
+  assert.match(prototype, />Посты</);
+  assert.match(prototype, />Документы</);
+  assert.match(prototype, /Акт дефектовки/);
+  assert.match(prototype, /Акт выполненных работ/);
+  for (const post of ["ТЭЧ", "НРТК", "FPV радио", "3D печать", "Разработки ПО", "Намотки оптоволокна"]) {
+    assert.match(prototype, new RegExp(post));
+  }
+  assert.match(stateRoute, /warehouse_full_state/);
+  assert.match(stateRoute, /MAX_STATE_BYTES/);
+});
+
 test("secrets are runtime environment variables, never embedded values", async () => {
   const [setup, recovery] = await Promise.all([
     text("app/api/auth/setup/route.ts"),

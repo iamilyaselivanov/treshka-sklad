@@ -72,3 +72,24 @@ export async function PATCH(request: Request) {
   }
   return Response.json({ ok: true });
 }
+
+export async function DELETE(request: Request) {
+  await ensureAuthSchema();
+  const auth = await requireUser(request, ["owner", "admin"]);
+  if (auth.response || !auth.user) return auth.response;
+  const id = new URL(request.url).searchParams.get("id") ?? "";
+  const target = await env.DB.prepare(
+    "SELECT id, callsign, role FROM users WHERE id = ?",
+  ).bind(id).first<{ id: string; callsign: string; role: Role }>();
+  if (!target) return Response.json({ error: "Сотрудник не найден" }, { status: 404 });
+  if (target.role === "owner") return Response.json({ error: "Аккаунт владельца удалить нельзя" }, { status: 403 });
+  if (auth.user.role === "admin" && target.role === "admin") {
+    return Response.json({ error: "Удалять администраторов может только владелец" }, { status: 403 });
+  }
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM users WHERE id = ?").bind(id),
+  ]);
+  await audit(auth.user, "user_deleted", `${target.callsign} · ${target.role}`);
+  return Response.json({ ok: true });
+}

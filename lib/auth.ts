@@ -16,6 +16,7 @@ export type SessionUser = {
 const ITERATIONS = 100_000;
 const SESSION_COOKIE = "treshka_session";
 const SESSION_SECONDS = 60 * 60 * 24 * 7;
+let authSchemaPromise: Promise<unknown> | null = null;
 
 const usersSql = `
   CREATE TABLE IF NOT EXISTS users (
@@ -62,17 +63,23 @@ const throttleSql = `
 `;
 
 export async function ensureAuthSchema() {
-  const db = env.DB;
-  await db.batch([
-    db.prepare(usersSql),
-    db.prepare(sessionsSql),
-    db.prepare(auditSql),
-    db.prepare(throttleSql),
-    db.prepare("CREATE INDEX IF NOT EXISTS users_role_idx ON users(role)"),
-    db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS single_owner_idx ON users(role) WHERE role = 'owner'"),
-    db.prepare("CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions(user_id)"),
-    db.prepare("CREATE INDEX IF NOT EXISTS audit_created_idx ON audit_log(created_at)"),
-  ]);
+  if (!authSchemaPromise) {
+    const db = env.DB;
+    authSchemaPromise = db.batch([
+      db.prepare(usersSql),
+      db.prepare(sessionsSql),
+      db.prepare(auditSql),
+      db.prepare(throttleSql),
+      db.prepare("CREATE INDEX IF NOT EXISTS users_role_idx ON users(role)"),
+      db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS single_owner_idx ON users(role) WHERE role = 'owner'"),
+      db.prepare("CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions(user_id)"),
+      db.prepare("CREATE INDEX IF NOT EXISTS audit_created_idx ON audit_log(created_at)"),
+    ]).catch((error) => {
+      authSchemaPromise = null;
+      throw error;
+    });
+  }
+  await authSchemaPromise;
 }
 
 export async function secureEqual(left: string, right: string) {

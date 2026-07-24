@@ -2,7 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
-type Screen = "home" | "stock" | "repairs" | "issue" | "more" | "users" | "security" | "audit";
+type Screen = "home" | "stock" | "posts" | "documents" | "more" | "users" | "security" | "audit";
 
 type AuthUser = {
   id: string;
@@ -73,12 +73,17 @@ export default function Home() {
 }
 
 function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; loggedOut: () => void }) {
+  const [useFullSystem] = useState(true);
   const [screen, setScreen] = useState<Screen>("home");
   const [products, setProducts] = useState<Product[]>([]);
+  const [posts, setPosts] = useState<WorkPost[]>([]);
+  const [documents, setDocuments] = useState<WarehouseDocument[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
   const [showCreate, setShowCreate] = useState(false);
+  const [showDocumentCreate, setShowDocumentCreate] = useState<"defect" | "work" | null>(null);
+  const [documentKind, setDocumentKind] = useState<"defect" | "work">("defect");
   const [toast, setToast] = useState("");
 
   const loadProducts = useCallback(async () => {
@@ -96,11 +101,37 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
     }
   }, []);
 
+  const loadReferenceData = useCallback(async () => {
+    try {
+      const [postsResponse, documentsResponse] = await Promise.all([
+        fetch("/api/posts", { cache: "no-store" }),
+        fetch("/api/documents", { cache: "no-store" }),
+      ]);
+      if (!postsResponse.ok || !documentsResponse.ok) throw new Error("Не удалось получить посты и документы");
+      const postsData = (await postsResponse.json()) as { posts: WorkPost[] };
+      const documentsData = (await documentsResponse.json()) as { documents: WarehouseDocument[] };
+      setPosts(postsData.posts);
+      setDocuments(documentsData.documents);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Ошибка сервера");
+    }
+  }, []);
+
   useEffect(() => {
+    if (useFullSystem) return;
     // Initial server synchronization is intentionally performed once on mount.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadProducts();
-  }, [loadProducts]);
+    void loadReferenceData();
+  }, [loadProducts, loadReferenceData, useFullSystem]);
+
+  useEffect(() => {
+    const listener = (event: MessageEvent) => {
+      if (event.origin === window.location.origin && event.data?.type === "treshka-auth-required") loggedOut();
+    };
+    window.addEventListener("message", listener);
+    return () => window.removeEventListener("message", listener);
+  }, [loggedOut]);
 
   const notify = (message: string) => {
     setToast(message);
@@ -121,6 +152,18 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
   const totalUnits = products.reduce((sum, product) => sum + product.quantity, 0);
   const lowCount = products.filter((product) => product.quantity <= product.minimum).length;
   const canManageProducts = currentUser.role !== "worker";
+
+  if (useFullSystem) {
+    return (
+      <main className="prototype-host">
+        <div className="prototype-account">
+          <span><b>{currentUser.callsign}</b> · {roleLabel(currentUser.role)}</span>
+          <button onClick={() => void logout()}>Выйти</button>
+        </div>
+        <iframe title="ТРЁШКА СКЛАД" src="/prototype.html?server=1" />
+      </main>
+    );
+  }
 
   return (
     <main className="app-shell">
@@ -203,21 +246,53 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
           </>
         )}
 
-        {screen === "repairs" && (
+        {screen === "posts" && (
           <>
-            <Title eyebrow="РЕМОНТНЫЙ КОНТУР" title="Ремонты" />
-            <EmptyState title="Ремонтов пока нет" text="Новая база не содержит демонстрационных актов и изделий." />
+            <Title eyebrow="РАБОЧИЕ УЧАСТКИ" title="Посты" />
+            <div className="product-list">
+              {posts.map((post) => (
+                <article className="server-product" key={post.id}>
+                  <i>П</i>
+                  <span><b>{post.name}</b><small>{post.description}</small></span>
+                  <strong><small>Товаров на посту</small>0</strong>
+                </article>
+              ))}
+            </div>
           </>
         )}
 
-        {screen === "issue" && (
+        {screen === "documents" && (
           <>
-            <Title eyebrow="ДВИЖЕНИЕ ТОВАРОВ" title="Выдача" />
-            <EmptyState
-              title={products.length ? "Выберите товар на складе" : "Выдавать пока нечего"}
-              text={products.length ? "Откройте склад и выберите карточку товара." : "Добавьте товары в серверную базу, затем оформляйте движения."}
-              action={<button onClick={() => setScreen("stock")}>Открыть склад</button>}
+            <Title
+              eyebrow="ДОКУМЕНТООБОРОТ"
+              title="Документы"
+              action={<button onClick={() => setShowDocumentCreate(documentKind)}>＋ Акт</button>}
             />
+            <div className="segmented">
+              <button className={documentKind === "defect" ? "active" : ""} onClick={() => setDocumentKind("defect")}>Акты дефектовки</button>
+              <button className={documentKind === "work" ? "active" : ""} onClick={() => setDocumentKind("work")}>Акты выполненных работ</button>
+            </div>
+            {documents.filter((document) => document.kind === documentKind).length === 0 ? (
+              <EmptyState
+                title={documentKind === "defect" ? "Актов дефектовки пока нет" : "Актов выполненных работ пока нет"}
+                text="Новая база документов пуста. Создайте первый акт — он сохранится на сервере."
+                action={<button onClick={() => setShowDocumentCreate(documentKind)}>＋ Создать акт</button>}
+              />
+            ) : (
+              <div className="product-list">
+                {documents.filter((document) => document.kind === documentKind).map((document) => (
+                  <article className="server-product" key={document.id}>
+                    <i>{document.kind === "defect" ? "ДФ" : "АВР"}</i>
+                    <span>
+                      <b>{document.number} · {document.item}</b>
+                      <small>{document.post} · {document.date}{document.serial ? ` · № ${document.serial}` : ""}</small>
+                      <em>{document.description || "Описание не указано"}</em>
+                    </span>
+                    <strong>{document.status}</strong>
+                  </article>
+                ))}
+              </div>
+            )}
           </>
         )}
 
@@ -242,11 +317,11 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
         {screen === "audit" && <AuditScreen />}
       </section>
 
-      <nav className="bottom-nav">
+      <nav className="bottom-nav" style={{ gridTemplateColumns: "repeat(5, 1fr)" }}>
         <Nav icon="⌂" text="Главная" active={screen === "home"} click={() => setScreen("home")} />
         <Nav icon="▦" text="Склад" active={screen === "stock"} click={() => setScreen("stock")} />
-        <Nav icon="◫" text="Ремонты" active={screen === "repairs"} click={() => setScreen("repairs")} />
-        <Nav icon="⇄" text="Выдача" active={screen === "issue"} click={() => setScreen("issue")} />
+        <Nav icon="▤" text="Посты" active={screen === "posts"} click={() => setScreen("posts")} />
+        <Nav icon="≡" text="Документы" active={screen === "documents"} click={() => setScreen("documents")} />
         <Nav icon="•••" text="Ещё" active={["more", "users", "security", "audit"].includes(screen)} click={() => setScreen("more")} />
       </nav>
 
@@ -258,6 +333,21 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
             setShowCreate(false);
             setScreen("stock");
             notify("Товар сохранён на сервере");
+          }}
+        />
+      )}
+      {showDocumentCreate && (
+        <CreateWarehouseDocument
+          kind={showDocumentCreate}
+          posts={posts}
+          currentUser={currentUser}
+          close={() => setShowDocumentCreate(null)}
+          created={(document) => {
+            setDocuments((current) => [document, ...current]);
+            setShowDocumentCreate(null);
+            setDocumentKind(document.kind);
+            setScreen("documents");
+            notify("Документ сохранён на сервере");
           }}
         />
       )}
@@ -527,6 +617,26 @@ type AuditEntry = {
   createdAt: string;
 };
 
+type WorkPost = {
+  id: string;
+  name: string;
+  description: string;
+  createdAt: string;
+};
+
+type WarehouseDocument = {
+  id: string;
+  number: string;
+  kind: "defect" | "work";
+  status: string;
+  date: string;
+  post: string;
+  item: string;
+  serial: string;
+  description: string;
+  createdAt: string;
+};
+
 function AuditScreen() {
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [error, setError] = useState("");
@@ -602,6 +712,80 @@ function CreateUser({ currentUser, close, created }: { currentUser: AuthUser; cl
           <label>Склад или пост<input value={form.assignment} onChange={(event) => field("assignment", event.target.value)} placeholder="Например, основной склад или пост № 2" /></label>
           {error && <p className="form-error">{error}</p>}
           <button className="primary" disabled={saving}>{saving ? "Создаём…" : "Создать аккаунт"}</button>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function CreateWarehouseDocument({
+  kind,
+  posts,
+  currentUser,
+  close,
+  created,
+}: {
+  kind: "defect" | "work";
+  posts: WorkPost[];
+  currentUser: AuthUser;
+  close: () => void;
+  created: (document: WarehouseDocument) => void;
+}) {
+  const allowedPosts = currentUser.role === "worker"
+    ? posts.filter((post) => post.name.toLocaleLowerCase("ru") === currentUser.assignment.trim().toLocaleLowerCase("ru"))
+    : posts;
+  const [form, setForm] = useState({
+    number: "",
+    date: new Date().toISOString().slice(0, 10),
+    post: allowedPosts[0]?.name ?? "",
+    item: "",
+    serial: "",
+    description: "",
+  });
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      const response = await fetch("/api/documents", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...form, kind }),
+      });
+      const data = (await response.json()) as { document?: WarehouseDocument; error?: string };
+      if (!response.ok || !data.document) throw new Error(data.error || "Не удалось сохранить документ");
+      created(data.document);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Ошибка сервера");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const field = (name: keyof typeof form, value: string) => setForm((current) => ({ ...current, [name]: value }));
+  return (
+    <div className="overlay shade">
+      <section className="sheet">
+        <header>
+          <button onClick={close}>←</button>
+          <h2>{kind === "defect" ? "Новый акт дефектовки" : "Новый акт выполненных работ"}</h2>
+          <button onClick={close}>×</button>
+        </header>
+        <form className="sheet-body create-product-form" onSubmit={submit}>
+          <label>Номер акта<input required value={form.number} onChange={(event) => field("number", event.target.value)} placeholder={kind === "defect" ? "ДФ-001" : "АВР-001"} /></label>
+          <label>Дата<input required type="date" value={form.date} onChange={(event) => field("date", event.target.value)} /></label>
+          <label>Пост<select required value={form.post} onChange={(event) => field("post", event.target.value)}>
+            {allowedPosts.map((post) => <option key={post.id} value={post.name}>{post.name}</option>)}
+          </select></label>
+          <label>Изделие или работа<input required value={form.item} onChange={(event) => field("item", event.target.value)} placeholder="Наименование" /></label>
+          <label>Серийный номер<input value={form.serial} onChange={(event) => field("serial", event.target.value)} placeholder="Если имеется" /></label>
+          <label>{kind === "defect" ? "Выявленные неисправности" : "Выполненные работы"}<textarea value={form.description} onChange={(event) => field("description", event.target.value)} /></label>
+          {allowedPosts.length === 0 && <p className="form-error">Для этого работника не назначен существующий пост</p>}
+          {error && <p className="form-error">{error}</p>}
+          <button className="primary" disabled={saving || allowedPosts.length === 0}>{saving ? "Сохраняем…" : "Создать документ"}</button>
         </form>
       </section>
     </div>
