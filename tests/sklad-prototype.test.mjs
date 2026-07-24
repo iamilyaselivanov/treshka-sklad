@@ -1402,10 +1402,14 @@ test('v1.6 — server foundation keeps one bounded shared snapshot and durable A
   assert.match(sync, /db\.beginTransaction\(\)/);
   assert.match(api, /warehouse_full_state/);
   assert.match(api, /MAX_STATE_BYTES/);
-  assert.match(api, /ON CONFLICT\(state_key\) DO UPDATE/);
+  assert.match(api, /expectedRevision/);
+  assert.match(api, /WHERE state_key = 'main' AND revision = \?/);
+  assert.match(api, /status: 409/);
   assert.doesNotMatch(api, /DROP\s+TABLE/i);
   assert.match(browserSync, /uploadIfChanged/);
   assert.match(browserSync, /state\.accounts = \[\]/);
+  assert.match(browserSync, /expectedRevision: sync\.revision/);
+  assert.match(browserSync, /treshka-sync-conflict/);
   assert.match(browserSync, /items\.length = 0/);
 });
 
@@ -1446,6 +1450,33 @@ test('v1.6 — every initially rendered control is wired to an existing function
   assert.deepEqual(result.missingFunctions, [], `missing event functions: ${result.missingFunctions.join(', ')}`);
   assert.deepEqual(result.missingPages, [], `missing navigation pages: ${result.missingPages.join(', ')}`);
   assert.ok(result.checkedHandlers >= 5, `expected the five main navigation controls, got ${result.checkedHandlers}`);
+  assert.equal(pageErrors.length, 0, `page errors: ${pageErrors.join('; ')}`);
+  await ctx.close();
+});
+
+test('security — user text cannot break out of headers or product edit fields, and unsafe photo URLs are rejected', async () => {
+  const { ctx, page, pageErrors } = await newPage();
+  const result = await page.evaluate(() => {
+    currentRole = 'admin';
+    const target = items[0];
+    target.name = '<img id="xss-header" src=x onerror="window.__xss=1">';
+    target.desc = '</textarea><img id="xss-description" src=x onerror="window.__xss=2">';
+    target.photo = 'data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+PC9zdmc+';
+    openEditItemForm(target.id);
+    const editEscaped = !document.getElementById('xss-description')
+      && document.getElementById('ei_desc').value.includes('</textarea>');
+    openItem(target.id);
+    return {
+      editEscaped,
+      headerEscaped: !document.getElementById('xss-header') && document.getElementById('hdrTitle').textContent.includes('<img'),
+      unsafePhotoHidden: !document.querySelector('.photo-box img'),
+      executed: window.__xss || 0,
+    };
+  });
+  assert.equal(result.editEscaped, true);
+  assert.equal(result.headerEscaped, true);
+  assert.equal(result.unsafePhotoHidden, true);
+  assert.equal(result.executed, 0);
   assert.equal(pageErrors.length, 0, `page errors: ${pageErrors.join('; ')}`);
   await ctx.close();
 });

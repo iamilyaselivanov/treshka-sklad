@@ -25,7 +25,13 @@ export async function POST(request: Request) {
   const password = String(body.password ?? "");
   const role = String(body.role ?? "") as Role;
   const assignment = String(body.assignment ?? "").trim();
-  if (callsign.length < 2 || login.length < 3 || password.length < 8 || !allowedRoles.includes(role)) {
+  if (
+    callsign.length < 2 || callsign.length > 80
+    || login.length < 3 || login.length > 120
+    || password.length < 8 || password.length > 256
+    || assignment.length > 160
+    || !allowedRoles.includes(role)
+  ) {
     return Response.json({ error: "Проверьте позывной, логин, пароль и роль" }, { status: 400 });
   }
   if (auth.user.role === "admin" && role === "admin") {
@@ -59,7 +65,7 @@ export async function PATCH(request: Request) {
   if (auth.user.role === "admin" && target.role === "admin") return Response.json({ error: "Недостаточно прав" }, { status: 403 });
 
   if (password) {
-    if (password.length < 8) return Response.json({ error: "Пароль должен содержать минимум 8 символов" }, { status: 400 });
+    if (password.length < 8 || password.length > 256) return Response.json({ error: "Пароль должен содержать от 8 до 256 символов" }, { status: 400 });
     await env.DB.prepare("UPDATE users SET password_hash = ? WHERE id = ?").bind(await hashPassword(password), id).run();
     await env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id).run();
     await audit(auth.user, "password_reset", target.callsign);

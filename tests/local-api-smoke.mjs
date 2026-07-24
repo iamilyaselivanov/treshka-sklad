@@ -47,6 +47,7 @@ async function authenticateOwner() {
 
 const suffix = Date.now().toString(36);
 const createdIds = [];
+const roleCookies = {};
 const timings = {};
 const auth = await authenticateOwner();
 const ownerHeaders = { cookie: auth.cookie };
@@ -74,6 +75,7 @@ try {
       body: JSON.stringify({ login: definition.login, password: definition.password }),
     });
     assert.equal(login.data.user.callsign, definition.callsign);
+    roleCookies[definition.role] = login.response.headers.get("set-cookie").split(";")[0];
     timings[`login_${definition.role}`] = login.elapsedMs;
   }
 
@@ -84,27 +86,79 @@ try {
     method: "DELETE",
     headers: ownerHeaders,
   }, 403);
+  await request("/api/users", { headers: { cookie: roleCookies.worker } }, 403);
 
   const state = await request("/api/state", { headers: ownerHeaders });
   assert.equal(state.data.user.id, auth.user.id);
   assert.ok(Number.isInteger(state.data.revision));
   timings.stateBootstrap = state.elapsedMs;
 
-  if (!state.data.state) {
-    const saved = await request("/api/state", {
-      method: "PUT",
-      headers: { ...ownerHeaders, "content-type": "application/json" },
-      body: JSON.stringify({
-        state: {
-          schemaVersion: 3,
-          items: [],
-          posts: [{ id: "post-test", name: "ТЭЧ", stock: [] }],
-          documents: [],
-        },
-      }),
-    });
-    assert.equal(saved.data.revision, 1);
-  }
+  const sharedState = state.data.state ?? {
+    schemaVersion: 4,
+    items: [],
+    posts: [{ id: "post-test", name: "ТЭЧ", stock: [], repairs: [] }],
+    docs: [],
+    extIssues: [],
+    stockTransfers: [],
+    inventoryActs: [],
+    auditLog: [],
+  };
+  sharedState.accounts = [{ id: "must-not-be-stored", role: "owner" }];
+  sharedState.currentAccountId = "must-not-be-stored";
+  sharedState.currentRole = "admin";
+  const saved = await request("/api/state", {
+    method: "PUT",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({ state: sharedState, expectedRevision: state.data.revision }),
+  });
+  assert.equal(saved.data.revision, state.data.revision + 1);
+
+  const staleWrite = await request("/api/state", {
+    method: "PUT",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({ state: sharedState, expectedRevision: state.data.revision }),
+  }, 409);
+  assert.equal(staleWrite.data.conflict, true);
+  assert.equal(staleWrite.data.currentRevision, saved.data.revision);
+
+  const sanitized = await request("/api/state", { headers: ownerHeaders });
+  assert.equal("accounts" in sanitized.data.state, false);
+  assert.equal("currentAccountId" in sanitized.data.state, false);
+  assert.equal("currentRole" in sanitized.data.state, false);
+  const parallelStates = [1, 2].map((marker) => ({
+    ...sanitized.data.state,
+    auditLog: [...(sanitized.data.state.auditLog ?? []), { marker }],
+  }));
+  const parallelWrites = await Promise.all(parallelStates.map((candidate) => fetch(new URL("/api/state", baseUrl), {
+    method: "PUT",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({ state: candidate, expectedRevision: sanitized.data.revision }),
+  })));
+  assert.deepEqual(parallelWrites.map((response) => response.status).sort(), [200, 409]);
+
+  const onePixelPng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+  await request("/api/media/images", {
+    method: "POST",
+    headers: { cookie: roleCookies.worker, "content-type": "application/json" },
+    body: JSON.stringify({ dataUrl: onePixelPng }),
+  }, 403);
+  const uploaded = await request("/api/media/images", {
+    method: "POST",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({ dataUrl: onePixelPng }),
+  }, 201);
+  assert.match(uploaded.data.key, /^images\//);
+  const imageResponse = await fetch(new URL(uploaded.data.url, baseUrl), { headers: ownerHeaders });
+  assert.equal(imageResponse.status, 200);
+  assert.equal(imageResponse.headers.get("content-type"), "image/png");
+  assert.ok((await imageResponse.arrayBuffer()).byteLength > 0);
+  await request(`/api/media/images?key=${encodeURIComponent(uploaded.data.key)}`, {
+    method: "DELETE",
+    headers: ownerHeaders,
+  });
+  await request(`/api/media/images?key=${encodeURIComponent(uploaded.data.key)}`, {
+    headers: ownerHeaders,
+  }, 404);
 } finally {
   for (const id of createdIds.reverse()) {
     await request(`/api/users?id=${encodeURIComponent(id)}`, {
@@ -122,5 +176,9 @@ console.log(JSON.stringify({
   createdAndDeletedUsers: 3,
   ownerDeletionProtected: true,
   stateEndpointAuthenticated: true,
+  staleStateWriteRejected: true,
+  parallelStateRaceResolved: true,
+  authFieldsStrippedFromState: true,
+  mediaUploadReadDelete: true,
   timingsMs: timings,
 }, null, 2));

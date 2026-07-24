@@ -9,7 +9,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/release.test.mjs && node --test tests/sklad-prototype.test.mjs",
+    "test": "npm run build && node --test tests/release.test.mjs tests/rendered-html.test.mjs tests/sklad-prototype.test.mjs",
     "test:api-local": "node tests/local-api-smoke.mjs",
     "test:sklad": "node --test tests/sklad-prototype.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
@@ -22,7 +22,7 @@
     "react-dom": "19.2.6"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "1.37.1",
+    "@cloudflare/vite-plugin": "1.47.0",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
@@ -37,8 +37,8 @@
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
     "vinext": "0.0.50",
-    "vite": "8.0.13",
-    "wrangler": "4.92.0"
+    "vite": "8.1.5",
+    "wrangler": "4.114.0"
   },
   "overrides": {
     "postcss": "8.5.22",

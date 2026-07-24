@@ -16,6 +16,8 @@ export type SessionUser = {
 const ITERATIONS = 100_000;
 const SESSION_COOKIE = "treshka_session";
 const SESSION_SECONDS = 60 * 60 * 24 * 7;
+const AUDIT_RETENTION_DAYS = 180;
+const AUDIT_MAX_ROWS = 5_000;
 let authSchemaPromise: Promise<unknown> | null = null;
 
 const usersSql = `
@@ -121,12 +123,19 @@ export async function hashPassword(password: string) {
 export async function verifyPassword(password: string, encoded: string) {
   const [algorithm, iterationsValue, saltValue, expectedValue] = encoded.split("$");
   if (algorithm !== "pbkdf2" || !iterationsValue || !saltValue || !expectedValue) return false;
-  const expected = base64ToBytes(expectedValue);
-  const actual = await derive(password, base64ToBytes(saltValue), Number(iterationsValue));
-  if (actual.length !== expected.length) return false;
-  let difference = 0;
-  for (let index = 0; index < actual.length; index += 1) difference |= actual[index] ^ expected[index];
-  return difference === 0;
+  const iterations = Number(iterationsValue);
+  if (!Number.isInteger(iterations) || iterations < 50_000 || iterations > 1_000_000) return false;
+  try {
+    const salt = base64ToBytes(saltValue);
+    const expected = base64ToBytes(expectedValue);
+    if (salt.length < 8 || salt.length > 64 || expected.length !== 32) return false;
+    const actual = await derive(password, salt, iterations);
+    let difference = 0;
+    for (let index = 0; index < actual.length; index += 1) difference |= actual[index] ^ expected[index];
+    return difference === 0;
+  } catch {
+    return false;
+  }
 }
 
 async function digest(value: string) {
@@ -148,9 +157,23 @@ export async function createSession(userId: string) {
   const token = bytesToBase64(crypto.getRandomValues(new Uint8Array(32)));
   const now = new Date();
   const expires = new Date(now.getTime() + SESSION_SECONDS * 1000);
-  await env.DB.prepare(
-    "INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
-  ).bind(crypto.randomUUID(), userId, await digest(token), expires.toISOString(), now.toISOString()).run();
+  const throttleCutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM sessions WHERE expires_at <= ?").bind(now.toISOString()),
+    env.DB.prepare("DELETE FROM login_throttle WHERE last_attempt_at < ?").bind(throttleCutoff),
+    env.DB.prepare(
+      `DELETE FROM sessions
+       WHERE user_id = ? AND id IN (
+         SELECT id FROM sessions
+         WHERE user_id = ?
+         ORDER BY created_at DESC
+         LIMIT -1 OFFSET 9
+       )`,
+    ).bind(userId, userId),
+    env.DB.prepare(
+      "INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind(crypto.randomUUID(), userId, await digest(token), expires.toISOString(), now.toISOString()),
+  ]);
   return {
     token,
     cookie: `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSION_SECONDS}`,
@@ -190,7 +213,32 @@ export async function requireUser(request: Request, roles?: Role[]) {
 
 export async function audit(user: SessionUser | null, action: string, details = "") {
   await ensureAuthSchema();
-  await env.DB.prepare(
-    "INSERT INTO audit_log (id, user_id, callsign, action, details, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-  ).bind(crypto.randomUUID(), user?.id ?? null, user?.callsign ?? "Система", action, details, new Date().toISOString()).run();
+  const now = new Date();
+  const cutoff = new Date(now.getTime() - AUDIT_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO audit_log (id, user_id, callsign, action, details, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).bind(
+      crypto.randomUUID(),
+      user?.id ?? null,
+      (user?.callsign ?? "Система").slice(0, 120),
+      action.slice(0, 120),
+      details.slice(0, 1_000),
+      now.toISOString(),
+    ),
+    env.DB.prepare("DELETE FROM audit_log WHERE created_at < ?").bind(cutoff),
+    env.DB.prepare(
+      `DELETE FROM audit_log
+       WHERE id IN (
+         SELECT id FROM audit_log
+         ORDER BY created_at DESC
+         LIMIT -1 OFFSET ?
+       )`,
+    ).bind(AUDIT_MAX_ROWS),
+  ]);
+}
+
+export function clientThrottleKey(request: Request, scope: string, login = "") {
+  const address = (request.headers.get("cf-connecting-ip") ?? "unknown").trim().slice(0, 80);
+  return `${scope}:${login.slice(0, 120)}:${address}`;
 }

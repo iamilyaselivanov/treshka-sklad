@@ -3379,12 +3379,21 @@ function refocusSearchInput(id){
 function esc(s){
   return String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
+function safePhotoDataUrl(value){
+  return typeof value==='string'
+    && value.length<=500000
+    && /^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(value);
+}
+function safePhotoSource(value){
+  return safePhotoDataUrl(value)
+    || (typeof value==='string' && /^\/api\/media\/images\?key=images%2F[0-9a-f-]{36}\.(?:jpg|png|webp)$/.test(value));
+}
 function canManageCatalog(){ return currentRole==='admin' || currentRole==='kladovshik'; }
 const item = id => items.find(i=>i.id===id);
-const fmtQ = (i,q) => `${q} ${i.unit}`;
+const fmtQ = (i,q) => `${q} ${esc(i.unit)}`;
 
 function setHdr(title, sub, canBack, showPlus){
-  $('hdrTitle').innerHTML = title + (sub?`<div class="sub">${sub}</div>`:'');
+  $('hdrTitle').innerHTML = esc(title) + (sub?`<div class="sub">${esc(sub)}</div>`:'');
   $('backBtn').classList.toggle('show', !!canBack);
   $('plusBtn').style.display = showPlus ? 'block' : 'none';
 }
@@ -3614,7 +3623,13 @@ function nativePhotoBridge(){
 const DEFECT_PHOTO_PICK_TARGET = '__defekt_application_photo__';
 let draftDefektPhoto = null;
 let draftDefektPhotoMedia = null;
-function uploadPhotoToServer(dataUrl){
+function uploadPhotoToServer(dataUrl, onStored){
+  if(typeof window.treshkaStorePhoto==='function'){
+    window.treshkaStorePhoto(dataUrl)
+      .then(result=>{ if(result&&result.url&&typeof onStored==='function') onStored(result); })
+      .catch(e=>console.warn('Фото осталось внутри снимка:',e));
+    return null;
+  }
   const sync=nativeSyncBridge(),status=refreshNativeSyncStatus();
   if(!status.configured||!sync||typeof sync.uploadImage!=='function')return null;
   try{const result=JSON.parse(sync.uploadImage(dataUrl));if(result.error){console.warn(result.error);return null;}return result;}
@@ -3648,20 +3663,22 @@ function requestDefektApplicationPhoto(){ requestPhotoFromDevice(DEFECT_PHOTO_PI
 function renderDefektPhotoDraft(){
   const box = $('defektPhotoBox');
   if(!box) return;
-  box.innerHTML = draftDefektPhoto
+  box.innerHTML = safePhotoSource(draftDefektPhoto)
     ? `<div class="doc-photo"><img src="${draftDefektPhoto}" alt="Фото заявки"><div class="caption">Фото заявки прикреплено</div></div>
        <button class="fbtn" style="width:100%;padding:11px" onclick="requestDefektApplicationPhoto()">📷 Заменить фото заявки</button>
        <button class="fbtn" style="width:100%;padding:11px;margin-top:6px;color:var(--red)" onclick="removeDefektApplicationPhoto()">Удалить фото</button>`
     : `<button class="fbtn" style="width:100%;padding:11px" onclick="requestDefektApplicationPhoto()">📷 Прикрепить фото заявки</button>`;
 }
 function removeDefektApplicationPhoto(){
+  const previousMedia = draftDefektPhotoMedia;
   draftDefektPhoto = null;
   draftDefektPhotoMedia = null;
+  if(previousMedia&&previousMedia.key&&typeof window.treshkaDeletePhoto==='function')window.treshkaDeletePhoto(previousMedia.key);
   renderDefektPhotoDraft();
   toast('Фото заявки удалено из черновика');
 }
 function documentPhotoHtml(photo, caption){
-  return photo ? `<div class="sec">${esc(caption)}</div><div class="doc-photo"><img src="${photo}" alt="${esc(caption)}"><div class="caption">${esc(caption)}</div></div>` : '';
+  return safePhotoSource(photo) ? `<div class="sec">${esc(caption)}</div><div class="doc-photo"><img src="${photo}" alt="${esc(caption)}"><div class="caption">${esc(caption)}</div></div>` : '';
 }
 function workApplicationPhoto(d){
   if(d.applicationPhoto) return d.applicationPhoto; // совместимость с ранними/ручными данными
@@ -3673,11 +3690,21 @@ function workApplicationPhoto(d){
 // браузерного fallback выше. dataUrl — "data:image/jpeg;base64,...", либо null при
 // ошибке/отмене (тогда error содержит текст для пользователя).
 window.onPhotoPicked = function(itemId, dataUrl, error){
+  if(dataUrl && !safePhotoDataUrl(dataUrl)){
+    toast('⚠ Поддерживаются только JPEG, PNG или WebP до 500 КБ');
+    return;
+  }
   if(itemId===DEFECT_PHOTO_PICK_TARGET){
     if(error){ toast('⚠ '+error); return; }
     if(!dataUrl) return;
-    draftDefektPhoto = dataUrl;
-    draftDefektPhotoMedia = uploadPhotoToServer(dataUrl);
+    const originalPhoto=dataUrl;
+    draftDefektPhoto = originalPhoto;
+    draftDefektPhotoMedia = uploadPhotoToServer(originalPhoto, result=>{
+      docs.forEach(d=>{
+        if(d.kind==='defekt'&&d.applicationPhoto===originalPhoto){d.applicationPhoto=result.url;d.applicationPhotoMedia=result;}
+      });
+      if(draftDefektPhoto===originalPhoto){ draftDefektPhoto=result.url; draftDefektPhotoMedia=result; renderDefektPhotoDraft(); }
+    });
     renderDefektPhotoDraft();
     toast('✓ Фото заявки добавлено в дефектовку');
     return;
@@ -3686,8 +3713,16 @@ window.onPhotoPicked = function(itemId, dataUrl, error){
   if(!i) return;
   if(error){ toast('⚠ '+error); return; }
   if(!dataUrl) return;
-  i.photo = dataUrl;
-  i.photoMedia = uploadPhotoToServer(dataUrl);
+  const previousMedia=i.photoMedia;
+  const originalPhoto=dataUrl;
+  i.photo = originalPhoto;
+  i.photoMedia = uploadPhotoToServer(originalPhoto, result=>{
+    if(i.photo===originalPhoto){
+      i.photo=result.url;i.photoMedia=result;
+      if(previousMedia&&previousMedia.key&&typeof window.treshkaDeletePhoto==='function')window.treshkaDeletePhoto(previousMedia.key);
+      if(currentTab==='sklad')openItem(itemId);
+    }
+  });
   logAction('Фото товара', esc(i.name)+' — фото добавлено/заменено');
   toast('✓ Фото сохранено');
   openItem(itemId);
@@ -3695,7 +3730,10 @@ window.onPhotoPicked = function(itemId, dataUrl, error){
 function removeItemPhoto(id){
   const i = item(id);
   if(!i || !i.photo) return;
+  const previousMedia=i.photoMedia;
   i.photo = null;
+  i.photoMedia = null;
+  if(previousMedia&&previousMedia.key&&typeof window.treshkaDeletePhoto==='function')window.treshkaDeletePhoto(previousMedia.key);
   logAction('Фото товара', esc(i.name)+' — фото удалено');
   toast('Фото удалено');
   openItem(id);
@@ -3774,7 +3812,7 @@ posts(){
         <div class="icbox">🛠</div>
         <div class="grow">
           <div class="t">${esc(p.name)}</div>
-          <div class="s">${esc(p.full)}${p.curator&&p.curator!=='—'?' · '+p.curator:''}</div>
+          <div class="s">${esc(p.full)}${p.curator&&p.curator!=='—'?' · '+esc(p.curator):''}</div>
           <div class="s" style="margin-top:6px">
             <span class="chip blue">${p.stock.filter(s=>s.q>0).length} позиций</span>
             ${p.repairs.length?`<span class="chip amber">${p.repairs.length} в ремонте</span>`:''}
@@ -3839,10 +3877,10 @@ docs(){
         <div class="row">
           <div class="icbox">${d.kind==='defekt'?'🔍':(hasUnresolvedMismatch(d)?'⚠':'✅')}</div>
           <div class="grow">
-            <div class="t">${d.no} · ${d.kind==='defekt'?'Акт дефектовки':'Акт выполненных работ'}</div>
-            <div class="s">${esc(d.item)} ${d.serial&&d.serial!=='—'?'№'+d.serial:''} · ${d.date}</div>
+            <div class="t">${esc(d.no)} · ${d.kind==='defekt'?'Акт дефектовки':'Акт выполненных работ'}</div>
+            <div class="s">${esc(d.item)} ${d.serial&&d.serial!=='—'?'№'+esc(d.serial):''} · ${esc(d.date)}</div>
           </div>
-          <span class="chip ${chip(d)}">${d.status}</span>
+          <span class="chip ${chip(d)}">${esc(d.status)}</span>
         </div>
       </div>`;}).join('') || '<div class="s" style="padding:20px;text-align:center">Ничего не найдено</div>'}
   `;
@@ -3881,7 +3919,7 @@ ext(){
           </div>
           <span class="chip ${e.status==='Возвращено'?'green':'amber'}">${e.status}</span>
         </div>
-        ${e.items.map(m=>{const it=item(m.id);return `<div class="mat"><div class="grow"><div class="t">${it.icon} ${esc(it.name)}</div></div><div class="q">${fmtQ(it,m.q)}</div></div>`;}).join('')}
+        ${e.items.map(m=>{const it=item(m.id);return `<div class="mat"><div class="grow"><div class="t">${esc(it.icon)} ${esc(it.name)}</div></div><div class="q">${fmtQ(it,m.q)}</div></div>`;}).join('')}
         ${e.status!=='Возвращено'?`<div class="s" style="margin-top:8px">Срок возврата: <b style="color:var(--amber)">${esc(e.due)}</b></div>
         <button class="btn ghost" onclick="returnExtIssue(${ei})">↩ Оформить возврат</button>`:''}
       </div>`).join('')}
@@ -4436,10 +4474,10 @@ function openEditItemForm(id){
     $('content').innerHTML = `
       <div class="fld"><label>Название товара</label><input id="ei_name" value="${esc(i.name)}"></div>
       <div class="fld"><label>Артикул</label><input id="ei_sku" value="${esc(i.sku)}"></div>
-      <div class="fld"><label>Единица измерения</label><input id="ei_unit" value="${i.unit}"></div>
+      <div class="fld"><label>Единица измерения</label><input id="ei_unit" value="${esc(i.unit)}"></div>
       <div class="fld"><label>Минимальный остаток</label><input id="ei_min" ${quantityInputAttrs()} value="${i.min}"></div>
       <div class="fld"><label>Группа ABC-анализа</label><select id="ei_abc">${['A','B','C'].map(x=>`<option ${x===i.abc?'selected':''}>${x}</option>`).join('')}</select></div>
-      <div class="fld"><label>Описание</label><textarea id="ei_desc">${i.desc||''}</textarea></div>
+      <div class="fld"><label>Описание</label><textarea id="ei_desc">${esc(i.desc||'')}</textarea></div>
       <button class="btn primary" onclick="submitEditItem('${id}')">Сохранить изменения</button>
     `;
   }});
@@ -4469,6 +4507,9 @@ function deleteItem(id){
   const i=item(id); if(!i) return false;
   const used=i.stock>0 || i.ext>0 || Object.values(i.posts||{}).some(q=>q>0) || docs.some(d=>d.itemId===id || (d.materials||[]).some(m=>m.id===id));
   if(used){ toast('Нельзя удалить: по товару есть остатки, выдачи или документы'); return false; }
+  if(i.photoMedia?.key && window.treshkaServerSync?.queueMediaDelete){
+    window.treshkaServerSync.queueMediaDelete(i.photoMedia.key);
+  }
   const idx=items.indexOf(i); items.splice(idx,1);
   posts.forEach(p=>{p.stock=p.stock.filter(s=>s.id!==id);});
   logAction('Карточка товара удалена', `${i.name} (${i.sku})`);
@@ -4529,6 +4570,7 @@ function submitNewPost(){
   if(currentRole!=='admin'){ toast('🔒 Создавать посты может только администратор'); return; }
   const name=$('np_name').value.trim();
   if(!name){ toast('Введите название поста'); return; }
+  if(/[<>&"']/.test(name)){ toast('Название поста содержит недопустимый служебный символ'); return; }
   if(posts.some(p=>p.name.toLowerCase()===name.toLowerCase())){ toast('Пост с названием «'+name+'» уже существует'); return; }
   posts.push({name, full:$('np_full').value||'', curator:$('np_curator').value||'—', stock:[], repairs:[]});
   logAction('Создан новый пост', name);
@@ -4869,7 +4911,7 @@ function renderAuditLog(){
           <div class="tl-item">
             <div class="t">${esc(a.action)}</div>
             <div class="s" style="color:var(--ink)">${esc(a.detail)}</div>
-            <div class="s">${a.t} · ${esc(a.user)}${a.post?' · пост '+a.post:''}</div>
+            <div class="s">${esc(a.t)} · ${esc(a.user)}${a.post?' · пост '+esc(a.post):''}</div>
           </div>`).join('') || '<div class="s">Нет записей по выбранным фильтрам</div>'}
       </div>
     </div>
@@ -4886,26 +4928,26 @@ function openItem(id){
     $('content').innerHTML = `
       <div class="card static" style="display:flex; gap:12px; align-items:flex-start">
         <div class="photo-box" ${canEditPhoto?`onclick="requestItemPhoto('${esc(i.id)}')"`:''} title="${canEditPhoto?'Изменить фото':''}">
-          ${i.photo
+          ${safePhotoSource(i.photo)
             ? `<img src="${i.photo}" alt="Фото ${esc(i.name)}">`
             : `<div class="photo-placeholder">📷${canEditPhoto?'<div class="s">Добавить фото</div>':'<div class="s">Нет фото</div>'}</div>`}
         </div>
         <div class="grow s" style="padding-top:2px">
           ${canEditPhoto
-            ? (i.photo
+            ? (safePhotoSource(i.photo)
                 ? `Нажмите на фото, чтобы заменить его снимком с камеры или из галереи.<br><span class="doc-link" onclick="removeItemPhoto('${esc(i.id)}')">✕ Удалить фото</span>`
                 : `Нажмите на плейсхолдер, чтобы прикрепить фото товара — снимком с камеры или из галереи.`)
-            : (i.photo ? 'Фото товара' : 'Фото не добавлено — доступно роли «Кладовщик» и «Администратор».')}
+            : (safePhotoSource(i.photo) ? 'Фото товара' : 'Фото не добавлено — доступно роли «Кладовщик» и «Администратор».')}
         </div>
       </div>
       <div class="detail-top">
         <div class="qr-wrap"><div id="qrc" style="width:110px;height:110px"></div><div class="s">QR · ${esc(i.sku)}</div>
           <button class="fbtn" style="margin-top:5px" onclick="printLabel('${esc(i.id)}')">🖨 Печать</button></div>
         <div class="grow">
-          <div class="kv"><span class="k">Всего в учёте</span><span class="v">${total} ${i.unit}</span></div>
-          <div class="kv"><span class="k">Основной склад</span><span class="v" style="${i.stock<i.min?'color:var(--red)':''}">${i.stock} ${i.unit}</span></div>
-          <div class="kv"><span class="k">Мин. остаток</span><span class="v">${i.min} ${i.unit}</span></div>
-          ${i.serial?`<div class="kv"><span class="k">Серия</span><span class="v">№${i.serial}…</span></div>`:''}
+          <div class="kv"><span class="k">Всего в учёте</span><span class="v">${total} ${esc(i.unit)}</span></div>
+          <div class="kv"><span class="k">Основной склад</span><span class="v" style="${i.stock<i.min?'color:var(--red)':''}">${i.stock} ${esc(i.unit)}</span></div>
+          <div class="kv"><span class="k">Мин. остаток</span><span class="v">${i.min} ${esc(i.unit)}</span></div>
+          ${i.serial?`<div class="kv"><span class="k">Серия</span><span class="v">№${esc(i.serial)}…</span></div>`:''}
         </div>
       </div>
       ${i.desc?`<div class="card static"><div class="s" style="font-size:12.5px;color:var(--ink)">${esc(i.desc)}</div></div>`:''}
@@ -4919,7 +4961,7 @@ function openItem(id){
       <div class="sec">Партии (партионный учёт)</div>
       <div class="card static">
         ${i.lots.map(l=>{const soon=isSoonExp(l.exp); return `
-          <div class="kv"><span class="k">Партия ${l.lot}${soon?' <span class=\"chip amber\" style=\"padding:1px 7px;font-size:9px\">истекает</span>':''}</span><span class="v">${l.qty} ${i.unit} · до ${l.exp}</span></div>`;}).join('')}
+          <div class="kv"><span class="k">Партия ${esc(l.lot)}${soon?' <span class=\"chip amber\" style=\"padding:1px 7px;font-size:9px\">истекает</span>':''}</span><span class="v">${l.qty} ${esc(i.unit)} · до ${esc(l.exp)}</span></div>`;}).join('')}
       </div>`:''}
       <div class="sec">Где находится</div>
       <div class="card static">
@@ -4962,18 +5004,18 @@ function openPost(idx){
         <div class="card" onclick="openDoc(${docs.findIndex(d=>d.no===r.doc)})">
           <div class="row">
             <div class="icbox">📶</div>
-            <div class="grow"><div class="t">${r.item} №${r.serial}</div>
-            <div class="s">Дефектовка: <span class="doc-link">${r.doc}</span></div></div>
-            <span class="chip amber">${r.status}</span>
+            <div class="grow"><div class="t">${esc(r.item)} №${esc(r.serial)}</div>
+            <div class="s">Дефектовка: <span class="doc-link">${esc(r.doc)}</span></div></div>
+            <span class="chip amber">${esc(r.status)}</span>
           </div>
         </div>`).join(''):''}
       <div class="sec">Материалы под отчётом</div>
       <div class="card static">
         ${p.stock.filter(m=>m.q>0).map(m=>{const it=item(m.id);return `
           <div class="mat">
-            <div class="icbox" style="width:34px;height:34px;font-size:16px">${it.icon}</div>
+            <div class="icbox" style="width:34px;height:34px;font-size:16px">${esc(it.icon)}</div>
             <div class="grow"><div class="t">${esc(it.name)}</div><div class="s">${esc(it.sku)}</div></div>
-            <div class="q">${fmtQ(it,m.q)}</div>
+            <div class="q">${m.q} ${esc(it.unit)}</div>
           </div>`;}).join('') || '<div class="s" style="padding:6px 0">Пусто</div>'}
       </div>
       ${currentRole!=='rabotnik'?`<div class="btn-row">
@@ -5026,6 +5068,7 @@ function openEditPostForm(idx){
 function submitEditPost(idx){
   if(currentRole!=='admin'){toast('🔒 Редактировать посты может только администратор');return false;}
   const p=posts[idx], name=$('ep_name').value.trim();if(!p||!name){toast('Введите название поста');return false;}
+  if(/[<>&"']/.test(name)){toast('Название поста содержит недопустимый служебный символ');return false;}
   if(posts.some((x,i)=>i!==idx&&x.name.toLowerCase()===name.toLowerCase())){toast('Пост с таким названием уже существует');return false;}
   const old=p.name;
   if(name!==old){
@@ -5058,15 +5101,15 @@ function openDefekt(d){
     setHdr(d.no+' · Акт дефектовки', `${esc(d.item)} ${d.serial&&d.serial!=='—'?'№'+d.serial:''}`, true, false);
     const work = docs.find(x=>x.no===d.workDoc);
     $('content').innerHTML = `
-      <div class="progress-note ok">✓ Акт закрыт ${d.date} — на его основании ${work?`создан <b>${d.workDoc}</b>`:'можно создать акт работ'}</div>
+      <div class="progress-note ok">✓ Акт закрыт ${esc(d.date)} — на его основании ${work?`создан <b>${esc(d.workDoc)}</b>`:'можно создать акт работ'}</div>
       <div class="card static">
         <div class="kv"><span class="k">Номер заявки</span><span class="v">${esc(d.orderNo)||'—'}</span></div>
-        <div class="kv"><span class="k">Изделие</span><span class="v">${esc(d.item)} ${d.serial&&d.serial!=='—'?'№'+d.serial:''}</span></div>
-        <div class="kv"><span class="k">Дата поступления</span><span class="v">${d.date}</span></div>
+        <div class="kv"><span class="k">Изделие</span><span class="v">${esc(d.item)} ${d.serial&&d.serial!=='—'?'№'+esc(d.serial):''}</span></div>
+        <div class="kv"><span class="k">Дата поступления</span><span class="v">${esc(d.date)}</span></div>
         <div class="kv"><span class="k">Подразделение</span><span class="v">${esc(d.from)||'—'}</span></div>
-        <div class="kv"><span class="k">Пост</span><span class="v">${d.post}</span></div>
+        <div class="kv"><span class="k">Пост</span><span class="v">${esc(d.post)}</span></div>
         <div class="kv"><span class="k">Позывной</span><span class="v">${esc(d.callsign)||'—'}</span></div>
-        <div class="kv"><span class="k">Заключение</span><span class="v" style="color:var(--green)">${d.verdict}</span></div>
+        <div class="kv"><span class="k">Заключение</span><span class="v" style="color:var(--green)">${esc(d.verdict)}</span></div>
       </div>
       <div class="sec">Неисправность со слов сдающего</div>
       <div class="card static"><div class="s" style="font-size:13px;color:var(--ink)">${esc(d.fault)||'—'}</div></div>
@@ -5107,10 +5150,10 @@ function renderWorkDoc(d){
         : pending?'<div class="progress-note">⏳ Акт отправлен администратору. До решения редактирование и списание заблокированы.</div>'
         : '<div class="progress-note">⚠ Черновик — после отправки акт обязан согласовать администратор</div>'}
       <div class="card static">
-        <div class="kv"><span class="k">Основание</span><span class="v doc-link" onclick="openDoc(${docs.findIndex(x=>x.no===d.defektDoc)})">${d.defektDoc}</span></div>
+        <div class="kv"><span class="k">Основание</span><span class="v doc-link" onclick="openDoc(${docs.findIndex(x=>x.no===d.defektDoc)})">${esc(d.defektDoc)}</span></div>
         <div class="kv"><span class="k">Номер заявки</span><span class="v">${esc(d.orderNo)||'—'}</span></div>
-        <div class="kv"><span class="k">Пост</span><span class="v">${d.post}</span></div>
-        <div class="kv"><span class="k">Дата</span><span class="v">${d.date}</span></div>
+        <div class="kv"><span class="k">Пост</span><span class="v">${esc(d.post)}</span></div>
+        <div class="kv"><span class="k">Дата</span><span class="v">${esc(d.date)}</span></div>
         ${d.planQty!=null?`<div class="kv"><span class="k">Получено / годных</span><span class="v" style="${mismatch?'color:var(--red)':''}">${d.planQty} / ${d.factQty??'—'}</span></div>`:''}
       </div>
       ${!locked&&d.planQty!=null?`<div class="fld"><label>Фактически годных изделий</label><input id="workFactQty" ${quantityInputAttrs()} value="${d.factQty??''}" onchange="setWorkFactQty('${d.no}',this.value)"></div>`:''}
@@ -5154,8 +5197,8 @@ function renderWorkDoc(d){
       <div class="card static" id="matList">
         ${sum.map((m,n)=>`
           <div class="mat">
-            <div class="icbox" style="width:34px;height:34px;font-size:16px">${m.it.icon}</div>
-            <div class="grow"><div class="t">${m.it.name}</div><div class="s">${m.it.sku} · с поста ${d.post}</div></div>
+            <div class="icbox" style="width:34px;height:34px;font-size:16px">${esc(m.it.icon)}</div>
+            <div class="grow"><div class="t">${esc(m.it.name)}</div><div class="s">${esc(m.it.sku)} · с поста ${esc(d.post)}</div></div>
             <div class="q">${fmtQ(m.it,m.q)}</div>
             ${locked?'':`<button class="del" onclick="event.stopPropagation(); removeMat('${d.no}', ${n})">✕</button>`}
           </div>`).join('')}
@@ -6206,6 +6249,6 @@ if(_startupLoadResult === 'corrupted'){
   flushSave();
 }
 </script>
-<script src="/prototype-server.js"></script>
+<script src="/prototype-server.js?build=1.6-sync2"></script>
 </body>
 </html>

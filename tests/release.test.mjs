@@ -23,6 +23,7 @@ test("security endpoints and server-connected APK are present", async () => {
     "app/api/auth/recover-owner/route.ts",
     "app/api/users/transfer-owner/route.ts",
     "app/api/audit/route.ts",
+    "app/api/media/images/route.ts",
   ];
   await Promise.all(paths.map(text));
   const activity = await text("android/app/src/main/java/com/treshka/sklad/MainActivity.kt");
@@ -46,6 +47,8 @@ test("server release keeps the complete warehouse interface and prescribed posts
   }
   assert.match(stateRoute, /warehouse_full_state/);
   assert.match(stateRoute, /MAX_STATE_BYTES/);
+  assert.match(stateRoute, /expectedRevision/);
+  assert.match(stateRoute, /currentRevision/);
 });
 
 test("secrets are runtime environment variables, never embedded values", async () => {

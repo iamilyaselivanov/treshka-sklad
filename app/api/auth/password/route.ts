@@ -8,7 +8,7 @@ export async function POST(request: Request) {
   const body = (await request.json()) as Record<string, unknown>;
   const currentPassword = String(body.currentPassword ?? "");
   const newPassword = String(body.newPassword ?? "");
-  if (newPassword.length < 8) return Response.json({ error: "Новый пароль должен содержать минимум 8 символов" }, { status: 400 });
+  if (newPassword.length < 8 || newPassword.length > 256) return Response.json({ error: "Новый пароль должен содержать от 8 до 256 символов" }, { status: 400 });
   const row = await env.DB.prepare("SELECT password_hash FROM users WHERE id = ?")
     .bind(auth.user.id).first<{ password_hash: string }>();
   if (!row || !(await verifyPassword(currentPassword, row.password_hash))) {

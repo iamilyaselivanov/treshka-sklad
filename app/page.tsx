@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Screen = "home" | "stock" | "posts" | "documents" | "more" | "users" | "security" | "audit";
 
@@ -36,11 +36,29 @@ const EMPTY_FORM = {
 
 export default function Home() {
   const [status, setStatus] = useState<{ setupRequired: boolean; user: AuthUser | null } | null>(null);
+  const [statusError, setStatusError] = useState("");
   const [recovering, setRecovering] = useState(false);
 
   const refresh = useCallback(async () => {
-    const response = await fetch("/api/auth/status", { cache: "no-store" });
-    setStatus(await response.json());
+    setStatusError("");
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 15_000);
+    try {
+      const response = await fetch("/api/auth/status", { cache: "no-store", signal: controller.signal });
+      const data = (await response.json()) as { setupRequired?: boolean; user?: AuthUser | null; error?: string };
+      if (!response.ok || typeof data.setupRequired !== "boolean") {
+        throw new Error(data.error || "Сервер вернул некорректный ответ");
+      }
+      setStatus({ setupRequired: data.setupRequired, user: data.user ?? null });
+    } catch (error) {
+      setStatusError(
+        error instanceof DOMException && error.name === "AbortError"
+          ? "Сервер не ответил за 15 секунд."
+          : error instanceof Error ? error.message : "Нет связи с сервером.",
+      );
+    } finally {
+      window.clearTimeout(timeout);
+    }
   }, []);
 
   useEffect(() => {
@@ -49,6 +67,13 @@ export default function Home() {
     void refresh();
   }, [refresh]);
 
+  if (!status && statusError) {
+    return (
+      <AuthShell title="Нет связи с сервером" text={`${statusError} Проверьте интернет и повторите.`}>
+        <button className="secondary" type="button" onClick={() => void refresh()}>Повторить подключение</button>
+      </AuthShell>
+    );
+  }
   if (!status) return <AuthShell title="Проверяем доступ…" text="Подключаемся к серверу версии 1.6." />;
   if (status.setupRequired) {
     return (
@@ -73,6 +98,8 @@ export default function Home() {
 }
 
 function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; loggedOut: () => void }) {
+  const prototypeFrame = useRef<HTMLIFrameElement>(null);
+  const [syncConflict, setSyncConflict] = useState<{ updatedBy: string } | null>(null);
   const [useFullSystem] = useState(true);
   const [screen, setScreen] = useState<Screen>("home");
   const [products, setProducts] = useState<Product[]>([]);
@@ -127,7 +154,12 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
 
   useEffect(() => {
     const listener = (event: MessageEvent) => {
-      if (event.origin === window.location.origin && event.data?.type === "treshka-auth-required") loggedOut();
+      if (event.origin !== window.location.origin) return;
+      if (event.data?.type === "treshka-auth-required") loggedOut();
+      if (event.data?.type === "treshka-sync-conflict") {
+        setSyncConflict({ updatedBy: String(event.data.updatedBy || "другой пользователь") });
+      }
+      if (event.data?.type === "treshka-sync-resolved") setSyncConflict(null);
     };
     window.addEventListener("message", listener);
     return () => window.removeEventListener("message", listener);
@@ -160,7 +192,14 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
           <span><b>{currentUser.callsign}</b> · {roleLabel(currentUser.role)}</span>
           <button onClick={() => void logout()}>Выйти</button>
         </div>
-        <iframe title="ТРЁШКА СКЛАД" src="/prototype.html?server=1" />
+        {syncConflict && (
+          <div className="prototype-sync-conflict" role="alert">
+            <span>Склад изменил {syncConflict.updatedBy}. Какую версию оставить?</span>
+            <button onClick={() => resolveSyncConflict("server")}>Серверную</button>
+            <button className="local" onClick={() => resolveSyncConflict("local")}>Мою</button>
+          </div>
+        )}
+        <iframe ref={prototypeFrame} title="ТРЁШКА СКЛАД" src="/prototype.html?server=1&build=1.6-sync2" />
       </main>
     );
   }
@@ -369,6 +408,13 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
     loggedOut();
+  }
+
+  function resolveSyncConflict(strategy: "server" | "local") {
+    prototypeFrame.current?.contentWindow?.postMessage(
+      { type: "treshka-sync-resolve", strategy },
+      window.location.origin,
+    );
   }
 }
 

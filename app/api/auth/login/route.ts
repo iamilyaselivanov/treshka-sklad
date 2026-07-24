@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { audit, createSession, ensureAuthSchema, verifyPassword } from "@/lib/auth";
+import { audit, clientThrottleKey, createSession, ensureAuthSchema, verifyPassword } from "@/lib/auth";
 
 type LoginRow = {
   id: string;
@@ -14,12 +14,17 @@ type LoginRow = {
 export async function POST(request: Request) {
   await ensureAuthSchema();
   const body = (await request.json()) as Record<string, unknown>;
-  const login = String(body.login ?? "").trim().toLocaleLowerCase("ru");
+  const login = String(body.login ?? "").trim().toLocaleLowerCase("ru").slice(0, 120);
   const password = String(body.password ?? "");
+  if (login.length < 3 || password.length < 8 || password.length > 256) {
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    return Response.json({ error: "Неверный логин или пароль" }, { status: 401 });
+  }
+  const throttleKey = clientThrottleKey(request, "login", login);
   const now = new Date();
   const throttle = await env.DB.prepare(
     "SELECT failures, blocked_until FROM login_throttle WHERE login = ?",
-  ).bind(login).first<{ failures: number; blocked_until: string | null }>();
+  ).bind(throttleKey).first<{ failures: number; blocked_until: string | null }>();
   if (throttle?.blocked_until && throttle.blocked_until > now.toISOString()) {
     return Response.json({ error: "Слишком много попыток. Повторите вход через 15 минут" }, { status: 429 });
   }
@@ -35,15 +40,19 @@ export async function POST(request: Request) {
        VALUES (?, ?, ?, ?)
        ON CONFLICT(login) DO UPDATE SET failures = excluded.failures,
        blocked_until = excluded.blocked_until, last_attempt_at = excluded.last_attempt_at`,
-    ).bind(login, failures >= 5 ? 0 : failures, blockedUntil, now.toISOString()).run();
+    ).bind(throttleKey, failures >= 5 ? 0 : failures, blockedUntil, now.toISOString()).run();
     await new Promise((resolve) => setTimeout(resolve, 350));
     return Response.json({ error: "Неверный логин или пароль" }, { status: 401 });
   }
 
-  await env.DB.prepare("DELETE FROM login_throttle WHERE login = ?").bind(login).run();
   const user = { id: row.id, callsign: row.callsign, login: row.login, role: row.role, assignment: row.assignment };
-  await env.DB.prepare("UPDATE users SET last_login_at = ? WHERE id = ?").bind(new Date().toISOString(), row.id).run();
-  await audit(user, "login", "Вход в систему");
-  const session = await createSession(row.id);
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM login_throttle WHERE login = ?").bind(throttleKey),
+    env.DB.prepare("UPDATE users SET last_login_at = ? WHERE id = ?").bind(new Date().toISOString(), row.id),
+  ]);
+  const [session] = await Promise.all([
+    createSession(row.id),
+    audit(user, "login", "Вход в систему"),
+  ]);
   return Response.json({ user }, { headers: { "set-cookie": session.cookie } });
 }
