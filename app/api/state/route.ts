@@ -31,11 +31,17 @@ export async function GET(request: Request) {
   const row = await env.DB.prepare(
     "SELECT revision, payload, updated_at, updated_by FROM warehouse_full_state WHERE state_key = 'main'",
   ).first<StateRow>();
-  if (!row) return Response.json({ revision: 0, state: null }, { headers: { "cache-control": "no-store" } });
+  if (!row) {
+    return Response.json(
+      { revision: 0, state: null, user: auth.user },
+      { headers: { "cache-control": "no-store" } },
+    );
+  }
   return Response.json(
     {
       revision: row.revision,
       state: JSON.parse(row.payload),
+      user: auth.user,
       updatedAt: row.updated_at,
       updatedBy: row.updated_by,
       sizeBytes: new TextEncoder().encode(row.payload).byteLength,

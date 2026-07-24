@@ -10,6 +10,7 @@
     "build": "vinext build",
     "start": "vinext start",
     "test": "npm run build && node --test tests/release.test.mjs && node --test tests/sklad-prototype.test.mjs",
+    "test:api-local": "node tests/local-api-smoke.mjs",
     "test:sklad": "node --test tests/sklad-prototype.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"

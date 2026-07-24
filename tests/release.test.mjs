@@ -57,3 +57,19 @@ test("secrets are runtime environment variables, never embedded values", async (
   assert.match(recovery, /OWNER_RECOVERY_CODE/);
   assert.doesNotMatch(`${setup}\n${recovery}`, /github_pat_/);
 });
+
+test("server accounts support permanent-password creation and protected deletion", async () => {
+  const [usersRoute, bridge, stateRoute] = await Promise.all([
+    text("app/api/users/route.ts"),
+    text("public/prototype-server.js"),
+    text("app/api/state/route.ts"),
+  ]);
+  assert.match(usersRoute, /export async function DELETE/);
+  assert.match(usersRoute, /DELETE FROM users/);
+  assert.match(bridge, /password\.length < 8/);
+  assert.match(bridge, /method: "POST"/);
+  assert.match(bridge, /method: "DELETE"/);
+  assert.match(bridge, /window\.requestRoleSwitch/);
+  assert.match(stateRoute, /user: auth\.user/);
+  assert.doesNotMatch(bridge, /fetch\("\/api\/auth\/status"/);
+});

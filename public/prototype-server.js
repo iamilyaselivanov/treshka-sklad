@@ -128,20 +128,15 @@
 
   async function initialize() {
     try {
-      const [authResponse, response] = await Promise.all([
-        fetch("/api/auth/status", { cache: "no-store" }),
-        fetch("/api/state", { cache: "no-store" }),
-      ]);
-      const auth = await authResponse.json();
-      if (!authResponse.ok || !auth.user) {
+      const response = await fetch("/api/state", { cache: "no-store" });
+      const data = await response.json();
+      if (response.status === 401 || !data.user) {
         parent.postMessage({ type: "treshka-auth-required" }, location.origin);
         return;
       }
-      sync.user = auth.user;
-      installServerAccountControls();
-      if (["owner", "admin"].includes(sync.user.role)) await refreshServerAccounts();
-      const data = await response.json();
       if (!response.ok) throw new Error(data.error || "Не удалось получить склад");
+      sync.user = data.user;
+      installServerAccountControls();
       sync.revision = data.revision || 0;
       if (data.state) {
         if (!applyAppState(data.state)) throw new Error("Сервер вернул несовместимые данные");
