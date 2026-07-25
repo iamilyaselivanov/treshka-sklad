@@ -72,6 +72,7 @@ export const warehouseFullState = sqliteTable("warehouse_full_state", {
   stateKey: text("state_key").primaryKey(),
   revision: integer("revision").notNull().default(0),
   payload: text("payload").notNull(),
+  itemIds: text("item_ids").notNull().default("[]"),
   updatedAt: text("updated_at").notNull(),
   updatedBy: text("updated_by").notNull(),
 });
@@ -123,6 +124,7 @@ export const pushDeliveries = sqliteTable(
     providerMessageId: text("provider_message_id").notNull().default(""),
     error: text("error").notNull().default(""),
     attemptedAt: text("attempted_at"),
+    attempts: integer("attempts").notNull().default(0),
   },
   (table) => [
     uniqueIndex("push_deliveries_event_device_idx").on(table.eventId, table.deviceId),

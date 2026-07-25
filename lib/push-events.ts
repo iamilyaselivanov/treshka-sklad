@@ -79,18 +79,23 @@ export function pushPresentation(
   };
 }
 
+export function normalizePostAssignment(value: string) {
+  return value.trim().replace(/\s+/g, " ").toLocaleLowerCase("ru-RU");
+}
+
 export function pushRecipientQuery(type: PushEventType) {
   const audience = definitions[type].audience;
   const select = `SELECT push_devices.user_id AS userId,
                          push_devices.device_id AS deviceId,
-                         push_devices.token
+                         push_devices.token,
+                         users.assignment
                   FROM push_devices
                   JOIN users ON users.id = push_devices.user_id`;
   if (audience === "post-members") {
     return {
       sql: `${select}
-            WHERE users.status = 'active' AND users.assignment = ?`,
-      bindPost: true,
+            WHERE users.status = 'active' AND TRIM(users.assignment) <> ''`,
+      filterPost: true,
     };
   }
   const roles = audience === "management"
@@ -99,6 +104,6 @@ export function pushRecipientQuery(type: PushEventType) {
   return {
     sql: `${select}
           WHERE users.status = 'active' AND users.role IN (${roles})`,
-    bindPost: false,
+    filterPost: false,
   };
 }

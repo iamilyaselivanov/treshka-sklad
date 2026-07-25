@@ -1,8 +1,8 @@
-CREATE TABLE `login_throttle` (
+CREATE TABLE IF NOT EXISTS `login_throttle` (
 	`login` text PRIMARY KEY NOT NULL,
 	`failures` integer DEFAULT 0 NOT NULL,
 	`blocked_until` text,
 	`last_attempt_at` text NOT NULL
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `single_owner_idx` ON `users` (`role`) WHERE "users"."role" = 'owner';
+CREATE UNIQUE INDEX IF NOT EXISTS `single_owner_idx` ON `users` (`role`) WHERE "users"."role" = 'owner';

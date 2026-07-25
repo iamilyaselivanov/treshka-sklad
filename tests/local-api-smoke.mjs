@@ -70,7 +70,7 @@ try {
   const definitions = [
     { callsign: "Тест-админ", login: `admin-${suffix}`, password: "AdminPass-1600", role: "admin", assignment: "" },
     { callsign: "Тест-кладовщик", login: `store-${suffix}`, password: "StorePass-1600", role: "storekeeper", assignment: "" },
-    { callsign: "Тест-работник", login: `worker-${suffix}`, password: "WorkerPass-1600", role: "worker", assignment: "ТЭЧ" },
+    { callsign: "Тест-работник", login: `worker-${suffix}`, password: "WorkerPass-1600", role: "worker", assignment: "  тЭч  " },
   ];
 
   for (const definition of definitions) {
@@ -196,16 +196,19 @@ try {
       }),
     });
   }
-  await request("/api/devices/register", {
+  const overflowDeviceId = crypto.randomUUID();
+  pushDevices.push({ role: "owner", deviceId: overflowDeviceId });
+  const overflowRegistration = await request("/api/devices/register", {
     method: "POST",
     headers: { ...ownerHeaders, "content-type": "application/json" },
     body: JSON.stringify({
-      deviceId: crypto.randomUUID(),
+      deviceId: overflowDeviceId,
       token: `owner-over-limit-${suffix}`.padEnd(96, "x"),
       platform: "android",
       appVersion: "1.6",
     }),
-  }, 429);
+  });
+  assert.equal(overflowRegistration.data.evictedOldest, true);
 
   const product = await request("/api/products", {
     method: "POST",
@@ -322,22 +325,24 @@ try {
     ...stateWithDeletionProbe,
     items: stateWithDeletionProbe.items.filter((item) => item.id !== deletionProbeId),
   };
-  await request("/api/state", {
+  const forbiddenDeletion = await request("/api/state", {
     method: "PUT",
     headers: { cookie: roleCookies.storekeeper, "content-type": "application/json" },
     body: JSON.stringify({ state: stateWithoutDeletionProbe, expectedRevision: deletionProbeSaved.data.revision }),
   }, 403);
-  await request("/api/state", {
+  assert.equal(forbiddenDeletion.data.terminal, true);
+  const usedDeletion = await request("/api/state", {
     method: "PUT",
     headers: { cookie: roleCookies.admin, "content-type": "application/json" },
     body: JSON.stringify({ state: stateWithoutDeletionProbe, expectedRevision: deletionProbeSaved.data.revision }),
   }, 409);
+  assert.equal(usedDeletion.data.terminal, true);
   const originalDocs = stateWithDeletionProbe.docs ?? [];
   const stateWithDocumentReference = {
     ...stateWithDeletionProbe,
     items: stateWithDeletionProbe.items.map((item) =>
       item.id === deletionProbeId ? { ...item, stock: 0 } : item),
-    docs: [...originalDocs, { no: `DOC-${suffix}`, kind: "work", itemId: deletionProbeId, materials: [] }],
+    docs: [...originalDocs, { no: `DOC-${suffix}`, kind: "work", status: "Черновик", itemId: deletionProbeId, materials: [] }],
   };
   const documentReferenceSaved = await request("/api/state", {
     method: "PUT",
@@ -361,7 +366,11 @@ try {
   }, 409);
   const safeStateWithProbe = {
     ...stateWithDocumentReference,
-    docs: originalDocs,
+    docs: [...originalDocs, { no: `DOC-CLOSED-${suffix}`, kind: "work", status: "Закрыт", itemId: deletionProbeId }],
+    extIssues: [
+      ...(stateWithDocumentReference.extIssues ?? []),
+      { no: `EXT-CLOSED-${suffix}`, status: "Возвращено", items: [{ id: deletionProbeId, q: 1 }] },
+    ],
   };
   const safeProbeSaved = await request("/api/state", {
     method: "PUT",
@@ -383,9 +392,57 @@ try {
       expectedRevision: safeProbeSaved.data.revision,
     }),
   });
-  const stateAfterDeletion = await request("/api/state", { headers: ownerHeaders });
+  let stateAfterDeletion = await request("/api/state", { headers: ownerHeaders });
   assert.equal(stateAfterDeletion.data.revision, adminDeletion.data.revision);
   assert.equal(stateAfterDeletion.data.state.items.some((item) => item.id === deletionProbeId), false);
+  const linkedProduct = await request("/api/products", {
+    method: "POST",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({
+      name: "Карточка общего снимка",
+      sku: `LINKED-${suffix}`,
+      category: "Тест",
+      quantity: 0,
+      unit: "шт",
+      location: "",
+      minimum: 0,
+    }),
+  }, 201);
+  const linkedState = {
+    ...stateAfterDeletion.data.state,
+    items: [
+      ...(stateAfterDeletion.data.state.items ?? []),
+      {
+        id: linkedProduct.data.product.id,
+        name: linkedProduct.data.product.name,
+        sku: linkedProduct.data.product.sku,
+        stock: 0,
+        ext: 0,
+        posts: {},
+        lots: [],
+      },
+    ],
+  };
+  const linkedSaved = await request("/api/state", {
+    method: "PUT",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({ state: linkedState, expectedRevision: stateAfterDeletion.data.revision }),
+  });
+  const linkedDeleted = await request(`/api/products?id=${encodeURIComponent(linkedProduct.data.product.id)}`, {
+    method: "DELETE",
+    headers: { cookie: roleCookies.admin },
+  });
+  assert.equal(linkedDeleted.data.revision, linkedSaved.data.revision + 1);
+  const productsAfterLinkedDeletion = await request("/api/products", { headers: ownerHeaders });
+  assert.equal(
+    productsAfterLinkedDeletion.data.products.some((entry) => entry.id === linkedProduct.data.product.id),
+    false,
+  );
+  stateAfterDeletion = await request("/api/state", { headers: ownerHeaders });
+  assert.equal(
+    stateAfterDeletion.data.state.items.some((item) => item.id === linkedProduct.data.product.id),
+    false,
+  );
   const parallelStates = [1, 2].map((marker) => ({
     ...stateAfterDeletion.data.state,
     auditLog: [...(stateAfterDeletion.data.state.auditLog ?? []), { marker }],

@@ -4,6 +4,7 @@ import { isFirebasePushConfigured, sendDevicePush } from "@/lib/fcm";
 import { readJsonObject } from "@/lib/http";
 import {
   isPushEventType,
+  normalizePostAssignment,
   pushActorAllowed,
   pushPresentation,
   pushRecipientQuery,
@@ -16,6 +17,8 @@ type DeviceRow = {
   userId: string;
   deviceId: string;
   token: string;
+  assignment?: string;
+  attempts?: number;
 };
 
 type ExistingEventRow = {
@@ -83,11 +86,11 @@ export async function POST(request: Request) {
   ).bind(eventId, auth.user.id, type, post, entityNo, summary, title, body, now).run();
 
   const recipientQuery = pushRecipientQuery(type);
-  const recipientStatement = env.DB.prepare(recipientQuery.sql);
-  const devices = recipientQuery.bindPost
-    ? await recipientStatement.bind(post).all<DeviceRow>()
-    : await recipientStatement.all<DeviceRow>();
-  const rows = devices.results ?? [];
+  const devices = await env.DB.prepare(recipientQuery.sql).all<DeviceRow>();
+  const normalizedPost = normalizePostAssignment(post);
+  const rows = (devices.results ?? []).filter((device) =>
+    !recipientQuery.filterPost
+    || normalizePostAssignment(String(device.assignment ?? "")) === normalizedPost);
   if (rows.length) {
     await env.DB.batch(rows.map((device) => env.DB.prepare(
       `INSERT OR IGNORE INTO push_deliveries
@@ -99,16 +102,19 @@ export async function POST(request: Request) {
   const pending = await env.DB.prepare(
     `SELECT push_deliveries.user_id AS userId,
             push_deliveries.device_id AS deviceId,
-            push_devices.token
+            push_devices.token,
+            push_deliveries.attempts
      FROM push_deliveries
      JOIN push_devices ON push_devices.device_id = push_deliveries.device_id
      WHERE push_deliveries.event_id = ?
        AND push_deliveries.status IN ('pending', 'failed', 'disabled')`,
   ).bind(eventId).all<DeviceRow>();
 
+  const MAX_DELIVERY_ATTEMPTS = 8;
   let sent = 0;
   let failed = 0;
   let disabled = 0;
+  let terminal = 0;
   const pendingDevices = pending.results ?? [];
   for (let offset = 0; offset < pendingDevices.length; offset += 8) {
     const batch = pendingDevices.slice(offset, offset + 8);
@@ -130,14 +136,18 @@ export async function POST(request: Request) {
       if (result.status === "sent") {
         sent += 1;
         updates.push(env.DB.prepare(
-          "UPDATE push_deliveries SET status = 'sent', provider_message_id = ?, error = '', attempted_at = ? WHERE event_id = ? AND device_id = ?",
+          "UPDATE push_deliveries SET status = 'sent', provider_message_id = ?, error = '', attempted_at = ?, attempts = attempts + 1 WHERE event_id = ? AND device_id = ?",
         ).bind(result.providerMessageId, attemptedAt, eventId, device.deviceId));
       } else {
-        if (result.status === "disabled") disabled += 1;
+        const attempts = Number(device.attempts ?? 0) + 1;
+        const terminalFailure = result.status === "failed"
+          && (result.unregisterToken || attempts >= MAX_DELIVERY_ATTEMPTS);
+        if (terminalFailure) terminal += 1;
+        else if (result.status === "disabled") disabled += 1;
         else failed += 1;
         updates.push(env.DB.prepare(
-          "UPDATE push_deliveries SET status = ?, error = ?, attempted_at = ? WHERE event_id = ? AND device_id = ?",
-        ).bind(result.status, result.error, attemptedAt, eventId, device.deviceId));
+          "UPDATE push_deliveries SET status = ?, error = ?, attempted_at = ?, attempts = attempts + 1 WHERE event_id = ? AND device_id = ?",
+        ).bind(terminalFailure ? "dead" : result.status, result.error, attemptedAt, eventId, device.deviceId));
         if (result.status === "failed" && result.unregisterToken) invalidTokens.push(device.token);
       }
     }
@@ -173,6 +183,7 @@ export async function POST(request: Request) {
     sent,
     failed,
     disabled,
+    terminal,
   };
   if (
     rows.length

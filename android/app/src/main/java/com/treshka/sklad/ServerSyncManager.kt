@@ -43,21 +43,43 @@ class ServerSyncManager(
     }
 
     fun listConflicts(): String {
-        val config = store.getSyncConfig() ?: error("Сервер не настроен")
-        val response = requestJson("${config.baseUrl}/v1/sync/conflicts", "GET", config.authToken, null)
-        if (response.code !in 200..299) throw IllegalStateException("HTTP ${response.code}: ${response.body.take(300)}")
-        return response.body
+        return store.conflictedMutationsJson()
     }
 
     fun resolveConflict(id: Long, decision: String): String {
         require(decision == "local" || decision == "server")
         val config = store.getSyncConfig() ?: error("Сервер не настроен")
-        val body = JSONObject().put("decision", decision).toString()
-        val response = requestJson("${config.baseUrl}/v1/sync/conflicts/$id/resolve", "POST", config.authToken, body)
-        if (response.code !in 200..299) throw IllegalStateException("HTTP ${response.code}: ${response.body.take(300)}")
-        store.releaseConflictedMutations()
+        if (decision == "server") {
+            check(store.discardConflictedMutation(id)) { "Локальный конфликт не найден" }
+            if (store.pendingCount() == 0) {
+                store.pendingRemoteSnapshot()?.let { (payload, revision) ->
+                    onRemoteState(payload, revision)
+                    store.clearPendingRemoteSnapshot()
+                }
+            }
+        } else {
+            var remote = store.pendingRemoteSnapshot()
+            if (remote == null) {
+                val response = requestJson(
+                    "${config.baseUrl}/v1/sync/pull?afterRevision=0",
+                    "GET",
+                    config.authToken,
+                    null,
+                )
+                if (response.code !in 200..299) {
+                    throw IllegalStateException("Pull HTTP ${response.code}: ${response.body.take(300)}")
+                }
+                val json = JSONObject(response.body)
+                if (json.has("payload") && json.has("revision")) {
+                    remote = json.getJSONObject("payload").toString() to json.getLong("revision")
+                }
+            }
+            if (remote != null) store.updateServerRevision(remote.second)
+            check(store.requeueConflictedMutation(id)) { "Локальный конфликт не найден" }
+            store.clearPendingRemoteSnapshot()
+        }
         syncNow()
-        return response.body
+        return JSONObject().put("ok", true).put("decision", decision).toString()
     }
 
     fun registerPushToken(token: String): Boolean {
@@ -153,7 +175,7 @@ class ServerSyncManager(
                 // A conflict requires an explicit user decision. Automatically
                 // releasing it with the same stale baseRevision creates an
                 // endless 409 loop and must never enable pull over local work.
-                return
+                break
             }
             if (response.code !in 200..299) {
                 val message = "HTTP ${response.code}: ${response.body.take(300)}"
@@ -170,7 +192,7 @@ class ServerSyncManager(
                 // explicitly resolvable conflict. Otherwise the same rejected
                 // row blocks every newer snapshot forever.
                 store.markMutationConflicted(pending.mutationId, message)
-                if (response.code == 401 || response.code == 403) return
+                if (response.code == 401 || response.code == 403) break
                 continue
             }
             val revision = JSONObject(response.body).getLong("revision")
@@ -178,9 +200,10 @@ class ServerSyncManager(
             config = store.getSyncConfig() ?: return
         }
 
-        // Серверный снимок применяется только при пустом outbox. Поэтому
-        // несинхронизированные локальные изменения никогда не затираются pull-ом.
-        if (store.pendingCount() == 0) {
+        // Pull may continue while only parked conflicts remain, but the remote
+        // payload is cached separately and never overwrites local work until an
+        // administrator explicitly chooses a version.
+        if (store.sendablePendingCount() == 0) {
             config = store.getSyncConfig() ?: return
             val response = requestJson(
                 "${config.baseUrl}/v1/sync/pull?afterRevision=${config.serverRevision}",
@@ -191,7 +214,14 @@ class ServerSyncManager(
             if (response.code == 200) {
                 val json = JSONObject(response.body)
                 if (!json.optBoolean("unchanged", false) && json.has("payload")) {
-                    onRemoteState(json.getJSONObject("payload").toString(), json.getLong("revision"))
+                    val payload = json.getJSONObject("payload").toString()
+                    val revision = json.getLong("revision")
+                    if (store.pendingCount() > 0) {
+                        store.savePendingRemoteSnapshot(payload, revision)
+                    } else {
+                        store.clearPendingRemoteSnapshot()
+                        onRemoteState(payload, revision)
+                    }
                 }
             } else if (response.code !in 200..299) {
                 store.markSyncError(null, "Pull HTTP ${response.code}")

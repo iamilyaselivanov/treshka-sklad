@@ -1,4 +1,4 @@
-CREATE TABLE `products` (
+CREATE TABLE IF NOT EXISTS `products` (
 	`id` text PRIMARY KEY NOT NULL,
 	`name` text NOT NULL,
 	`sku` text NOT NULL,
@@ -10,5 +10,5 @@ CREATE TABLE `products` (
 	`created_at` text NOT NULL
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `products_sku_unique` ON `products` (`sku`);--> statement-breakpoint
-CREATE INDEX `products_name_idx` ON `products` (`name`);
+CREATE UNIQUE INDEX IF NOT EXISTS `products_sku_unique` ON `products` (`sku`);--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS `products_name_idx` ON `products` (`name`);

@@ -41,19 +41,31 @@ export function removedWarehouseItemIds(previous: WarehouseState, next: Warehous
   return [...warehouseItemIds(previous)].filter((id) => !nextIds.has(id));
 }
 
-export function findWarehouseItemId(state: WarehouseState, id: string, sku = "") {
+function normalizedStatus(value: unknown) {
+  return String(value ?? "").trim().toLocaleLowerCase("ru-RU");
+}
+
+function isClosedDocument(value: unknown) {
+  const status = normalizedStatus(record(value)?.status);
+  return status === "закрыт"
+    || status === "закрыто"
+    || status === "завершён"
+    || status === "завершен"
+    || status === "выполнен";
+}
+
+function isClosedExternalIssue(value: unknown) {
+  const status = normalizedStatus(record(value)?.status);
+  return status === "возвращено" || status === "закрыт" || status === "закрыто";
+}
+
+export function findWarehouseItemId(state: WarehouseState, id: string) {
   const normalizedId = id.trim();
-  const normalizedSku = sku.trim();
   for (const value of rows(state.items)) {
     const item = record(value);
     if (!item) continue;
     const itemId = String(item.id ?? "").trim();
-    if (
-      (normalizedId && itemId === normalizedId)
-      || (normalizedSku && String(item.sku ?? "").trim() === normalizedSku)
-    ) {
-      return itemId;
-    }
+    if (normalizedId && itemId === normalizedId) return itemId;
   }
   return "";
 }
@@ -87,11 +99,13 @@ export function warehouseItemDeletionIssue(state: WarehouseState, itemId: string
   })) {
     return "товар числится в остатках поста";
   }
-  if (rows(state.docs).some((document) => referencesItem(document, itemId))) {
-    return "товар связан с документом";
+  if (rows(state.docs).some((document) =>
+    !isClosedDocument(document) && referencesItem(document, itemId))) {
+    return "товар связан с незавершённым документом";
   }
-  if (rows(state.extIssues).some((issue) => referencesItem(issue, itemId))) {
-    return "товар связан с выдачей";
+  if (rows(state.extIssues).some((issue) =>
+    !isClosedExternalIssue(issue) && referencesItem(issue, itemId))) {
+    return "товар связан с активной выдачей";
   }
   return null;
 }

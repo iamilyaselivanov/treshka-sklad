@@ -210,7 +210,20 @@ async function discardRequestBody(request: Request) {
   try {
     const reader = request.body?.getReader();
     if (!reader) return;
-    while (!(await reader.read()).done) {
+    const contentLength = Number(request.headers.get("content-length") ?? 0);
+    if (Number.isFinite(contentLength) && contentLength > 8_192) {
+      await reader.cancel("rejected request body exceeds drain limit");
+      return;
+    }
+    let drained = 0;
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      drained += chunk.value.byteLength;
+      if (drained >= 8_192) {
+        await reader.cancel("rejected request body drain limit reached");
+        break;
+      }
       // Drain rejected mutation bodies without retaining them in memory. This
       // lets the runtime reuse the connection instead of resetting the client.
     }

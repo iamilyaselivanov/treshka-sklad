@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import {
   PUSH_EVENT_TYPES,
+  normalizePostAssignment,
   pushActorAllowed,
   pushPresentation,
   pushRecipientQuery,
@@ -10,10 +11,13 @@ import {
 
 function recipientDevices(database, type, post = "ТЭЧ") {
   const query = pushRecipientQuery(type);
-  const rows = query.bindPost
-    ? database.prepare(query.sql).all(post)
-    : database.prepare(query.sql).all();
-  return rows.map((row) => row.deviceId).sort();
+  const rows = database.prepare(query.sql).all();
+  return rows
+    .filter((row) =>
+      !query.filterPost
+      || normalizePostAssignment(row.assignment) === normalizePostAssignment(post))
+    .map((row) => row.deviceId)
+    .sort();
 }
 
 function createRoutingDatabase() {
@@ -38,7 +42,7 @@ function createRoutingDatabase() {
     ["store-1", "storekeeper", "", "active"],
     ["store-post", "storekeeper", "ТЭЧ", "active"],
     ["worker-1", "worker", "ТЭЧ", "active"],
-    ["worker-2", "worker", "ТЭЧ", "active"],
+    ["worker-2", "worker", "  тЭч  ", "active"],
     ["worker-other", "worker", "Связь", "active"],
     ["worker-inactive", "worker", "ТЭЧ", "disabled"],
   ];

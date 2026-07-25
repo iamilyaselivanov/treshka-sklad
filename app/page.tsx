@@ -403,7 +403,8 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
     if (!window.confirm(`Удалить карточку «${product.name}»?`)) return;
     const response = await fetch(`/api/products?id=${encodeURIComponent(product.id)}`, { method: "DELETE" });
     if (!response.ok) {
-      notify("Не удалось удалить товар");
+      const data = (await response.json().catch(() => ({}))) as { error?: string };
+      notify(data.error || "Не удалось удалить товар");
       return;
     }
     setProducts((current) => current.filter((item) => item.id !== product.id));

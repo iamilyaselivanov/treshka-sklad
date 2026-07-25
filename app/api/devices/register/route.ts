@@ -36,21 +36,25 @@ export async function POST(request: Request) {
     env.DB.prepare("DELETE FROM push_devices WHERE last_seen_at < ?").bind(staleBefore),
     env.DB.prepare(
       `DELETE FROM push_devices
-       WHERE token = ? AND device_id <> ?
-         AND (
-           user_id = ?
-           OR (SELECT COUNT(*) FROM push_devices WHERE user_id = ?) < ?
-         )`,
-    ).bind(token, deviceId, auth.user.id, auth.user.id, MAX_DEVICES_PER_USER),
+       WHERE token = ? AND device_id <> ?`,
+    ).bind(token, deviceId),
+    env.DB.prepare(
+      `DELETE FROM push_devices
+       WHERE id = (
+         SELECT id FROM push_devices
+         WHERE user_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM push_devices WHERE device_id = ? AND user_id = ?
+           )
+           AND (SELECT COUNT(*) FROM push_devices WHERE user_id = ?) >= ?
+         ORDER BY last_seen_at ASC, created_at ASC, id ASC
+         LIMIT 1
+       )`,
+    ).bind(auth.user.id, deviceId, auth.user.id, auth.user.id, MAX_DEVICES_PER_USER),
     env.DB.prepare(
       `INSERT INTO push_devices
          (id, user_id, device_id, token, platform, app_version, created_at, updated_at, last_seen_at)
-       SELECT ?, ?, ?, ?, 'android', ?, ?, ?, ?
-       WHERE EXISTS (
-         SELECT 1 FROM push_devices WHERE device_id = ? AND user_id = ?
-       ) OR (
-         SELECT COUNT(*) FROM push_devices WHERE user_id = ?
-       ) < ?
+       VALUES (?, ?, ?, ?, 'android', ?, ?, ?, ?)
        ON CONFLICT(device_id) DO UPDATE SET
          user_id = excluded.user_id,
          token = excluded.token,
@@ -67,22 +71,13 @@ export async function POST(request: Request) {
       now,
       now,
       now,
-      deviceId,
-      auth.user.id,
-      auth.user.id,
-      MAX_DEVICES_PER_USER,
     ),
   ]);
-  if (Number(results[2].meta?.changes ?? 0) !== 1) {
-    return Response.json(
-      { error: `К аккаунту уже привязано максимум устройств: ${MAX_DEVICES_PER_USER}` },
-      { status: 429 },
-    );
-  }
+  const evictedOldest = Number(results[2].meta?.changes ?? 0) === 1;
   if (!existing || existing.userId !== auth.user.id || existing.token !== token) {
     await audit(auth.user, "push_device_registered", `${platform} · ${deviceId.slice(0, 8)}`);
   }
-  return Response.json({ ok: true, pushConfigured: isFirebasePushConfigured() });
+  return Response.json({ ok: true, pushConfigured: isFirebasePushConfigured(), evictedOldest });
 }
 
 export async function DELETE(request: Request) {

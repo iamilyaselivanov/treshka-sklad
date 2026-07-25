@@ -4515,8 +4515,15 @@ function submitEditItem(id){
 function deleteItem(id){
   if(!canDeleteCatalogItem()){ toast('🔒 Удалять карточки товара может только владелец или администратор'); return false; }
   const i=item(id); if(!i) return false;
-  const used=i.stock>0 || i.ext>0 || Object.values(i.posts||{}).some(q=>q>0) || docs.some(d=>d.itemId===id || (d.materials||[]).some(m=>m.id===id));
-  if(used){ toast('Нельзя удалить: по товару есть остатки, выдачи или документы'); return false; }
+  const referencesItem=entry=>entry&&(entry.itemId===id||entry.id===id||(entry.materials||[]).some(m=>m.id===id)||(entry.items||[]).some(m=>m.id===id));
+  const closedDoc=d=>['закрыт','закрыто','завершён','завершен','выполнен'].includes(String(d?.status||'').trim().toLowerCase());
+  const closedIssue=e=>['возвращено','закрыт','закрыто'].includes(String(e?.status||'').trim().toLowerCase());
+  const hasLots=(i.lots||[]).some(l=>Number(l.qty||l.q||0)>0);
+  const hasPostStock=posts.some(p=>(p.stock||[]).some(s=>s.id===id&&Number(s.q||s.qty||0)>0));
+  const hasActiveDoc=docs.some(d=>!closedDoc(d)&&referencesItem(d));
+  const hasActiveIssue=extIssues.some(e=>!closedIssue(e)&&referencesItem(e));
+  const used=i.stock>0||i.ext>0||Object.values(i.posts||{}).some(q=>q>0)||hasLots||hasPostStock||hasActiveDoc||hasActiveIssue;
+  if(used){ toast('Нельзя удалить: есть остаток, партия, активная выдача или незавершённый документ'); return false; }
   if(i.photoMedia?.key && window.treshkaServerSync?.queueMediaDelete){
     window.treshkaServerSync.queueMediaDelete(i.photoMedia.key);
   }
@@ -4823,9 +4830,12 @@ function commitIssue(mode){
   const names=[];
   const transferLines=[];
   const ok=runStockTransaction(mode==='post'?'Выдача на пост':'Возврат на склад',()=>{
+    const changed=ids.find(id=>{const i=item(id),q=issueSelected[id],avail=mode==='post'?i?.stock:(i?.posts?.[issueDest]||0);return !i||q<=0||q>avail;});
+    if(changed)throw new Error('Остаток изменился до завершения операции');
     ids.forEach(id=>{
       const i=item(id); const q=issueSelected[id];
-      if(mode==='post') transferToPost(i, issueDest, q); else transferToSklad(i, issueDest, q);
+      const moved=mode==='post'?transferToPost(i, issueDest, q):transferToSklad(i, issueDest, q);
+      if(moved!==q)throw new Error('Остаток изменился до завершения операции');
       transferLines.push({id,q});
       names.push(`${i.name} (${q} ${i.unit})`);
     });

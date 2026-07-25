@@ -101,8 +101,8 @@ async function requestFirebaseAccessToken(config: FirebaseConfig) {
   return data.access_token;
 }
 
-async function firebaseAccessToken(config: FirebaseConfig) {
-  if (cachedAccessToken && cachedAccessToken.expiresAt > Date.now() + 60_000) {
+async function firebaseAccessToken(config: FirebaseConfig, forceRefresh = false) {
+  if (!forceRefresh && cachedAccessToken && cachedAccessToken.expiresAt > Date.now() + 60_000) {
     return cachedAccessToken.value;
   }
   if (pendingAccessToken) return pendingAccessToken;
@@ -131,45 +131,63 @@ export function isFirebasePushConfigured() {
   return firebaseConfig() !== null;
 }
 
+async function firebaseMessageRequest(
+  config: FirebaseConfig,
+  token: string,
+  message: PushMessage,
+  forceRefresh = false,
+) {
+  const accessToken = await firebaseAccessToken(config, forceRefresh);
+  return fetch(
+    `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(config.projectId)}/messages:send`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+      },
+      signal: AbortSignal.timeout(10_000),
+      body: JSON.stringify({
+        message: {
+          token,
+          notification: { title: message.title, body: message.body },
+          data: {
+            title: message.title,
+            body: message.body,
+            eventId: message.eventId,
+            eventType: message.eventType,
+            post: message.post,
+            entityNo: message.entityNo,
+          },
+          android: {
+            priority: "HIGH",
+            notification: {
+              channel_id: "treshka_sklad_events",
+              sound: "default",
+            },
+          },
+        },
+      }),
+    },
+  );
+}
+
 export async function sendDevicePush(token: string, message: PushMessage): Promise<PushSendResult> {
   const config = firebaseConfig();
   if (!config) {
     return { status: "disabled", error: "Firebase-секреты сервера не настроены" };
   }
   try {
-    const accessToken = await firebaseAccessToken(config);
-    const response = await fetch(
-      `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(config.projectId)}/messages:send`,
-      {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${accessToken}`,
-          "content-type": "application/json",
-        },
-        signal: AbortSignal.timeout(10_000),
-        body: JSON.stringify({
-          message: {
-            token,
-            notification: { title: message.title, body: message.body },
-            data: {
-              title: message.title,
-              body: message.body,
-              eventId: message.eventId,
-              eventType: message.eventType,
-              post: message.post,
-              entityNo: message.entityNo,
-            },
-            android: {
-              priority: "HIGH",
-              notification: {
-                channel_id: "treshka_sklad_events",
-                sound: "default",
-              },
-            },
-          },
-        }),
-      },
-    );
+    let response = await firebaseMessageRequest(config, token, message);
+    if (response.status === 401) {
+      await response.body?.cancel();
+      cachedAccessToken = null;
+      response = await firebaseMessageRequest(config, token, message, true);
+    } else if (response.status === 429 || response.status >= 500) {
+      await response.body?.cancel();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      response = await firebaseMessageRequest(config, token, message);
+    }
     const data = await response.json() as { name?: string } | unknown;
     if (response.ok && typeof data === "object" && data && "name" in data) {
       return { status: "sent", providerMessageId: String(data.name ?? "") };
@@ -177,7 +195,9 @@ export async function sendDevicePush(token: string, message: PushMessage): Promi
     const error = firebaseErrorText(data);
     const unregisterToken = response.status === 404
       || error.includes("UNREGISTERED")
-      || error.includes("registration token is not a valid FCM");
+      || error.includes("registration token is not a valid FCM")
+      || error.includes("SENDER_ID_MISMATCH")
+      || error.toLocaleLowerCase("en-US").includes("sender id does not match");
     return { status: "failed", error, unregisterToken };
   } catch (cause) {
     return {

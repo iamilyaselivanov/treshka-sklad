@@ -70,9 +70,19 @@ test("server deletion policy rejects document and external-issue references", ()
   assert.equal(warehouseDeletionPolicy(issueState, state(), "owner")?.status, 409);
 });
 
-test("product endpoint can locate the shared-state card by immutable id or SKU", () => {
+test("closed documents and returned external issues preserve history without locking the card forever", () => {
+  const historical = state({
+    items: [unusedItem],
+    docs: [{ no: "АВР-OLD", status: "Закрыт", itemId: unusedItem.id }],
+    extIssues: [{ no: "ВН-OLD", status: "Возвращено", items: [{ id: unusedItem.id, q: 1 }] }],
+  });
+  assert.equal(warehouseItemDeletionIssue(historical, unusedItem.id), null);
+  assert.equal(warehouseDeletionPolicy(historical, state(), "admin"), null);
+});
+
+test("product endpoint matches shared-state cards only by immutable id", () => {
   const snapshot = state({ items: [unusedItem] });
   assert.equal(findWarehouseItemId(snapshot, unusedItem.id), unusedItem.id);
-  assert.equal(findWarehouseItemId(snapshot, "different-id", unusedItem.sku), unusedItem.id);
-  assert.equal(findWarehouseItemId(snapshot, "missing", "missing"), "");
+  assert.equal(findWarehouseItemId(snapshot, "different-id"), "");
+  assert.equal(findWarehouseItemId(snapshot, "missing"), "");
 });

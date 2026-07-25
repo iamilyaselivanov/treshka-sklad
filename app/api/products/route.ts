@@ -1,7 +1,11 @@
 import { env } from "cloudflare:workers";
 import { audit, requireUser } from "@/lib/auth";
 import { readJsonObject } from "@/lib/http";
-import { findWarehouseItemId, warehouseItemDeletionIssue } from "@/lib/warehouse-state";
+import {
+  findWarehouseItemId,
+  warehouseItemDeletionIssue,
+  warehouseItemIds,
+} from "@/lib/warehouse-state";
 import type { WarehouseState } from "@/lib/warehouse-state";
 
 export const dynamic = "force-dynamic";
@@ -101,8 +105,8 @@ export async function DELETE(request: Request) {
     );
   }
   const stateRow = await env.DB.prepare(
-    "SELECT payload FROM warehouse_full_state WHERE state_key = 'main'",
-  ).first<{ payload: string }>();
+    "SELECT revision, payload FROM warehouse_full_state WHERE state_key = 'main'",
+  ).first<{ revision: number; payload: string }>();
   if (stateRow) {
     let state: WarehouseState | null = null;
     try {
@@ -122,17 +126,52 @@ export async function DELETE(request: Request) {
         { status: 500 },
       );
     }
-    const warehouseItemId = findWarehouseItemId(state, id, existing.sku);
+    const warehouseItemId = findWarehouseItemId(state, id);
     if (warehouseItemId) {
       const issue = warehouseItemDeletionIssue(state, warehouseItemId);
-      return Response.json(
-        {
-          error: issue
-            ? `Нельзя удалить карточку: ${issue}`
-            : "Карточка существует в основном складе. Удалите её через карточку товара",
-        },
-        { status: 409 },
-      );
+      if (issue) {
+        return Response.json(
+          { error: `Нельзя удалить карточку: ${issue}` },
+          { status: 409 },
+        );
+      }
+      const nextState = {
+        ...state,
+        items: (state.items as unknown[]).filter((value) =>
+          !value || typeof value !== "object" || Array.isArray(value)
+            || String((value as Record<string, unknown>).id ?? "").trim() !== warehouseItemId),
+      };
+      const nextPayload = JSON.stringify(nextState);
+      const itemIds = JSON.stringify([...warehouseItemIds(nextState)].sort());
+      const updatedAt = new Date().toISOString();
+      const results = await env.DB.batch([
+        env.DB.prepare(
+          `UPDATE warehouse_full_state
+           SET revision = ?, payload = ?, item_ids = ?, updated_at = ?, updated_by = ?
+           WHERE state_key = 'main' AND revision = ?`,
+        ).bind(
+          stateRow.revision + 1,
+          nextPayload,
+          itemIds,
+          updatedAt,
+          auth.user.callsign,
+          stateRow.revision,
+        ),
+        env.DB.prepare(
+          "DELETE FROM products WHERE id = ? AND changes() = 1",
+        ).bind(id),
+      ]);
+      if (
+        Number(results[0].meta?.changes ?? 0) !== 1
+        || Number(results[1].meta?.changes ?? 0) !== 1
+      ) {
+        return Response.json(
+          { error: "Склад изменён другим пользователем. Обновите данные и повторите", conflict: true },
+          { status: 409 },
+        );
+      }
+      await audit(auth.user, "product_deleted", `${existing.name} · ${existing.sku}`);
+      return Response.json({ ok: true, revision: stateRow.revision + 1 });
     }
   }
   await env.DB.prepare("DELETE FROM products WHERE id = ?").bind(id).run();

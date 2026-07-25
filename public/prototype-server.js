@@ -22,11 +22,12 @@
     flushing: false,
     queue: [],
     retryTimer: null,
-    retryFailures: 0,
+    retryAt: 0,
     registrationFailures: 0,
     nextRegistrationAt: 0,
   };
   const PUSH_QUEUE_KEY = "treshka_push_events_v1";
+  const MAX_PUSH_QUEUE = 500;
 
   async function fetchWithTimeout(input, init = {}, timeoutMs = 15_000) {
     const controller = new AbortController();
@@ -90,7 +91,7 @@
 
   function savePushQueue() {
     try {
-      localStorage.setItem(PUSH_QUEUE_KEY, JSON.stringify(push.queue.slice(-100)));
+      localStorage.setItem(PUSH_QUEUE_KEY, JSON.stringify(push.queue.slice(-MAX_PUSH_QUEUE)));
     } catch (error) {
       console.warn("push queue was not persisted", error);
     }
@@ -100,35 +101,50 @@
     try {
       const parsed = JSON.parse(localStorage.getItem(PUSH_QUEUE_KEY) || "[]");
       push.queue = Array.isArray(parsed)
-        ? parsed.filter((entry) => entry && entry.actorUserId === sync.user?.id).slice(-100)
+        ? parsed.filter((entry) => entry && entry.actorUserId && entry.payload).slice(-MAX_PUSH_QUEUE)
         : [];
     } catch {
       push.queue = [];
     }
-    savePushQueue();
   }
 
-  function schedulePushRetry() {
-    if (push.retryTimer) return;
-    push.retryFailures += 1;
-    const delay = Math.min(5 * 60_000, 5_000 * (2 ** Math.min(6, push.retryFailures - 1)));
+  function schedulePushRetry(delay) {
+    if (!Number.isFinite(delay)) return;
+    const retryAt = Date.now() + Math.max(250, delay);
+    if (push.retryTimer && push.retryAt <= retryAt) return;
+    if (push.retryTimer) window.clearTimeout(push.retryTimer);
+    push.retryAt = retryAt;
     push.retryTimer = window.setTimeout(() => {
       push.retryTimer = null;
+      push.retryAt = 0;
       void flushPushQueue();
-    }, delay);
+    }, Math.max(250, retryAt - Date.now()));
+  }
+
+  function nextPushIndex() {
+    if (!sync.user) return -1;
+    const now = Date.now();
+    return push.queue.findIndex((entry) =>
+      entry.actorUserId === sync.user.id && Number(entry.nextAttemptAt || 0) <= now);
+  }
+
+  function scheduleNextQueuedPush() {
+    if (!sync.user) return;
+    const next = push.queue
+      .filter((entry) => entry.actorUserId === sync.user.id)
+      .map((entry) => Number(entry.nextAttemptAt || 0))
+      .sort((left, right) => left - right)[0];
+    if (Number.isFinite(next)) schedulePushRetry(Math.max(250, next - Date.now()));
   }
 
   async function flushPushQueue() {
     if (!sync.user || push.flushing || !push.queue.length) return;
     push.flushing = true;
     try {
-      while (push.queue.length) {
-        const event = push.queue[0];
-        if (event.actorUserId !== sync.user.id) {
-          push.queue.shift();
-          savePushQueue();
-          continue;
-        }
+      while (true) {
+        const eventIndex = nextPushIndex();
+        if (eventIndex < 0) break;
+        const event = push.queue[eventIndex];
         const response = await fetchWithTimeout("/api/notifications/events", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -138,21 +154,28 @@
         if (!response.ok) {
           if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) {
             console.warn("push event rejected", data.error || response.status);
-            push.queue.shift();
+            push.queue.splice(eventIndex, 1);
             savePushQueue();
             continue;
           }
-          throw new Error(data.error || "Событие push не отправлено");
+          event.attempts = Number(event.attempts || 0) + 1;
+          const delay = Math.min(5 * 60_000, 5_000 * (2 ** Math.min(6, event.attempts - 1)));
+          event.nextAttemptAt = Date.now() + delay;
+          push.queue.splice(eventIndex, 1);
+          push.queue.push(event);
+          savePushQueue();
+          console.warn("push event delivery deferred", data.error || response.status);
+          continue;
         }
-        push.queue.shift();
+        push.queue.splice(eventIndex, 1);
         savePushQueue();
       }
-      push.retryFailures = 0;
     } catch (error) {
       console.warn("push event delivery deferred", error);
-      schedulePushRetry();
+      schedulePushRetry(5_000);
     } finally {
       push.flushing = false;
+      scheduleNextQueuedPush();
     }
   }
 
@@ -166,7 +189,7 @@
       entityNo: String(details.entityNo || ""),
       summary: String(details.summary || ""),
     };
-    push.queue.push({ actorUserId: sync.user.id, payload });
+    push.queue.push({ actorUserId: sync.user.id, payload, attempts: 0, nextAttemptAt: 0 });
     savePushQueue();
     void flushPushQueue();
     return payload.eventId;
@@ -411,6 +434,16 @@
         announceConflict(await fetchSnapshot());
         return false;
       }
+      if (
+        response.status >= 400 && response.status < 500
+        && response.status !== 408 && response.status !== 429
+      ) {
+        const snapshot = await fetchSnapshot();
+        applyRemoteSnapshot(snapshot, false);
+        sync.lastError = data.error || "Сервер отклонил изменение";
+        toast("⚠ " + sync.lastError + ". Локальное изменение отменено.");
+        return false;
+      }
       if (!response.ok) throw new Error(data.error || "Ошибка сохранения");
       sync.revision = data.revision;
       sync.lastUploaded = payload;
@@ -465,7 +498,7 @@
     // Re-read the native token even after a successful registration: FCM can
     // rotate it while the app is open.
     void registerNativePush();
-    if (push.queue.length) void flushPushQueue();
+    if (push.queue.some((entry) => entry.actorUserId === sync.user?.id)) void flushPushQueue();
     if (!canUploadState()) {
       await pollServer();
       return;
