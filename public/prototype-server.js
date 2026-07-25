@@ -265,14 +265,34 @@
   async function resolveConflict(strategy) {
     if (!sync.conflict || !sync.pendingRemote) return;
     const snapshot = sync.pendingRemote;
-    sync.conflict = false;
-    sync.pendingRemote = null;
-    sync.revision = Number(snapshot.revision || 0);
     if (strategy === "server") {
+      // Снимок применяется ДО снятия флага конфликта. Раньше состояние
+      // сбрасывалось первым, а applyRemoteSnapshot мог бросить исключение на
+      // несовместимых данных: конфликт при этом уже считался разрешённым,
+      // баннер исчезал, а sync.revision уже равнялся серверной ревизии — и
+      // следующий же тик синхронизации отправлял ЛОКАЛЬНОЕ состояние с
+      // expectedRevision = серверной. Сервер его принимал, и выбранная
+      // пользователем серверная версия молча затиралась.
+      const previousRevision = sync.revision;
+      try {
+        applyRemoteSnapshot(snapshot, false);
+      } catch (error) {
+        console.error("conflict resolution (server) failed", error);
+        sync.revision = previousRevision;
+        sync.lastError = error.message || "Не удалось применить серверную версию";
+        toast("⚠ Не удалось применить серверную версию. Конфликт не разрешён.");
+        return;
+      }
+      // Удаления медиа отменяются только после успешного применения: иначе при
+      // ошибке ключи терялись, а объекты в R2 оставались навсегда.
       sync.pendingMediaDeletes.clear();
-      applyRemoteSnapshot(snapshot, false);
+      sync.conflict = false;
+      sync.pendingRemote = null;
       toast("✓ Загружена серверная версия");
     } else {
+      sync.conflict = false;
+      sync.pendingRemote = null;
+      sync.revision = Number(snapshot.revision || 0);
       sync.lastUploaded = "";
       toast("Сохраняем ваши изменения поверх новой ревизии…");
       await uploadIfChanged();
@@ -315,7 +335,13 @@
   window.addEventListener("message", (event) => {
     if (event.origin !== location.origin || event.data?.type !== "treshka-sync-resolve") return;
     if (event.data.strategy === "server" || event.data.strategy === "local") {
-      void resolveConflict(event.data.strategy);
+      // Без catch отказ разрешения конфликта уходил в unhandled rejection:
+      // пользователь видел только застывший баннер без причины.
+      resolveConflict(event.data.strategy).catch((error) => {
+        console.error("conflict resolution failed", error);
+        sync.lastError = error.message || "Не удалось разрешить конфликт";
+        toast("⚠ Не удалось разрешить конфликт. Попробуйте ещё раз.");
+      });
     }
   });
 

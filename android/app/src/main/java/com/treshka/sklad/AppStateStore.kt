@@ -35,9 +35,17 @@ class AppStateStore(context: Context) :
     companion object {
         private const val TAG = "AppStateStore"
         private const val DB_NAME = "sklad_state.db"
-        private const val DB_VERSION = 2
+        private const val DB_VERSION = 3
         private const val STATE_TABLE = "app_state"
         private const val ROW_ID = 1L
+
+        /**
+         * Сколько конфликтных снимков хранить. Каждая строка outbox — ПОЛНЫЙ
+         * снимок состояния, поэтому более старые конфликтные записи полностью
+         * перекрываются более новыми и нужны только для разбора инцидента.
+         * Без этого лимита таблица росла бы неограниченно.
+         */
+        private const val CONFLICT_HISTORY_LIMIT = 20
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -59,6 +67,21 @@ class AppStateStore(context: Context) :
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createSyncTables(db)
+        if (oldVersion < 3) addConflictColumn(db)
+    }
+
+    /**
+     * v3 добавляет пометку конфликта. ALTER TABLE обёрнут в try/catch, потому что
+     * на устройствах, где sync_outbox создавалась уже новым CREATE TABLE (свежая
+     * установка с промежуточной версией), колонка уже существует и SQLite
+     * ответит "duplicate column name". Это не ошибка обновления.
+     */
+    private fun addConflictColumn(db: SQLiteDatabase) {
+        try {
+            db.execSQL("ALTER TABLE sync_outbox ADD COLUMN conflict INTEGER NOT NULL DEFAULT 0")
+        } catch (e: Exception) {
+            Log.i(TAG, "sync_outbox.conflict already present", e)
+        }
     }
 
     private fun createSyncTables(db: SQLiteDatabase) {
@@ -70,7 +93,8 @@ class AppStateStore(context: Context) :
                 schema_version INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
-                last_error TEXT
+                last_error TEXT,
+                conflict INTEGER NOT NULL DEFAULT 0
             )
             """.trimIndent()
         )
@@ -260,11 +284,12 @@ class AppStateStore(context: Context) :
         if (!c.moveToFirst()) null else SyncConfig(c.getString(0), c.getString(1), c.getString(2), c.getLong(3))
     }
 
+    /** Конфликтные снимки к отправке не предлагаются: повтор даст тот же 409. */
     @Synchronized
     fun nextPending(): PendingSnapshot? = readableDatabase.query(
         "sync_outbox",
         arrayOf("mutation_id", "payload", "schema_version"),
-        null,
+        "conflict = 0",
         null,
         null,
         null,
@@ -278,9 +303,77 @@ class AppStateStore(context: Context) :
     fun pendingCount(): Int = pendingCount(readableDatabase)
 
     private fun pendingCount(db: SQLiteDatabase): Int = db.rawQuery(
-        "SELECT COUNT(*) FROM sync_outbox",
+        "SELECT COUNT(*) FROM sync_outbox WHERE conflict = 0",
         null,
     ).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+
+    /** Число неразрешённых конфликтов — выносится в UI, см. syncStatusJson(). */
+    @Synchronized
+    fun conflictCount(): Int = readableDatabase.rawQuery(
+        "SELECT COUNT(*) FROM sync_outbox WHERE conflict = 1",
+        null,
+    ).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+
+    /**
+     * Сервер ответил 409 на снимок [mutationId]. Раньше запись просто оставалась
+     * в очереди: следующий цикл брал её же, снова получал 409, очередь никогда не
+     * пустела, а pull был закрыт условием pendingCount() == 0 — устройство
+     * навсегда застревало на устаревших остатках и долбило /v1/sync/push.
+     *
+     * Теперь конфликтными помечаются ВСЕ накопленные снимки: они построены от той
+     * же устаревшей baseRevision, поэтому каждый из них получил бы тот же 409.
+     * Ничего не удаляется — payload остаётся целиком и восстанавливается через
+     * разрешение конфликта. Очередь активных записей пустеет, значит pull снова
+     * работает и устройство видит актуальные данные.
+     */
+    @Synchronized
+    fun markQueueConflicted(mutationId: String, error: String) {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.execSQL(
+                "UPDATE sync_outbox SET attempts = attempts + 1 WHERE mutation_id = ?",
+                arrayOf(mutationId),
+            )
+            db.execSQL(
+                "UPDATE sync_outbox SET conflict = 1, last_error = ? WHERE conflict = 0",
+                arrayOf(error.take(1000)),
+            )
+            db.execSQL("UPDATE sync_config SET last_error = ? WHERE id = 1", arrayOf(error.take(1000)))
+            // Каждая строка — полный снимок, поэтому старые конфликты полностью
+            // перекрыты новыми и хранятся только для разбора.
+            db.execSQL(
+                """
+                DELETE FROM sync_outbox WHERE conflict = 1 AND mutation_id NOT IN (
+                    SELECT mutation_id FROM sync_outbox WHERE conflict = 1
+                    ORDER BY created_at DESC LIMIT $CONFLICT_HISTORY_LIMIT
+                )
+                """.trimIndent()
+            )
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /**
+     * Конфликт разрешён на сервере. Серверная сторона хранит присланный снимок и
+     * применяет выбранное решение сама, поэтому локальная копия в очереди —
+     * дубликат: и при "local", и при "server" актуальное состояние приедет
+     * ближайшим pull-ом. Вызывать ТОЛЬКО после успешного ответа сервера.
+     */
+    @Synchronized
+    fun dropConflicted() {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("sync_outbox", "conflict = 1", null)
+            db.execSQL("UPDATE sync_config SET last_error = NULL WHERE id = 1")
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
 
     @Synchronized
     fun markMutationApplied(mutationId: String, revision: Long) {
@@ -319,6 +412,10 @@ class AppStateStore(context: Context) :
             put("deviceId", cfg?.deviceId ?: "")
             put("serverRevision", cfg?.serverRevision ?: 0)
             put("pending", pendingCount())
+            // Конфликты выводятся отдельно: pull теперь идёт и при непустой
+            // конфликтной очереди, поэтому пользователь обязан видеть, что часть
+            // его правок ждёт решения, а не считать экран актуальным.
+            put("conflicts", conflictCount())
             readableDatabase.query(
                 "sync_config",
                 arrayOf("last_sync_at", "last_error"),

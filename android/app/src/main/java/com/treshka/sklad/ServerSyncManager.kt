@@ -53,6 +53,10 @@ class ServerSyncManager(
         val body = JSONObject().put("decision", decision).toString()
         val response = requestJson("${config.baseUrl}/v1/sync/conflicts/$id/resolve", "POST", config.authToken, body)
         if (response.code !in 200..299) throw IllegalStateException("HTTP ${response.code}: ${response.body.take(300)}")
+        // Только после подтверждения сервера снимаем локальную блокировку: иначе
+        // конфликтные записи остались бы в очереди навсегда и решение через UI
+        // не разрывало цикл — следующий push давал тот же 409.
+        store.dropConflicted()
         syncNow()
         return response.body
     }
@@ -130,8 +134,14 @@ class ServerSyncManager(
                 request.toString(),
             )
             if (response.code == 409) {
-                store.markSyncError(pending.mutationId, "Конфликт версий: локальные данные сохранены в очереди и не перезаписаны")
-                return
+                // break, а не return: конфликтные снимки выведены из активной
+                // очереди, поэтому ниже обязательно выполняется pull. Без него
+                // устройство навсегда оставалось на устаревшем снимке.
+                store.markQueueConflicted(
+                    pending.mutationId,
+                    "Конфликт версий: локальные правки сохранены и ждут решения, данные не потеряны",
+                )
+                break
             }
             if (response.code !in 200..299) {
                 store.markSyncError(pending.mutationId, "HTTP ${response.code}: ${response.body.take(300)}")
@@ -142,8 +152,11 @@ class ServerSyncManager(
             config = store.getSyncConfig() ?: return
         }
 
-        // Серверный снимок применяется только при пустом outbox. Поэтому
-        // несинхронизированные локальные изменения никогда не затираются pull-ом.
+        // Серверный снимок применяется только при пустой АКТИВНОЙ очереди, то есть
+        // когда неотправленных неконфликтных изменений не осталось. Конфликтные
+        // снимки счёт не блокируют: их payload целиком сохранён в sync_outbox и
+        // восстанавливается при разрешении конфликта, а держать из-за них pull
+        // закрытым значило бы бесконечно показывать устаревшие остатки.
         if (store.pendingCount() == 0) {
             config = store.getSyncConfig() ?: return
             val response = requestJson(

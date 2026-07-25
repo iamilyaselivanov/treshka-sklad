@@ -1,35 +1,52 @@
 import { env } from "cloudflare:workers";
-import { audit, clientThrottleKey, createSession, ensureAuthSchema, hashPassword, secureEqual } from "@/lib/auth";
+import {
+  addressThrottleKey,
+  audit,
+  createSession,
+  ensureAuthSchema,
+  hashPassword,
+  registerThrottleFailure,
+  secureEqual,
+  sweepThrottleTableOccasionally,
+} from "@/lib/auth";
+
+const BLOCK_MINUTES = 30;
 
 export async function POST(request: Request) {
   await ensureAuthSchema();
   const runtimeEnv = env as typeof env & { OWNER_RECOVERY_CODE?: string };
-  const body = (await request.json()) as Record<string, unknown>;
+  let body: Record<string, unknown>;
+  try {
+    body = (await request.json()) as Record<string, unknown>;
+  } catch {
+    return Response.json({ error: "Некорректный JSON" }, { status: 400 });
+  }
   const loginInput = String(body.login ?? "").trim();
   const login = loginInput.toLocaleLowerCase("ru");
   const callsign = String(body.callsign ?? "").trim() || loginInput;
   const recoveryCode = String(body.recoveryCode ?? "");
   const password = String(body.password ?? "");
-  const throttleKey = clientThrottleKey(request, "recovery", login);
+  // Ключ НЕ содержит присланный логин: логин здесь не участвует в проверке
+  // доступа (сравнивается только OWNER_RECOVERY_CODE), поэтому, подставляя
+  // каждый раз новый логин, перебор кода уходил в новую строку
+  // login_throttle со счётчиком 1 и блокировка не наступала никогда.
+  const throttleKey = addressThrottleKey(request, "recovery");
   const now = new Date();
   const throttle = await env.DB.prepare(
-    "SELECT failures, blocked_until FROM login_throttle WHERE login = ?",
-  ).bind(throttleKey).first<{ failures: number; blocked_until: string | null }>();
+    "SELECT blocked_until FROM login_throttle WHERE login = ?",
+  ).bind(throttleKey).first<{ blocked_until: string | null }>();
   if (throttle?.blocked_until && throttle.blocked_until > now.toISOString()) {
-    return Response.json({ error: "Слишком много попыток. Повторите через 30 минут" }, { status: 429 });
+    return Response.json(
+      { error: `Слишком много попыток. Повторите через ${BLOCK_MINUTES} минут` },
+      { status: 429 },
+    );
   }
   if (login.length < 3 || login.length > 120) return Response.json({ error: "Логин должен содержать от 3 до 120 символов" }, { status: 400 });
   if (callsign.length < 2 || callsign.length > 80) return Response.json({ error: "Позывной должен содержать от 2 до 80 символов" }, { status: 400 });
   if (password.length < 8 || password.length > 256) return Response.json({ error: "Пароль должен содержать от 8 до 256 символов" }, { status: 400 });
   if (!runtimeEnv.OWNER_RECOVERY_CODE || !(await secureEqual(recoveryCode, runtimeEnv.OWNER_RECOVERY_CODE))) {
-    const failures = Number(throttle?.failures ?? 0) + 1;
-    const blockedUntil = failures >= 5 ? new Date(now.getTime() + 30 * 60 * 1000).toISOString() : null;
-    await env.DB.prepare(
-      `INSERT INTO login_throttle (login, failures, blocked_until, last_attempt_at)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(login) DO UPDATE SET failures = excluded.failures,
-       blocked_until = excluded.blocked_until, last_attempt_at = excluded.last_attempt_at`,
-    ).bind(throttleKey, failures >= 5 ? 0 : failures, blockedUntil, now.toISOString()).run();
+    await registerThrottleFailure(throttleKey, now, BLOCK_MINUTES);
+    await sweepThrottleTableOccasionally(now);
     await new Promise((resolve) => setTimeout(resolve, 500));
     return Response.json({ error: "Неверный код аварийного восстановления" }, { status: 403 });
   }

@@ -460,7 +460,16 @@ class MainActivity : AppCompatActivity() {
                 val printManager = getSystemService(PRINT_SERVICE) as PrintManager
                 val adapter = view.createPrintDocumentAdapter(jobName)
                 // CSS задаёт внутренние поля документа, поэтому нативные поля
-                // всегда нулевые: иначе Android добавлял их второй раз. Для
+                // всегда нулевые: иначе Android добавлял их второй раз.
+                //
+                // Поля бланка (3 см слева / 1,5 справа / 2 сверху / 2 снизу,
+                // как в w:pgMar соответствующего .docx) НЕ потеряны при переходе
+                // на эту ветку: их задаёт PRINT_DOC_STYLE в prototype.html —
+                // `@page{size:A4; margin:2cm 1.5cm 2cm 3cm}`. Геометрия
+                // совпадает с прежним cmToMils()/setMinMargins() до миллиметра,
+                // а сам хелпер стал не нужен. Возвращать setMinMargins() поверх
+                // CSS нельзя: поля сложатся и текст уедет на 4 см от края.
+                // Для
                 // этикетки задаём реальный носитель 60×40 мм (размеры в mils),
                 // чтобы драйвер принтера не подменял его A4/Letter.
                 val attributes = if (pageFormat == "label") {

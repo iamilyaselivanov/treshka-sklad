@@ -1,5 +1,16 @@
 import { env } from "cloudflare:workers";
-import { audit, clientThrottleKey, createSession, ensureAuthSchema, hashPassword, secureEqual } from "@/lib/auth";
+import {
+  audit,
+  clientThrottleKey,
+  createSession,
+  ensureAuthSchema,
+  hashPassword,
+  registerThrottleFailure,
+  secureEqual,
+  sweepThrottleTableOccasionally,
+} from "@/lib/auth";
+
+const BLOCK_MINUTES = 30;
 
 export async function POST(request: Request) {
   await ensureAuthSchema();
@@ -11,26 +22,28 @@ export async function POST(request: Request) {
     );
   }
 
-  const body = (await request.json()) as Record<string, unknown>;
+  let body: Record<string, unknown>;
+  try {
+    body = (await request.json()) as Record<string, unknown>;
+  } catch {
+    return Response.json({ error: "Некорректный JSON" }, { status: 400 });
+  }
   const runtimeEnv = env as typeof env & { INITIAL_SETUP_CODE?: string };
   const setupCode = String(body.setupCode ?? "");
   const throttleKey = clientThrottleKey(request, "setup");
   const now = new Date();
   const throttle = await env.DB.prepare(
-    "SELECT failures, blocked_until FROM login_throttle WHERE login = ?",
-  ).bind(throttleKey).first<{ failures: number; blocked_until: string | null }>();
+    "SELECT blocked_until FROM login_throttle WHERE login = ?",
+  ).bind(throttleKey).first<{ blocked_until: string | null }>();
   if (throttle?.blocked_until && throttle.blocked_until > now.toISOString()) {
-    return Response.json({ error: "Слишком много попыток. Повторите через 30 минут" }, { status: 429 });
+    return Response.json(
+      { error: `Слишком много попыток. Повторите через ${BLOCK_MINUTES} минут` },
+      { status: 429 },
+    );
   }
   if (!runtimeEnv.INITIAL_SETUP_CODE || !(await secureEqual(setupCode, runtimeEnv.INITIAL_SETUP_CODE))) {
-    const failures = Number(throttle?.failures ?? 0) + 1;
-    const blockedUntil = failures >= 5 ? new Date(now.getTime() + 30 * 60 * 1000).toISOString() : null;
-    await env.DB.prepare(
-      `INSERT INTO login_throttle (login, failures, blocked_until, last_attempt_at)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(login) DO UPDATE SET failures = excluded.failures,
-       blocked_until = excluded.blocked_until, last_attempt_at = excluded.last_attempt_at`,
-    ).bind(throttleKey, failures >= 5 ? 0 : failures, blockedUntil, now.toISOString()).run();
+    await registerThrottleFailure(throttleKey, now, BLOCK_MINUTES);
+    await sweepThrottleTableOccasionally(now);
     await new Promise((resolve) => setTimeout(resolve, 500));
     return Response.json({ error: "Неверный код первичной настройки" }, { status: 403 });
   }

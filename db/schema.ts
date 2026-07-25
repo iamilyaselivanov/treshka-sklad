@@ -14,7 +14,12 @@ export const products = sqliteTable(
     minimum: real("minimum").notNull().default(0),
     createdAt: text("created_at").notNull(),
   },
-  (table) => [index("products_name_idx").on(table.name)],
+  (table) => [
+    index("products_name_idx").on(table.name),
+    // Список товаров всегда сортируется по created_at DESC — без этого
+    // индекса каждый запрос делал полное сканирование с сортировкой.
+    index("products_created_idx").on(table.createdAt),
+  ],
 );
 
 export const users = sqliteTable(
@@ -60,6 +65,19 @@ export const auditLog = sqliteTable(
   },
   (table) => [index("audit_created_idx").on(table.createdAt)],
 );
+
+/**
+ * Общий снимок склада. Таблица создавалась только на лету в
+ * app/api/state/route.ts и не была описана ни здесь, ни в миграциях, поэтому
+ * любой `drizzle-kit push` считал её лишней и удалял вместе со всеми данными.
+ */
+export const warehouseFullState = sqliteTable("warehouse_full_state", {
+  stateKey: text("state_key").primaryKey(),
+  revision: integer("revision").notNull().default(0),
+  payload: text("payload").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  updatedBy: text("updated_by").notNull(),
+});
 
 export const loginThrottle = sqliteTable("login_throttle", {
   login: text("login").primaryKey(),

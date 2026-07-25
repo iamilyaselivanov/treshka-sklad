@@ -98,7 +98,12 @@ export async function GET(request: Request) {
 }
 
 export async function PUT(request: Request) {
-  const auth = await requireUser(request);
+  // Снимок склада перезаписывают только роли, которые ведут учёт.
+  // Роль "worker" состояние читает (GET выше), но записывать не может: без
+  // этой проверки любой авторизованный пользователь мог отправить пустые
+  // items/posts/docs и одной ревизией стереть весь склад — причём незаметно,
+  // так как audit() ниже пишется лишь на ревизии 1 и каждой 25-й.
+  const auth = await requireUser(request, ["owner", "admin", "storekeeper"]);
   if (auth.response || !auth.user) return auth.response;
   await ensureSchema();
   let body: { state?: unknown; expectedRevision?: unknown };

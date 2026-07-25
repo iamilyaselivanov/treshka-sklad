@@ -114,10 +114,29 @@ async function derive(password: string, salt: Uint8Array, iterations: number) {
   return new Uint8Array(bits);
 }
 
+/**
+ * Заглушка для выравнивания времени ответа на /api/auth/login.
+ *
+ * Проверка вида `!row || ... || !(await verifyPassword(...))` из-за короткого
+ * замыкания запускала дорогой PBKDF2 только для существующих активных логинов,
+ * поэтому по времени ответа можно было перечислить учётные записи, не упираясь
+ * в блокировку (она считается по паре логин+IP). Прогон против этого хеша
+ * стоит ровно столько же и всегда возвращает false — пароля, дающего такой
+ * дайджест, никто не знает.
+ */
+const DUMMY_PASSWORD_HASH =
+  "pbkdf2$100000$6N6UGlrt2JU4smfQqTxg-g$9jF8xbjZXmqq7F2cL1pg1jLM3X3dKAw-LDWAIHuZGug";
+
 export async function hashPassword(password: string) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const hash = await derive(password, salt, ITERATIONS);
   return `pbkdf2$${ITERATIONS}$${bytesToBase64(salt)}$${bytesToBase64(hash)}`;
+}
+
+/** Прогон PBKDF2 против заглушки — см. DUMMY_PASSWORD_HASH. Всегда false. */
+export async function burnPasswordVerification(password: string) {
+  await verifyPassword(password, DUMMY_PASSWORD_HASH);
+  return false;
 }
 
 export async function verifyPassword(password: string, encoded: string) {
@@ -241,4 +260,69 @@ export async function audit(user: SessionUser | null, action: string, details = 
 export function clientThrottleKey(request: Request, scope: string, login = "") {
   const address = (request.headers.get("cf-connecting-ip") ?? "unknown").trim().slice(0, 80);
   return `${scope}:${login.slice(0, 120)}:${address}`;
+}
+
+/**
+ * Ключ троттлинга, не зависящий от присланных пользователем полей.
+ *
+ * Для восстановления владельца и первичной настройки логин НЕ участвует в
+ * проверке доступа (там сравнивается только код), поэтому включать его в ключ
+ * нельзя: меняя логин на каждом запросе, атакующий каждый раз попадал в новую
+ * строку login_throttle со счётчиком 1 и блокировка не наступала никогда.
+ */
+export function addressThrottleKey(request: Request, scope: string) {
+  return clientThrottleKey(request, scope);
+}
+
+/**
+ * Атомарный инкремент счётчика неудачных попыток.
+ *
+ * Раньше значение считалось в JS из ранее прочитанной строки и записывалось
+ * как абсолютное (`failures = excluded.failures`). Пачка параллельных запросов
+ * читала одно и то же значение и записывала одну и ту же единицу, из-за чего
+ * лимит превращался в «5 попыток на последовательный раунд». Здесь счётчик
+ * увеличивается самой БД (`login_throttle.failures + 1`), поэтому конкурентные
+ * запросы складываются, а не затирают друг друга.
+ *
+ * Счётчик после блокировки не обнуляется — блокировки эскалируются:
+ * 5 попыток → base, 10 → ×2, 15 → ×3 и так далее (с потолком в 24 часа).
+ */
+export async function registerThrottleFailure(
+  throttleKey: string,
+  now: Date,
+  baseBlockMinutes: number,
+  attemptsBeforeBlock = 5,
+) {
+  const row = await env.DB.prepare(
+    `INSERT INTO login_throttle (login, failures, blocked_until, last_attempt_at)
+     VALUES (?, 1, NULL, ?)
+     ON CONFLICT(login) DO UPDATE SET
+       failures = login_throttle.failures + 1,
+       last_attempt_at = excluded.last_attempt_at
+     RETURNING failures`,
+  ).bind(throttleKey, now.toISOString()).first<{ failures: number }>();
+  const failures = Number(row?.failures ?? 1);
+  if (failures % attemptsBeforeBlock !== 0) return { failures, blockedUntil: null as string | null };
+  const steps = Math.floor(failures / attemptsBeforeBlock);
+  const minutes = Math.min(baseBlockMinutes * steps, 24 * 60);
+  const blockedUntil = new Date(now.getTime() + minutes * 60 * 1000).toISOString();
+  await env.DB.prepare(
+    "UPDATE login_throttle SET blocked_until = ? WHERE login = ?",
+  ).bind(blockedUntil, throttleKey).run();
+  return { failures, blockedUntil };
+}
+
+/**
+ * Чистка login_throttle. Раньше вызывалась только из createSession, то есть
+ * лишь при УСПЕШНОМ входе, поэтому поток неудачных попыток с произвольными
+ * логинами наращивал таблицу без ограничений и без единого шанса на уборку.
+ * Теперь вызывается и с неуспешных путей, вероятностно (1 из 50), чтобы не
+ * платить лишним запросом к D1 на каждой попытке.
+ */
+export async function sweepThrottleTableOccasionally(now: Date) {
+  if (Math.random() > 0.02) return;
+  const cutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  await env.DB.prepare(
+    "DELETE FROM login_throttle WHERE last_attempt_at < ? AND (blocked_until IS NULL OR blocked_until < ?)",
+  ).bind(cutoff, now.toISOString()).run().catch(() => undefined);
 }
