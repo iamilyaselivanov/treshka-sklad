@@ -46,39 +46,24 @@ class ServerSyncManager(
         return store.conflictedMutationsJson()
     }
 
-    fun resolveConflict(id: Long, decision: String): String {
+    fun resolveConflict(id: Long, decision: String, localExportConfirmed: Boolean): String {
         require(decision == "local" || decision == "server")
         val config = store.getSyncConfig() ?: error("Сервер не настроен")
         if (decision == "server") {
-            check(store.discardConflictedMutation(id)) { "Локальный конфликт не найден" }
-            if (store.pendingCount() == 0) {
-                store.pendingRemoteSnapshot()?.let { (payload, revision) ->
-                    onRemoteState(payload, revision)
-                    store.clearPendingRemoteSnapshot()
-                }
+            require(localExportConfirmed) {
+                "Сначала сохраните локальные изменения в файл. Серверная версия не применена"
+            }
+            val authoritative = loadAuthoritativeSnapshot(config)
+            when (store.acceptServerSnapshot(id)) {
+                ServerConflictResolutionResult.APPLIED ->
+                    onRemoteState(authoritative.first, authoritative.second)
+                ServerConflictResolutionResult.MISSING_CONFLICT ->
+                    throw IllegalStateException("Локальный конфликт не найден")
+                ServerConflictResolutionResult.MISSING_REMOTE ->
+                    throw IllegalStateException("Серверный снимок недоступен. Локальные данные не изменены")
             }
         } else {
-            var remote = store.pendingRemoteSnapshot()
-            if (remote == null) {
-                val response = requestJson(
-                    "${config.baseUrl}/v1/sync/pull?afterRevision=0",
-                    "GET",
-                    config.authToken,
-                    null,
-                )
-                if (response.code !in 200..299) {
-                    throw IllegalStateException("Pull HTTP ${response.code}: ${response.body.take(300)}")
-                }
-                val json = JSONObject(response.body)
-                if (json.has("payload") && json.has("revision")) {
-                    remote = json.getJSONObject("payload").toString() to json.getLong("revision")
-                    store.savePendingRemoteSnapshot(remote.first, remote.second)
-                }
-            }
-            val authoritative = remote
-                ?: throw IllegalStateException(
-                    "Сервер не вернул полный актуальный снимок. Конфликт и обе версии сохранены; повторите позже",
-                )
+            val authoritative = loadAuthoritativeSnapshot(config)
             when (store.requeueConflictedMutation(id, authoritative.second)) {
                 ConflictRequeueResult.REQUEUED -> Unit
                 ConflictRequeueResult.MISSING ->
@@ -86,7 +71,7 @@ class ServerSyncManager(
                 ConflictRequeueResult.SERVER_ADVANCED ->
                     throw IllegalStateException(
                         "Локальный снимок устарел и не может заменить более новую серверную версию. " +
-                            "Выберите серверную версию; локальная копия останется в резервной базе устройства",
+                            "Выберите серверную версию; перед применением приложение выгрузит локальную копию в JSON-файл",
                     )
                 ConflictRequeueResult.INVALID_REMOTE_REVISION ->
                     throw IllegalStateException(
@@ -96,6 +81,28 @@ class ServerSyncManager(
         }
         syncNow()
         return JSONObject().put("ok", true).put("decision", decision).toString()
+    }
+
+    private fun loadAuthoritativeSnapshot(config: SyncConfig): Pair<String, Long> {
+        store.pendingRemoteSnapshot()?.let { return it }
+        val response = requestJson(
+            "${config.baseUrl}/v1/sync/pull?afterRevision=0",
+            "GET",
+            config.authToken,
+            null,
+        )
+        if (response.code !in 200..299) {
+            throw IllegalStateException("Pull HTTP ${response.code}: ${response.body.take(300)}")
+        }
+        val json = JSONObject(response.body)
+        if (!json.has("payload") || !json.has("revision")) {
+            throw IllegalStateException(
+                "Сервер не вернул полный актуальный снимок. Конфликт и обе версии сохранены; повторите позже",
+            )
+        }
+        val remote = json.getJSONObject("payload").toString() to json.getLong("revision")
+        store.savePendingRemoteSnapshot(remote.first, remote.second)
+        return remote
     }
 
     fun registerPushToken(token: String): Boolean {

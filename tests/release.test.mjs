@@ -132,7 +132,8 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.match(androidSync, /store\.markMutationConflicted\(pending\.mutationId, message\)/);
   assert.match(androidSync, /store\.sendablePendingCount\(\) == 0/);
   assert.match(androidSync, /store\.savePendingRemoteSnapshot\(payload, revision\)/);
-  assert.match(androidSync, /store\.discardConflictedMutation\(id\)/);
+  assert.match(androidSync, /store\.acceptServerSnapshot\(id\)/);
+  assert.match(androidSync, /require\(localExportConfirmed\)/);
   assert.match(androidSync, /store\.requeueConflictedMutation\(id, authoritative\.second\)/);
   assert.match(androidSync, /ConflictRequeueResult\.SERVER_ADVANCED/);
   assert.match(androidSync, /pending\.baseRevision/);
@@ -186,12 +187,12 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
       if (statement.trim()) database.exec(statement);
     }
   };
-  assert.doesNotMatch(migrations[5], /ALTER TABLE/);
+  assert.match(migrations[5], /ALTER TABLE `push_deliveries` ADD `attempts`/);
   assert.doesNotMatch(migrations[6], /ALTER TABLE/);
 
   const clean = new DatabaseSync(":memory:");
   for (const migration of migrations) apply(clean, migration);
-  for (const migration of migrations) apply(clean, migration);
+  apply(clean, migrations[6]);
   assert.deepEqual(
     clean.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all()
       .map((row) => row.name),
@@ -256,10 +257,11 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
 });
 
 test("push notifications are server-addressed, durable and connected to Android FCM", async () => {
-  const [eventsRoute, pushEvents, devicesRoute, fcm, bridge, prototype, service, activity, migration, metadataMigration] = await Promise.all([
+  const [eventsRoute, pushEvents, devicesRoute, maintenance, fcm, bridge, prototype, service, activity, migration, metadataMigration] = await Promise.all([
     text("app/api/notifications/events/route.ts"),
     text("lib/push-events.ts"),
     text("app/api/devices/register/route.ts"),
+    text("lib/push-maintenance.ts"),
     text("lib/fcm.ts"),
     text("public/prototype-server.js"),
     text("public/prototype.html"),
@@ -290,7 +292,9 @@ test("push notifications are server-addressed, durable and connected to Android 
   assert.match(eventsRoute, /result\.status === "disabled"/);
   assert.match(eventsRoute, /rows\.length\s*&& responseBody\.failed > 0/);
   assert.match(eventsRoute, /push_delivery_attempts/);
-  assert.match(eventsRoute, /DELETE FROM push_deliveries WHERE NOT EXISTS/);
+  assert.match(eventsRoute, /collectPushRecipients/);
+  assert.match(eventsRoute, /shouldRunPushMaintenance/);
+  assert.match(maintenance, /DELETE FROM push_deliveries WHERE NOT EXISTS/);
   assert.match(eventsRoute, /Promise\.all\(batch\.map/);
   assert.match(eventsRoute, /offset \+= 8/);
   assert.match(fcm, /firebase\.messaging/);

@@ -1,34 +1,14 @@
--- Metadata lives in companion tables so this migration is safe to reapply.
--- Existing deployments may still have the legacy item_ids/attempts columns;
--- the application no longer depends on those optional columns.
-CREATE TABLE IF NOT EXISTS `push_delivery_attempts` (
-	`delivery_id` text PRIMARY KEY NOT NULL,
-	`attempts` integer DEFAULT 0 NOT NULL
-);
---> statement-breakpoint
-INSERT OR IGNORE INTO `push_delivery_attempts` (`delivery_id`, `attempts`)
-SELECT `id`, 0 FROM `push_deliveries`;
---> statement-breakpoint
-CREATE TABLE IF NOT EXISTS `warehouse_state_items` (
-	`state_key` text NOT NULL,
-	`item_id` text NOT NULL
-);
---> statement-breakpoint
-CREATE UNIQUE INDEX IF NOT EXISTS `warehouse_state_items_key_idx`
-ON `warehouse_state_items` (`state_key`, `item_id`);
---> statement-breakpoint
-CREATE INDEX IF NOT EXISTS `warehouse_state_items_state_idx`
-ON `warehouse_state_items` (`state_key`);
---> statement-breakpoint
-INSERT OR IGNORE INTO `warehouse_state_items` (`state_key`, `item_id`)
-SELECT `warehouse_full_state`.`state_key`,
-       TRIM(CAST(json_extract(value, '$.id') AS TEXT))
-FROM `warehouse_full_state`,
-     json_each(
-       CASE
-         WHEN json_valid(`warehouse_full_state`.`payload`) THEN `warehouse_full_state`.`payload`
-         ELSE '{"items":[]}'
-       END,
-       '$.items'
-     )
-WHERE TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> '';
+ALTER TABLE `push_deliveries` ADD `attempts` integer DEFAULT 0 NOT NULL;--> statement-breakpoint
+ALTER TABLE `warehouse_full_state` ADD `item_ids` text DEFAULT '[]' NOT NULL;--> statement-breakpoint
+UPDATE `warehouse_full_state`
+SET `item_ids` = CASE
+  WHEN json_valid(`payload`) THEN COALESCE(
+    (
+      SELECT json_group_array(json_extract(value, '$.id'))
+      FROM json_each(`warehouse_full_state`.`payload`, '$.items')
+      WHERE TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''
+    ),
+    '[]'
+  )
+  ELSE '[]'
+END;

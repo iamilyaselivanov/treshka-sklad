@@ -1134,6 +1134,106 @@ test('catalog deletion is visible and executable only for an administrator', asy
   await ctx.close();
 });
 
+test('closed documents and returned external issues remain renderable after product deletion', async () => {
+  const { ctx, page, pageErrors } = await newPage();
+  const result = await page.evaluate(() => {
+    currentRole = 'admin';
+    const template = items[0] ? JSON.parse(JSON.stringify(items[0])) : {};
+    const candidate = {
+      ...template,
+      id: 'delete-history-test',
+      name: 'Архивный аттенюатор',
+      sku: 'ARCHIVE-ATT-10',
+      unit: 'шт',
+      stock: 0,
+      ext: 0,
+      posts: {},
+      lots: [],
+      history: [],
+      photo: '',
+      photoMedia: null,
+    };
+    items.push(candidate);
+    const workTemplate = docs.find((entry) => entry.kind === 'work');
+    const work = {
+      ...JSON.parse(JSON.stringify(workTemplate)),
+      no: 'АВР-ARCHIVE-1',
+      status: 'Закрыт',
+      materials: [{ id: candidate.id, q: 2 }],
+    };
+    docs.push(work);
+    extIssues.push({
+      no: 'ВН-ARCHIVE-1',
+      to: 'Тест',
+      date: todayStr(),
+      status: 'Возвращено',
+      due: '—',
+      note: '',
+      items: [{ id: candidate.id, q: 1 }],
+    });
+    const deleted = deleteItem(candidate.id);
+    views.ext();
+    const externalText = document.getElementById('content').textContent;
+    renderWorkDoc(work);
+    const workText = document.getElementById('content').textContent;
+    const printHtml = buildDefektPrintHtml(work, work.no);
+    return {
+      deleted,
+      externalText,
+      workText,
+      printHtml,
+      archivedDoc: work.materials[0],
+      archivedIssue: extIssues.find((entry) => entry.no === 'ВН-ARCHIVE-1').items[0],
+    };
+  });
+  assert.equal(result.deleted, true);
+  assert.equal(pageErrors.length, 0, pageErrors.join('; '));
+  assert.match(result.externalText, /Архивный аттенюатор/);
+  assert.match(result.workText, /Архивный аттенюатор/);
+  assert.match(result.printHtml, /Архивный аттенюатор/);
+  assert.equal(result.archivedDoc.sku, 'ARCHIVE-ATT-10');
+  assert.equal(result.archivedIssue.unit, 'шт');
+  await ctx.close();
+});
+
+test('server conflict resolution exports local work before allowing destructive server choice', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.confirm = () => true;
+    window.__savedConflict = null;
+    window.__resolvedConflict = null;
+    window.AndroidFiles = {
+      saveExportedFile: (base64, filename, mimeType) => {
+        window.__savedConflict = { base64, filename, mimeType };
+        return true;
+      },
+    };
+    window.AndroidSync = {
+      status: () => JSON.stringify({ configured: true, serverRevision: 4, pending: 1 }),
+      listConflicts: () => '[]',
+      resolveConflict: (id, decision, exportConfirmed) => {
+        window.__resolvedConflict = { id, decision, exportConfirmed };
+        return JSON.stringify({ ok: true });
+      },
+    };
+  });
+  const result = await page.evaluate(() => {
+    currentRole = 'admin';
+    const ok = resolveServerConflict(42, 'server');
+    return {
+      ok,
+      saved: window.__savedConflict,
+      resolved: window.__resolvedConflict,
+      decoded: decodeURIComponent(escape(atob(window.__savedConflict.base64))),
+    };
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.saved.mimeType, 'application/json');
+  assert.match(result.saved.filename, /^treshka_conflict_/);
+  assert.match(result.decoded, /treshka-offline-conflict-backup/);
+  assert.deepEqual(result.resolved, { id: 42, decision: 'server', exportConfirmed: true });
+  await ctx.close();
+});
+
 test('review round — post movements are listed and an over-limit return is rejected atomically', async () => {
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => {

@@ -39,6 +39,12 @@ enum class ConflictRequeueResult {
     INVALID_REMOTE_REVISION,
 }
 
+enum class ServerConflictResolutionResult {
+    APPLIED,
+    MISSING_CONFLICT,
+    MISSING_REMOTE,
+}
+
 /**
  * Надёжное offline-first хранилище.
  *
@@ -90,6 +96,12 @@ class AppStateStore(context: Context) :
                 "ALTER TABLE sync_outbox ADD COLUMN base_revision INTEGER NOT NULL DEFAULT 0",
             )
         }
+    }
+
+    override fun onDowngrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        // All migrations are additive. An older APK can safely ignore newer
+        // columns/tables; never let a rollback recreate and erase the database.
+        Log.w(TAG, "Opening schema v$oldVersion with older app schema v$newVersion")
     }
 
     private fun hasColumn(db: SQLiteDatabase, table: String, column: String): Boolean =
@@ -485,9 +497,53 @@ class AppStateStore(context: Context) :
         return result.toString()
     }
 
+    /**
+     * Accepting the server copy is one transaction: verify the selected
+     * conflict, persist the parked server snapshot, advance the revision and
+     * remove every stale full-snapshot mutation. Keeping any newer outbox row
+     * would immediately recreate the same 409 because rows are snapshots, not
+     * mergeable deltas.
+     */
     @Synchronized
-    fun discardConflictedMutation(localId: Long): Boolean =
-        writableDatabase.delete("sync_outbox", "rowid=? AND conflict=1", arrayOf(localId.toString())) == 1
+    fun acceptServerSnapshot(localId: Long): ServerConflictResolutionResult {
+        val db = writableDatabase
+        db.beginTransaction()
+        return try {
+            val conflictExists = db.rawQuery(
+                "SELECT 1 FROM sync_outbox WHERE rowid=? AND conflict=1",
+                arrayOf(localId.toString()),
+            ).use { it.moveToFirst() }
+            if (!conflictExists) return ServerConflictResolutionResult.MISSING_CONFLICT
+
+            var payload: String? = null
+            var revision = 0L
+            db.rawQuery(
+                "SELECT payload, revision FROM sync_remote_pending WHERE id=1",
+                null,
+            ).use { cursor ->
+                if (cursor.moveToFirst()) {
+                    payload = cursor.getString(0)
+                    revision = cursor.getLong(1)
+                }
+            }
+            val authoritative = payload ?: return ServerConflictResolutionResult.MISSING_REMOTE
+            val schemaVersion = JSONObject(authoritative).optInt("schemaVersion", 0)
+            if (schemaVersion < 1) return ServerConflictResolutionResult.MISSING_REMOTE
+            if (!writeState(db, authoritative, schemaVersion)) {
+                return ServerConflictResolutionResult.MISSING_REMOTE
+            }
+            db.delete("sync_outbox", null, null)
+            db.execSQL(
+                "UPDATE sync_config SET server_revision=?, last_sync_at=?, last_error=NULL WHERE id=1",
+                arrayOf(revision, System.currentTimeMillis()),
+            )
+            db.delete("sync_remote_pending", "id=1", null)
+            db.setTransactionSuccessful()
+            ServerConflictResolutionResult.APPLIED
+        } finally {
+            db.endTransaction()
+        }
+    }
 
     @Synchronized
     fun requeueConflictedMutation(localId: Long, remoteRevision: Long): ConflictRequeueResult {

@@ -25,11 +25,6 @@ const OPTIONAL_COLLECTIONS = [
   "notifications",
 ] as const;
 
-function uniqueIsoTimestamp() {
-  const suffix = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, "0");
-  return new Date().toISOString().replace("Z", `${suffix}Z`);
-}
-
 function normalizedState(value: unknown): WarehouseState | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const state = { ...(value as WarehouseState) };
@@ -170,7 +165,7 @@ export async function PUT(request: Request) {
     return Response.json({ error: "Данные склада превышают безопасный размер 4 МБ" }, { status: 413 });
   }
   const revision = expectedRevision + 1;
-  const updatedAt = uniqueIsoTimestamp();
+  const updatedAt = new Date().toISOString();
   const stateWrite = expectedRevision === 0
     ? env.DB.prepare(`
         INSERT INTO warehouse_full_state (state_key, revision, payload, updated_at, updated_by)
@@ -185,13 +180,21 @@ export async function PUT(request: Request) {
   const results = await env.DB.batch([
     stateWrite,
     env.DB.prepare(
-      `DELETE FROM warehouse_state_items
+       `DELETE FROM warehouse_state_items
        WHERE state_key = 'main'
          AND EXISTS (
            SELECT 1 FROM warehouse_full_state
-           WHERE state_key = 'main' AND revision = ? AND updated_at = ? AND updated_by = ?
+           WHERE state_key = 'main' AND revision = ?
+         )
+         AND item_id NOT IN (
+           SELECT TRIM(CAST(json_extract(value, '$.id') AS TEXT))
+           FROM warehouse_full_state,
+                json_each(warehouse_full_state.payload, '$.items')
+           WHERE warehouse_full_state.state_key = 'main'
+             AND warehouse_full_state.revision = ?
+             AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''
          )`,
-    ).bind(revision, updatedAt, auth.user.callsign),
+    ).bind(revision, revision),
     env.DB.prepare(
       `INSERT OR IGNORE INTO warehouse_state_items (state_key, item_id)
        SELECT warehouse_full_state.state_key,
@@ -200,10 +203,8 @@ export async function PUT(request: Request) {
             json_each(warehouse_full_state.payload, '$.items')
        WHERE warehouse_full_state.state_key = 'main'
          AND warehouse_full_state.revision = ?
-         AND warehouse_full_state.updated_at = ?
-         AND warehouse_full_state.updated_by = ?
          AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''`,
-    ).bind(revision, updatedAt, auth.user.callsign),
+    ).bind(revision),
   ]);
   const result = results[0];
   if (Number(result.meta?.changes ?? 0) !== 1) {

@@ -340,8 +340,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         @JavascriptInterface
-        fun resolveConflict(id: Long, decision: String): String = try {
-            serverSyncManager.resolveConflict(id, decision)
+        fun resolveConflict(id: Long, decision: String, localExportConfirmed: Boolean): String = try {
+            serverSyncManager.resolveConflict(id, decision, localExportConfirmed)
         } catch (e: Exception) {
             JSONObject().put("error", e.message ?: "Ошибка решения конфликта").toString()
         }

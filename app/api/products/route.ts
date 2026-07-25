@@ -22,11 +22,6 @@ type ProductRow = {
   created_at: string;
 };
 
-function uniqueIsoTimestamp() {
-  const suffix = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, "0");
-  return new Date().toISOString().replace("Z", `${suffix}Z`);
-}
-
 function product(row: ProductRow) {
   return {
     id: row.id,
@@ -142,7 +137,7 @@ export async function DELETE(request: Request) {
       }
       const nextState = removeWarehouseItemFromState(state, warehouseItemId);
       const nextPayload = JSON.stringify(nextState);
-      const updatedAt = uniqueIsoTimestamp();
+      const updatedAt = new Date().toISOString();
       const results = await env.DB.batch([
         env.DB.prepare(
           `UPDATE warehouse_full_state
@@ -162,17 +157,27 @@ export async function DELETE(request: Request) {
            WHERE state_key = 'main' AND item_id = ?
              AND EXISTS (
                SELECT 1 FROM warehouse_full_state
-               WHERE state_key = 'main' AND revision = ? AND updated_at = ? AND updated_by = ?
+               WHERE state_key = 'main' AND revision = ?
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM json_each(warehouse_full_state.payload, '$.items')
+                   WHERE TRIM(CAST(json_extract(value, '$.id') AS TEXT)) = ?
+                 )
              )`,
-        ).bind(warehouseItemId, stateRow.revision + 1, updatedAt, auth.user.callsign),
+        ).bind(warehouseItemId, stateRow.revision + 1, warehouseItemId),
         env.DB.prepare(
           `DELETE FROM products
            WHERE id = ?
              AND EXISTS (
                SELECT 1 FROM warehouse_full_state
-               WHERE state_key = 'main' AND revision = ? AND updated_at = ? AND updated_by = ?
+               WHERE state_key = 'main' AND revision = ?
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM json_each(warehouse_full_state.payload, '$.items')
+                   WHERE TRIM(CAST(json_extract(value, '$.id') AS TEXT)) = ?
+                 )
              )`,
-        ).bind(id, stateRow.revision + 1, updatedAt, auth.user.callsign),
+        ).bind(id, stateRow.revision + 1, warehouseItemId),
       ]);
       if (
         Number(results[0].meta?.changes ?? 0) !== 1

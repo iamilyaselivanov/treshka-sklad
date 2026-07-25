@@ -45,7 +45,7 @@ function archiveReference(value: unknown, itemId: string, item: Record<string, u
 
 function archiveHistoryCollection(
   value: unknown,
-  nestedKey: "items" | "diffs",
+  nestedKey: "items" | "diffs" | "materials",
   itemId: string,
   item: Record<string, unknown>,
 ) {
@@ -59,11 +59,23 @@ function archiveHistoryCollection(
   });
 }
 
-function historyReferencesAreArchived(state: WarehouseState, itemId: string) {
-  const references = [
+function historicalReferences(state: WarehouseState, itemId: string) {
+  return [
     ...rows(state.stockTransfers).flatMap((value) => rows(record(value)?.items)),
     ...rows(state.inventoryActs).flatMap((value) => rows(record(value)?.diffs)),
+    ...rows(state.docs).flatMap((value) => rows(record(value)?.materials)),
+    ...rows(state.extIssues).flatMap((value) => rows(record(value)?.items)),
   ].filter((value) => identifier(value) === itemId);
+}
+
+function historyReferencesAreArchived(
+  previous: WarehouseState,
+  next: WarehouseState,
+  itemId: string,
+) {
+  const previousReferences = historicalReferences(previous, itemId);
+  const references = historicalReferences(next, itemId);
+  if (references.length < previousReferences.length) return false;
   return references.every((value) => {
     const entry = record(value);
     return Boolean(
@@ -169,6 +181,8 @@ export function removeWarehouseItemFromState(state: WarehouseState, itemId: stri
     }),
     stockTransfers: archiveHistoryCollection(state.stockTransfers, "items", itemId, item),
     inventoryActs: archiveHistoryCollection(state.inventoryActs, "diffs", itemId, item),
+    docs: archiveHistoryCollection(state.docs, "materials", itemId, item),
+    extIssues: archiveHistoryCollection(state.extIssues, "items", itemId, item),
   };
 }
 
@@ -193,10 +207,10 @@ export function warehouseDeletionPolicy(
         error: `Нельзя удалить карточку: ${issue}`,
       };
     }
-    if (!historyReferencesAreArchived(next, itemId)) {
+    if (!historyReferencesAreArchived(previous, next, itemId)) {
       return {
         status: 409,
-        error: "Нельзя удалить карточку: в истории движения или инвентаризации отсутствует архивное название товара",
+        error: "Нельзя удалить карточку: в истории документов или движений отсутствует архивное название товара",
       };
     }
   }

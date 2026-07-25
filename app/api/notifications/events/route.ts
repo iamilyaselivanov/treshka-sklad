@@ -3,12 +3,13 @@ import { audit, requireUser } from "@/lib/auth";
 import { isFirebasePushConfigured, sendDevicePush } from "@/lib/fcm";
 import { readJsonObject } from "@/lib/http";
 import {
+  collectPushRecipients,
   isPushEventType,
-  normalizePostAssignment,
   pushActorAllowed,
   pushPresentation,
   pushRecipientQuery,
 } from "@/lib/push-events";
+import { runPushMaintenance, shouldRunPushMaintenance } from "@/lib/push-maintenance";
 import type { PushEventType } from "@/lib/push-events";
 
 export const dynamic = "force-dynamic";
@@ -90,11 +91,16 @@ export async function POST(request: Request) {
   ).bind(eventId, auth.user.id, type, post, entityNo, summary, title, body, now).run();
 
   const recipientQuery = pushRecipientQuery(type);
-  const devices = await env.DB.prepare(recipientQuery.sql).all<DeviceRow>();
-  const normalizedPost = normalizePostAssignment(post);
-  const rows = (devices.results ?? []).filter((device) =>
-    !recipientQuery.filterPost
-    || normalizePostAssignment(String(device.assignment ?? "")) === normalizedPost);
+  const rows = await collectPushRecipients<DeviceRow>(
+    async (limit, offset) => {
+      const devices = await env.DB.prepare(recipientQuery.sql)
+        .bind(limit, offset)
+        .all<DeviceRow>();
+      return devices.results ?? [];
+    },
+    recipientQuery.filterPost,
+    post,
+  );
   if (rows.length) {
     await env.DB.batch(rows.map((device) => env.DB.prepare(
       `INSERT OR IGNORE INTO push_deliveries
@@ -187,27 +193,7 @@ export async function POST(request: Request) {
   if (inserted.meta.changes > 0) {
     await audit(auth.user, "push_event", `${type} · ${entityNo || post}`);
   }
-  const retentionCutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1_000).toISOString();
-  await env.DB.batch([
-    env.DB.prepare(
-      "DELETE FROM push_deliveries WHERE event_id IN (SELECT id FROM push_events WHERE created_at < ?)",
-    ).bind(retentionCutoff),
-    env.DB.prepare("DELETE FROM push_events WHERE created_at < ?").bind(retentionCutoff),
-    env.DB.prepare(
-      `DELETE FROM push_deliveries WHERE event_id IN (
-         SELECT id FROM push_events ORDER BY created_at DESC LIMIT -1 OFFSET 10000
-       )`,
-    ),
-    env.DB.prepare(
-      "DELETE FROM push_events WHERE id IN (SELECT id FROM push_events ORDER BY created_at DESC LIMIT -1 OFFSET 10000)",
-    ),
-    env.DB.prepare(
-      "DELETE FROM push_deliveries WHERE NOT EXISTS (SELECT 1 FROM push_devices WHERE push_devices.device_id = push_deliveries.device_id)",
-    ),
-    env.DB.prepare(
-      "DELETE FROM push_delivery_attempts WHERE NOT EXISTS (SELECT 1 FROM push_deliveries WHERE push_deliveries.id = push_delivery_attempts.delivery_id)",
-    ),
-  ]);
+  if (shouldRunPushMaintenance()) await runPushMaintenance(env.DB);
   const responseBody = {
     ok: true,
     pushConfigured: isFirebasePushConfigured(),

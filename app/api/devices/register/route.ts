@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { audit, requireUser } from "@/lib/auth";
 import { readJsonObject } from "@/lib/http";
 import { isFirebasePushConfigured } from "@/lib/fcm";
+import { runPushMaintenance, shouldRunPushMaintenance } from "@/lib/push-maintenance";
 
 export const dynamic = "force-dynamic";
 
@@ -72,17 +73,12 @@ export async function POST(request: Request) {
       now,
       now,
     ),
-    env.DB.prepare(
-      "DELETE FROM push_deliveries WHERE NOT EXISTS (SELECT 1 FROM push_devices WHERE push_devices.device_id = push_deliveries.device_id)",
-    ),
-    env.DB.prepare(
-      "DELETE FROM push_delivery_attempts WHERE NOT EXISTS (SELECT 1 FROM push_deliveries WHERE push_deliveries.id = push_delivery_attempts.delivery_id)",
-    ),
   ]);
   const evictedOldest = Number(results[2].meta?.changes ?? 0) === 1;
   if (!existing || existing.userId !== auth.user.id || existing.token !== token) {
     await audit(auth.user, "push_device_registered", `${platform} · ${deviceId.slice(0, 8)}`);
   }
+  if (shouldRunPushMaintenance()) await runPushMaintenance(env.DB);
   return Response.json({ ok: true, pushConfigured: isFirebasePushConfigured(), evictedOldest });
 }
 

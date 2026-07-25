@@ -374,7 +374,17 @@ try {
     docs: [...originalDocs, { no: `DOC-CLOSED-${suffix}`, kind: "work", status: "Закрыт", itemId: deletionProbeId }],
     extIssues: [
       ...(stateWithDocumentReference.extIssues ?? []),
-      { no: `EXT-CLOSED-${suffix}`, status: "Возвращено", items: [{ id: deletionProbeId, q: 1 }] },
+      {
+        no: `EXT-CLOSED-${suffix}`,
+        status: "Возвращено",
+        items: [{
+          id: deletionProbeId,
+          q: 1,
+          name: "Проверка роли удаления",
+          sku: `STATE-${suffix}`,
+          unit: "шт",
+        }],
+      },
     ],
   };
   const safeProbeSaved = await request("/api/state", {

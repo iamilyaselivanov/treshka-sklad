@@ -3397,8 +3397,9 @@ function safePhotoSource(value){
   return safePhotoDataUrl(value)
     || (typeof value==='string' && /^\/api\/media\/images\?key=images%2F[0-9a-f-]{36}\.(?:jpg|png|webp)$/.test(value));
 }
-function canManageCatalog(){ return currentRole==='admin' || currentRole==='kladovshik'; }
-function canDeleteCatalogItem(){ return currentRole==='admin'; }
+function canAdminister(){ return currentRole==='admin'; }
+function canManageCatalog(){ return canAdminister() || currentRole==='kladovshik'; }
+function canDeleteCatalogItem(){ return canAdminister(); }
 const item = id => items.find(i=>i.id===id);
 const fmtQ = (i,q) => `${q} ${esc(i.unit)}`;
 
@@ -3929,7 +3930,7 @@ ext(){
           </div>
           <span class="chip ${e.status==='Возвращено'?'green':'amber'}">${e.status}</span>
         </div>
-        ${e.items.map(m=>{const it=item(m.id);return `<div class="mat"><div class="grow"><div class="t">${esc(it.icon)} ${esc(it.name)}</div></div><div class="q">${fmtQ(it,m.q)}</div></div>`;}).join('')}
+        ${e.items.map(m=>{const it=item(m.id);const archived={name:m.name||m.id,unit:m.unit||''};const shown=it||archived;return `<div class="mat"><div class="grow"><div class="t">${it?esc(it.icon):'📦'} ${esc(shown.name)}</div></div><div class="q">${fmtQ(shown,m.q)}</div></div>`;}).join('')}
         ${e.status!=='Возвращено'?`<div class="s" style="margin-top:8px">Срок возврата: <b style="color:var(--amber)">${esc(e.due)}</b></div>
         <button class="btn ghost" onclick="returnExtIssue(${ei})">↩ Оформить возврат</button>`:''}
       </div>`).join('')}
@@ -4149,9 +4150,22 @@ function renderServerSettings(){
 }
 function resolveServerConflict(id,decision){
   if(currentRole!=='admin'){toast('Решение конфликтов доступно только администратору');return false;}
-  if(!confirm(decision==='local'?'Повторить локальную версию можно только при отсутствии более новых серверных ревизий. Продолжить?':'Оставить серверную версию? Текущая локальная копия сохранится в резервной базе устройства.'))return false;
+  if(!confirm(decision==='local'?'Повторить локальную версию можно только при отсутствии более новых серверных ревизий. Продолжить?':'Оставить серверную версию? Все несинхронизированные локальные изменения будут выгружены JSON-файлом в «Загрузки», затем приложение применит серверную копию.'))return false;
   const bridge=nativeSyncBridge();
-  try{const result=JSON.parse(bridge.resolveConflict(id,decision));if(result.error){toast(result.error);return false;}toast('✓ Конфликт решён, данные сохранены');renderServerSettings();return true;}
+  let localExportConfirmed=false;
+  if(decision==='server'){
+    const exportedAt=new Date().toISOString();
+    const exportPayload=JSON.stringify({type:'treshka-offline-conflict-backup',exportedAt,state:serializeAppState()},null,2);
+    const fileBridge=nativeFileBridge();
+    const filename=`treshka_conflict_${exportedAt.replace(/[:.]/g,'-')}.json`;
+    if(!fileBridge||!fileBridge.saveExportedFile(arrayBufferToBase64(new TextEncoder().encode(exportPayload)),filename,'application/json')){
+      toast('⚠ Не удалось сохранить локальную копию. Серверная версия не применена');
+      return false;
+    }
+    localExportConfirmed=true;
+    toast('✓ Локальная копия выгружена в «Загрузки»');
+  }
+  try{const result=JSON.parse(bridge.resolveConflict(id,decision,localExportConfirmed));if(result.error){toast(result.error);return false;}toast('✓ Конфликт решён, данные сохранены');renderServerSettings();return true;}
   catch(e){toast('Ошибка: '+e.message);return false;}
 }
 function connectServer(){
@@ -4531,6 +4545,12 @@ function deleteItem(id){
     if(line.id===id){line.name=line.name||i.name;line.sku=line.sku||i.sku;line.unit=line.unit||i.unit;}
   }));
   inventoryActs.forEach(a=>(a.diffs||[]).forEach(line=>{
+    if(line.id===id){line.name=line.name||i.name;line.sku=line.sku||i.sku;line.unit=line.unit||i.unit;}
+  }));
+  docs.forEach(d=>(d.materials||[]).forEach(line=>{
+    if(line.id===id){line.name=line.name||i.name;line.sku=line.sku||i.sku;line.unit=line.unit||i.unit;}
+  }));
+  extIssues.forEach(e=>(e.items||[]).forEach(line=>{
     if(line.id===id){line.name=line.name||i.name;line.sku=line.sku||i.sku;line.unit=line.unit||i.unit;}
   }));
   const idx=items.indexOf(i); items.splice(idx,1);
@@ -5177,7 +5197,7 @@ function renderWorkDoc(d){
     const locked = closed||pending||awaitingWarehouse;
     const analytics=workMaterialAnalytics(d);
     setHdr(d.no+' · Акт выполненных работ', `${esc(d.item)} · из дефектовки ${d.defektDoc}`, true, false);
-    const sum = d.materials.map(m=>{const it=item(m.id);return {it,q:m.q};});
+    const sum = d.materials.map(m=>{const it=item(m.id)||{name:m.name||m.id,sku:m.sku||'',unit:m.unit||''};return {it,q:m.q};});
     $('content').innerHTML = `
       ${unresolved?`<div class="progress-note bad">⚠ Расхождение по количеству: получено ${d.planQty}, годных ${d.factQty} (брак: ${d.planQty-d.factQty}). Администратору отправлено push-уведомление. Закрыть акт может только администратор.${d.mismatchDecision==='rework'?' Акт возвращён на доработку, но остаётся заблокирован до решения администратора.':''}</div>`
         : closed?`<div class="progress-note ok">✓ Акт закрыт — материалы списаны, изделие принято кладовщиком на склад${d.mismatchReason?' (принято с расхождением: '+esc(d.mismatchReason)+')':''}</div>`
@@ -5382,7 +5402,7 @@ function buildWorkActPrintHtml(d, title){
   </body></html>`;
 }
 function buildDefektPrintHtml(d, title){
-  const matRows = d.materials ? `<table>${d.materials.map(m=>{const it=item(m.id);return `<tr><td>${esc(it.name)}</td><td>${m.q} ${it.unit}</td></tr>`;}).join('')}</table>` : '';
+  const matRows = d.materials ? `<table>${d.materials.map(m=>{const it=item(m.id)||{name:m.name||m.id,unit:m.unit||''};return `<tr><td>${esc(it.name)}</td><td>${m.q} ${esc(it.unit)}</td></tr>`;}).join('')}</table>` : '';
   return `<html><head><title>${esc(title)}</title><style>${PRINT_DOC_STYLE}</style></head><body>
     <h1 style="text-align:left">Акт дефектовки ${esc(d.no)}</h1>
     <p>Изделие: ${esc(d.item)} ${d.serial&&d.serial!=='—'?'№'+esc(d.serial):''}<br>Дата: ${esc(d.date)}<br>Пост: ${esc(d.post)}</p>
@@ -5938,7 +5958,7 @@ function exportWorkActExcel(no){
   (d.participants||[]).forEach(p=>infoRows.push([p.worker,p.work]));
 
   const matRows=[['Материал','Артикул','Количество']];
-  d.materials.forEach(m=>{const it=item(m.id); if(it) matRows.push([it.name,it.sku,`${m.q} ${it.unit}`]);});
+  d.materials.forEach(m=>{const it=item(m.id)||{name:m.name||m.id,sku:m.sku||'',unit:m.unit||''};matRows.push([it.name,it.sku,`${m.q} ${it.unit}`]);});
 
   const ok = xlsxDownload(`${sanitizeFilename(actFileTitle(d))}.xlsx`, [
     {name:'Акт', rows:infoRows},

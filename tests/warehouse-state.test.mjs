@@ -76,11 +76,20 @@ test("server deletion policy rejects document and external-issue references", ()
 test("closed documents and returned external issues preserve history without locking the card forever", () => {
   const historical = state({
     items: [unusedItem],
-    docs: [{ no: "АВР-OLD", status: "Закрыт", itemId: unusedItem.id }],
+    docs: [{
+      no: "АВР-OLD",
+      status: "Закрыт",
+      itemId: unusedItem.id,
+      materials: [{ id: unusedItem.id, q: 1 }],
+    }],
     extIssues: [{ no: "ВН-OLD", status: "Возвращено", items: [{ id: unusedItem.id, q: 1 }] }],
   });
   assert.equal(warehouseItemDeletionIssue(historical, unusedItem.id), null);
-  assert.equal(warehouseDeletionPolicy(historical, state(), "admin"), null);
+  assert.equal(warehouseDeletionPolicy(historical, state(), "admin")?.status, 409);
+  const archived = removeWarehouseItemFromState(historical, unusedItem.id);
+  assert.equal(warehouseDeletionPolicy(historical, archived, "admin"), null);
+  assert.equal(archived.docs[0].materials[0].name, unusedItem.name);
+  assert.equal(archived.extIssues[0].items[0].sku, unusedItem.sku);
 });
 
 test("product endpoint matches shared-state cards only by immutable id", () => {
@@ -95,6 +104,8 @@ test("historical transfers and inventory acts retain product labels after card d
     items: [unusedItem],
     stockTransfers: [{ no: "ПМ-1", items: [{ id: unusedItem.id, q: 1 }] }],
     inventoryActs: [{ no: "ИНВ-1", diffs: [{ id: unusedItem.id, counted: 0 }] }],
+    docs: [{ no: "АВР-1", status: "Закрыт", materials: [{ id: unusedItem.id, q: 1 }] }],
+    extIssues: [{ no: "ВН-1", status: "Возвращено", items: [{ id: unusedItem.id, q: 1 }] }],
   });
   const unsafe = state({
     stockTransfers: previous.stockTransfers,
@@ -112,5 +123,7 @@ test("historical transfers and inventory acts retain product labels after card d
     unit: unusedItem.unit,
   });
   assert.equal(archived.inventoryActs[0].diffs[0].name, unusedItem.name);
+  assert.equal(archived.docs[0].materials[0].unit, unusedItem.unit);
+  assert.equal(archived.extIssues[0].items[0].name, unusedItem.name);
   assert.equal(archived.items.length, 0);
 });

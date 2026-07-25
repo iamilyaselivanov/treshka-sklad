@@ -3,20 +3,26 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import {
   PUSH_EVENT_TYPES,
-  normalizePostAssignment,
+  collectPushRecipients,
   pushActorAllowed,
   pushPresentation,
   pushRecipientQuery,
 } from "../lib/push-events.ts";
+import {
+  PUSH_MAINTENANCE_SAMPLE_RATE,
+  shouldRunPushMaintenance,
+} from "../lib/push-maintenance.ts";
 
-function recipientDevices(database, type, post = "ТЭЧ") {
+async function recipientDevices(database, type, post = "ТЭЧ", pageSize = 500) {
   const query = pushRecipientQuery(type);
-  const rows = database.prepare(query.sql).all();
-  return rows
-    .filter((row) =>
-      !query.filterPost
-      || normalizePostAssignment(row.assignment) === normalizePostAssignment(post))
-    .map((row) => row.deviceId)
+  const statement = database.prepare(query.sql);
+  const rows = await collectPushRecipients(
+    (limit, offset) => statement.all(limit, offset),
+    query.filterPost,
+    post,
+    pageSize,
+  );
+  return rows.map((row) => row.deviceId)
     .sort();
 }
 
@@ -60,16 +66,18 @@ function createRoutingDatabase() {
   return database;
 }
 
-test("post stock notifications reach every active member of that post and nobody else", () => {
+test("post stock notifications reach every active member of any role on that post and nobody else", async () => {
   const database = createRoutingDatabase();
-  assert.deepEqual(recipientDevices(database, "post_stock_issued"), [
+  assert.deepEqual(await recipientDevices(database, "post_stock_issued"), [
+    "device-admin-post",
+    "device-store-post",
     "device-worker-1",
     "device-worker-2",
   ]);
   database.close();
 });
 
-test("acts, returns and warehouse acceptance reach owner, every admin and every storekeeper", () => {
+test("acts, returns and warehouse acceptance reach owner, every admin and every storekeeper", async () => {
   const database = createRoutingDatabase();
   const expected = [
     "device-admin-1",
@@ -86,20 +94,47 @@ test("acts, returns and warehouse acceptance reach owner, every admin and every 
     "work_awaiting_warehouse",
     "storekeeper_warehouse_return_accepted",
   ]) {
-    assert.deepEqual(recipientDevices(database, type), expected, type);
+    assert.deepEqual(await recipientDevices(database, type), expected, type);
   }
   database.close();
 });
 
-test("storekeeper issue completion reaches owner and all administrators", () => {
+test("storekeeper issue completion reaches owner and all administrators", async () => {
   const database = createRoutingDatabase();
-  assert.deepEqual(recipientDevices(database, "storekeeper_post_issue_completed"), [
+  assert.deepEqual(await recipientDevices(database, "storekeeper_post_issue_completed"), [
     "device-admin-1",
     "device-admin-post",
     "device-owner",
     "device-owner-2",
   ]);
   database.close();
+});
+
+test("recipient pagination cannot drop post members after the former 2000-row boundary", async () => {
+  const database = createRoutingDatabase();
+  const insertUser = database.prepare(
+    "INSERT INTO users (id, role, assignment, status) VALUES (?, 'worker', ?, 'active')",
+  );
+  const insertDevice = database.prepare(
+    "INSERT INTO push_devices (user_id, device_id, token) VALUES (?, ?, ?)",
+  );
+  for (let index = 0; index < 2_050; index += 1) {
+    const id = `bulk-${String(index).padStart(4, "0")}`;
+    insertUser.run(id, index === 2_049 ? "ТЭЧ" : "Другой пост");
+    insertDevice.run(id, `device-${id}`, `token-${id}`);
+  }
+  const recipients = await recipientDevices(database, "post_stock_issued", "  тЭч ", 137);
+  assert.ok(recipients.includes("device-bulk-2049"));
+  assert.ok(recipients.includes("device-worker-1"));
+  assert.ok(!recipients.includes("device-bulk-2048"));
+  database.close();
+});
+
+test("heavy push retention runs probabilistically instead of on every request", () => {
+  assert.equal(PUSH_MAINTENANCE_SAMPLE_RATE, 64);
+  assert.equal(shouldRunPushMaintenance(0), true);
+  assert.equal(shouldRunPushMaintenance(64), true);
+  assert.equal(shouldRunPushMaintenance(1), false);
 });
 
 test("event actors and user-facing titles match the warehouse workflow", () => {

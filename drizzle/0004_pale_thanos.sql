@@ -9,8 +9,7 @@ CREATE TABLE IF NOT EXISTS `push_deliveries` (
 	`status` text NOT NULL,
 	`provider_message_id` text DEFAULT '' NOT NULL,
 	`error` text DEFAULT '' NOT NULL,
-	`attempted_at` text,
-	`attempts` integer DEFAULT 0 NOT NULL
+	`attempted_at` text
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS `push_deliveries_event_device_idx` ON `push_deliveries` (`event_id`,`device_id`);--> statement-breakpoint
