@@ -226,8 +226,9 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
 });
 
 test("push notifications are server-addressed, durable and connected to Android FCM", async () => {
-  const [eventsRoute, devicesRoute, fcm, bridge, prototype, service, activity, migration] = await Promise.all([
+  const [eventsRoute, pushEvents, devicesRoute, fcm, bridge, prototype, service, activity, migration] = await Promise.all([
     text("app/api/notifications/events/route.ts"),
+    text("lib/push-events.ts"),
     text("app/api/devices/register/route.ts"),
     text("lib/fcm.ts"),
     text("public/prototype-server.js"),
@@ -238,23 +239,28 @@ test("push notifications are server-addressed, durable and connected to Android 
   ]);
   for (const eventType of [
     "post_stock_issued",
+    "post_stock_returned",
     "defect_act_created",
     "work_act_created",
+    "work_awaiting_warehouse",
     "storekeeper_post_issue_completed",
     "storekeeper_warehouse_return_accepted",
   ]) {
-    assert.match(eventsRoute, new RegExp(eventType));
+    assert.match(pushEvents, new RegExp(eventType));
     assert.match(prototype, new RegExp(eventType));
   }
-  assert.match(eventsRoute, /users\.assignment = \?/);
-  assert.match(eventsRoute, /users\.role IN \('owner', 'admin', 'storekeeper'\)/);
-  assert.match(eventsRoute, /users\.role IN \('owner', 'admin'\)/);
+  assert.match(pushEvents, /users\.assignment = \?/);
+  assert.match(pushEvents, /'owner', 'admin', 'storekeeper'/);
+  assert.match(pushEvents, /'owner', 'admin'/);
   assert.match(devicesRoute, /ON CONFLICT\(device_id\) DO UPDATE/);
   assert.match(devicesRoute, /MAX_DEVICES_PER_USER = 8/);
   assert.match(devicesRoute, /status: 429/);
   assert.match(eventsRoute, /responseBody\.failed > 0 \|\| responseBody\.disabled > 0/);
+  assert.match(eventsRoute, /Promise\.all\(batch\.map/);
+  assert.match(eventsRoute, /offset \+= 8/);
   assert.match(fcm, /firebase\.messaging/);
   assert.match(fcm, /fcm\.googleapis\.com\/v1\/projects/);
+  assert.match(fcm, /pendingAccessToken/);
   assert.match(bridge, /PUSH_QUEUE_KEY/);
   assert.match(bridge, /registerNativePush/);
   assert.match(service, /POST_NOTIFICATIONS/);

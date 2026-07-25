@@ -1,16 +1,16 @@
 import { env } from "cloudflare:workers";
-import { audit, requireUser, Role } from "@/lib/auth";
+import { audit, requireUser } from "@/lib/auth";
 import { isFirebasePushConfigured, sendDevicePush } from "@/lib/fcm";
 import { readJsonObject } from "@/lib/http";
+import {
+  isPushEventType,
+  pushActorAllowed,
+  pushPresentation,
+  pushRecipientQuery,
+} from "@/lib/push-events";
+import type { PushEventType } from "@/lib/push-events";
 
 export const dynamic = "force-dynamic";
-
-type EventType =
-  | "post_stock_issued"
-  | "defect_act_created"
-  | "work_act_created"
-  | "storekeeper_post_issue_completed"
-  | "storekeeper_warehouse_return_accepted";
 
 type DeviceRow = {
   userId: string;
@@ -26,57 +26,6 @@ type ExistingEventRow = {
   summary: string;
 };
 
-const eventTypes = new Set<EventType>([
-  "post_stock_issued",
-  "defect_act_created",
-  "work_act_created",
-  "storekeeper_post_issue_completed",
-  "storekeeper_warehouse_return_accepted",
-]);
-
-const actorRoles: Record<EventType, Role[]> = {
-  post_stock_issued: ["owner", "admin", "storekeeper"],
-  defect_act_created: ["owner", "admin", "storekeeper", "worker"],
-  work_act_created: ["owner", "admin", "storekeeper", "worker"],
-  storekeeper_post_issue_completed: ["storekeeper"],
-  storekeeper_warehouse_return_accepted: ["storekeeper"],
-};
-
-function presentation(type: EventType, post: string, entityNo: string, summary: string) {
-  const suffix = [entityNo, post && `пост ${post}`].filter(Boolean).join(" · ");
-  switch (type) {
-    case "post_stock_issued":
-      return { title: "Товар выдан на ваш пост", body: summary || suffix };
-    case "defect_act_created":
-      return { title: "Создан акт дефектовки", body: suffix };
-    case "work_act_created":
-      return { title: "Создан акт выполненных работ", body: suffix };
-    case "storekeeper_post_issue_completed":
-      return { title: "Кладовщик выдал товар на пост", body: summary || suffix };
-    case "storekeeper_warehouse_return_accepted":
-      return { title: "Кладовщик принял товар на склад", body: summary || suffix };
-  }
-}
-
-function recipientSql(type: EventType) {
-  if (type === "post_stock_issued") {
-    return `SELECT push_devices.user_id AS userId, push_devices.device_id AS deviceId, push_devices.token
-            FROM push_devices
-            JOIN users ON users.id = push_devices.user_id
-            WHERE users.status = 'active' AND users.assignment = ?`;
-  }
-  if (type === "defect_act_created" || type === "work_act_created") {
-    return `SELECT push_devices.user_id AS userId, push_devices.device_id AS deviceId, push_devices.token
-            FROM push_devices
-            JOIN users ON users.id = push_devices.user_id
-            WHERE users.status = 'active' AND users.role IN ('owner', 'admin', 'storekeeper')`;
-  }
-  return `SELECT push_devices.user_id AS userId, push_devices.device_id AS deviceId, push_devices.token
-          FROM push_devices
-          JOIN users ON users.id = push_devices.user_id
-          WHERE users.status = 'active' AND users.role IN ('owner', 'admin')`;
-}
-
 export async function POST(request: Request) {
   const auth = await requireUser(request);
   if (auth.response || !auth.user) return auth.response;
@@ -84,24 +33,25 @@ export async function POST(request: Request) {
   if (!raw) return Response.json({ error: "Некорректный JSON" }, { status: 400 });
 
   const eventId = String(raw.eventId ?? "").trim();
-  const type = String(raw.type ?? "") as EventType;
+  const rawType = String(raw.type ?? "");
   const post = String(raw.post ?? "").trim();
   const entityNo = String(raw.entityNo ?? "").trim();
   const summary = String(raw.summary ?? "").trim();
   if (
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(eventId)
-    || !eventTypes.has(type)
+    || !isPushEventType(rawType)
     || post.length < 1 || post.length > 160
     || entityNo.length > 120
     || summary.length > 500
   ) {
     return Response.json({ error: "Некорректное событие уведомления" }, { status: 400 });
   }
-  if (!actorRoles[type].includes(auth.user.role)) {
+  const type = rawType as PushEventType;
+  if (!pushActorAllowed(type, auth.user.role)) {
     return Response.json({ error: "Недостаточно прав для этого события" }, { status: 403 });
   }
 
-  const { title, body } = presentation(type, post, entityNo, summary);
+  const { title, body } = pushPresentation(type, post, entityNo, summary);
   const now = new Date().toISOString();
   const existing = await env.DB.prepare(
     `SELECT actor_user_id AS actorUserId, event_type AS eventType, post, entity_no AS entityNo, summary
@@ -132,9 +82,11 @@ export async function POST(request: Request) {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(eventId, auth.user.id, type, post, entityNo, summary, title, body, now).run();
 
-  const devices = type === "post_stock_issued"
-    ? await env.DB.prepare(recipientSql(type)).bind(post).all<DeviceRow>()
-    : await env.DB.prepare(recipientSql(type)).all<DeviceRow>();
+  const recipientQuery = pushRecipientQuery(type);
+  const recipientStatement = env.DB.prepare(recipientQuery.sql);
+  const devices = recipientQuery.bindPost
+    ? await recipientStatement.bind(post).all<DeviceRow>()
+    : await recipientStatement.all<DeviceRow>();
   const rows = devices.results ?? [];
   if (rows.length) {
     await env.DB.batch(rows.map((device) => env.DB.prepare(
@@ -157,30 +109,42 @@ export async function POST(request: Request) {
   let sent = 0;
   let failed = 0;
   let disabled = 0;
-  for (const device of pending.results ?? []) {
-    const result = await sendDevicePush(device.token, {
-      title,
-      body,
-      eventId,
-      eventType: type,
-      post,
-      entityNo,
-    });
+  const pendingDevices = pending.results ?? [];
+  for (let offset = 0; offset < pendingDevices.length; offset += 8) {
+    const batch = pendingDevices.slice(offset, offset + 8);
+    const results = await Promise.all(batch.map(async (device) => ({
+      device,
+      result: await sendDevicePush(device.token, {
+        title,
+        body,
+        eventId,
+        eventType: type,
+        post,
+        entityNo,
+      }),
+    })));
     const attemptedAt = new Date().toISOString();
-    if (result.status === "sent") {
-      sent += 1;
-      await env.DB.prepare(
-        "UPDATE push_deliveries SET status = 'sent', provider_message_id = ?, error = '', attempted_at = ? WHERE event_id = ? AND device_id = ?",
-      ).bind(result.providerMessageId, attemptedAt, eventId, device.deviceId).run();
-    } else {
-      if (result.status === "disabled") disabled += 1;
-      else failed += 1;
-      await env.DB.prepare(
-        "UPDATE push_deliveries SET status = ?, error = ?, attempted_at = ? WHERE event_id = ? AND device_id = ?",
-      ).bind(result.status, result.error, attemptedAt, eventId, device.deviceId).run();
-      if (result.status === "failed" && result.unregisterToken) {
-        await env.DB.prepare("DELETE FROM push_devices WHERE token = ?").bind(device.token).run();
+    const updates: D1PreparedStatement[] = [];
+    const invalidTokens: string[] = [];
+    for (const { device, result } of results) {
+      if (result.status === "sent") {
+        sent += 1;
+        updates.push(env.DB.prepare(
+          "UPDATE push_deliveries SET status = 'sent', provider_message_id = ?, error = '', attempted_at = ? WHERE event_id = ? AND device_id = ?",
+        ).bind(result.providerMessageId, attemptedAt, eventId, device.deviceId));
+      } else {
+        if (result.status === "disabled") disabled += 1;
+        else failed += 1;
+        updates.push(env.DB.prepare(
+          "UPDATE push_deliveries SET status = ?, error = ?, attempted_at = ? WHERE event_id = ? AND device_id = ?",
+        ).bind(result.status, result.error, attemptedAt, eventId, device.deviceId));
+        if (result.status === "failed" && result.unregisterToken) invalidTokens.push(device.token);
       }
+    }
+    if (updates.length) await env.DB.batch(updates);
+    if (invalidTokens.length) {
+      await env.DB.batch(invalidTokens.map((token) =>
+        env.DB.prepare("DELETE FROM push_devices WHERE token = ?").bind(token)));
     }
   }
 

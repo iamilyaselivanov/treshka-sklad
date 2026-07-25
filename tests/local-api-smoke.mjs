@@ -60,6 +60,7 @@ const createdIds = [];
 const roleCookies = {};
 const pushDevices = [];
 const timings = {};
+let retryableDeliveryVerified = false;
 const auth = await authenticateOwner();
 const ownerHeaders = { cookie: auth.cookie };
 roleCookies.owner = auth.cookie;
@@ -128,22 +129,25 @@ try {
 
   const pushCases = [
     { actor: "owner", type: "post_stock_issued", targets: 1 },
+    { actor: "storekeeper", type: "post_stock_returned", targets: 3 },
     { actor: "worker", type: "defect_act_created", targets: 3 },
     { actor: "worker", type: "work_act_created", targets: 3 },
+    { actor: "admin", type: "work_awaiting_warehouse", targets: 3 },
     { actor: "storekeeper", type: "storekeeper_post_issue_completed", targets: 2 },
-    { actor: "storekeeper", type: "storekeeper_warehouse_return_accepted", targets: 2 },
+    { actor: "storekeeper", type: "storekeeper_warehouse_return_accepted", targets: 3 },
   ];
   for (const pushCase of pushCases) {
+    const payload = {
+      eventId: crypto.randomUUID(),
+      type: pushCase.type,
+      post: "ТЭЧ",
+      entityNo: `TEST-${pushCase.type}`,
+      summary: "Проверка маршрутизации push",
+    };
     const event = await request("/api/notifications/events", {
       method: "POST",
       headers: { cookie: roleCookies[pushCase.actor], "content-type": "application/json" },
-      body: JSON.stringify({
-        eventId: crypto.randomUUID(),
-        type: pushCase.type,
-        post: "ТЭЧ",
-        entityNo: `TEST-${pushCase.type}`,
-        summary: "Проверка маршрутизации push",
-      }),
+      body: JSON.stringify(payload),
     }, [200, 503]);
     assert.equal(event.data.targetDevices, pushCase.targets, `${pushCase.type} recipient routing`);
     if (event.response.status === 503) {
@@ -152,6 +156,19 @@ try {
         pushCase.targets,
         `${pushCase.type} failed deliveries remain retryable`,
       );
+    }
+    if (pushCase.type === "defect_act_created" && event.response.status === 503) {
+      const retry = await request("/api/notifications/events", {
+        method: "POST",
+        headers: { cookie: roleCookies[pushCase.actor], "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      }, 503);
+      assert.equal(retry.data.targetDevices, pushCase.targets);
+      assert.equal(
+        Number(retry.data.failed ?? 0) + Number(retry.data.disabled ?? 0),
+        pushCase.targets,
+      );
+      retryableDeliveryVerified = true;
     }
   }
   await request("/api/notifications/events", {
@@ -437,5 +454,6 @@ console.log(JSON.stringify({
   parallelLoginThrottleEnforced: true,
   crossOriginStateWriteRejected: true,
   pushRecipientRoutingVerified: true,
+  retryablePushDeliveryVerified: retryableDeliveryVerified,
   timingsMs: timings,
 }, null, 2));

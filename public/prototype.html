@@ -4681,6 +4681,9 @@ function recordStockTransfer(type,post,lines){
     if(serverActorRole()==='storekeeper'){
       emitServerPush('storekeeper_post_issue_completed',{post,entityNo:transfer.no,summary:body});
     }
+  } else if(type==='toSklad'){
+    const body=lines.map(x=>{const i=item(x.id);return `${i?i.name:x.id}: ${x.q}${i?' '+i.unit:''}`;}).join(', ');
+    emitServerPush('post_stock_returned',{post,entityNo:transfer.no,summary:body});
   }
   return transfer;
 }
@@ -5498,6 +5501,7 @@ function approveWork(no){
   d.approvalNote='согласовано администратором'+(($('approvalReason')?.value||'').trim()?' · '+$('approvalReason').value.trim():'');
   d.status='Ожидает приёмки на склад';
   logAction('АВР согласован',`${d.no}: ожидает приёмки кладовщиком`,d.post,d.itemId);
+  emitServerPush('work_awaiting_warehouse',{post:d.post,entityNo:d.no,summary:d.item||'Изделие'});
   toast('✓ Акт согласован и передан кладовщику на приёмку');
   renderWorkDoc(d);
   return true;
@@ -5536,6 +5540,7 @@ function resolveMismatch(no){
     d.approvalNote='расхождение принято администратором — '+reason;
     d.status='Ожидает приёмки на склад';
     logAction('АВР согласован с расхождением',`${d.no}: ожидает приёмки кладовщиком`,d.post,d.itemId);
+    emitServerPush('work_awaiting_warehouse',{post:d.post,entityNo:d.no,summary:d.item||'Изделие'});
     toast('✓ Решение принято. Акт передан кладовщику на приёмку');
     renderWorkDoc(d);
   }

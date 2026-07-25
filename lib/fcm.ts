@@ -21,6 +21,7 @@ export type PushSendResult =
   | { status: "failed"; error: string; unregisterToken: boolean };
 
 let cachedAccessToken: { value: string; expiresAt: number } | null = null;
+let pendingAccessToken: Promise<string> | null = null;
 
 function firebaseConfig(): FirebaseConfig | null {
   const bindings = env as unknown as Record<string, unknown>;
@@ -79,10 +80,7 @@ async function serviceAccountJwt(config: FirebaseConfig) {
   return `${unsigned}.${base64Url(new Uint8Array(signature))}`;
 }
 
-async function firebaseAccessToken(config: FirebaseConfig) {
-  if (cachedAccessToken && cachedAccessToken.expiresAt > Date.now() + 60_000) {
-    return cachedAccessToken.value;
-  }
+async function requestFirebaseAccessToken(config: FirebaseConfig) {
   const response = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -101,6 +99,20 @@ async function firebaseAccessToken(config: FirebaseConfig) {
     expiresAt: Date.now() + Math.max(60, Number(data.expires_in || 3_600)) * 1_000,
   };
   return data.access_token;
+}
+
+async function firebaseAccessToken(config: FirebaseConfig) {
+  if (cachedAccessToken && cachedAccessToken.expiresAt > Date.now() + 60_000) {
+    return cachedAccessToken.value;
+  }
+  if (pendingAccessToken) return pendingAccessToken;
+  const request = requestFirebaseAccessToken(config);
+  pendingAccessToken = request;
+  try {
+    return await request;
+  } finally {
+    if (pendingAccessToken === request) pendingAccessToken = null;
+  }
 }
 
 function firebaseErrorText(value: unknown) {
