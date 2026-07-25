@@ -16,6 +16,17 @@
     consecutiveFailures: 0,
     nextAttemptAt: 0,
   };
+  const push = {
+    registering: false,
+    registeredKey: "",
+    flushing: false,
+    queue: [],
+    retryTimer: null,
+    retryFailures: 0,
+    registrationFailures: 0,
+    nextRegistrationAt: 0,
+  };
+  const PUSH_QUEUE_KEY = "treshka_push_events_v1";
 
   async function fetchWithTimeout(input, init = {}, timeoutMs = 15_000) {
     const controller = new AbortController();
@@ -26,6 +37,141 @@
       window.clearTimeout(timer);
     }
   }
+
+  function nativePushRegistration() {
+    try {
+      if (!window.AndroidPush || typeof window.AndroidPush.registration !== "function") return null;
+      const registration = JSON.parse(window.AndroidPush.registration());
+      if (!registration || typeof registration !== "object") return null;
+      const deviceId = String(registration.deviceId || "");
+      const token = String(registration.token || "");
+      if (!deviceId || !token) return null;
+      return {
+        deviceId,
+        token,
+        platform: "android",
+        appVersion: String(registration.appVersion || ""),
+      };
+    } catch (error) {
+      console.warn("native push registration unavailable", error);
+      return null;
+    }
+  }
+
+  async function registerNativePush() {
+    if (!sync.user || push.registering) return false;
+    if (Date.now() < push.nextRegistrationAt) return false;
+    const registration = nativePushRegistration();
+    if (!registration) return false;
+    const key = `${sync.user.id}:${registration.deviceId}:${registration.token}`;
+    if (push.registeredKey === key) return true;
+    push.registering = true;
+    try {
+      const response = await fetchWithTimeout("/api/devices/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(registration),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Устройство не зарегистрировано");
+      push.registeredKey = key;
+      push.registrationFailures = 0;
+      push.nextRegistrationAt = 0;
+      return true;
+    } catch (error) {
+      console.warn("push registration failed", error);
+      push.registrationFailures += 1;
+      push.nextRegistrationAt = Date.now() + Math.min(5 * 60_000, 5_000 * (2 ** Math.min(6, push.registrationFailures - 1)));
+      return false;
+    } finally {
+      push.registering = false;
+    }
+  }
+
+  function savePushQueue() {
+    try {
+      localStorage.setItem(PUSH_QUEUE_KEY, JSON.stringify(push.queue.slice(-100)));
+    } catch (error) {
+      console.warn("push queue was not persisted", error);
+    }
+  }
+
+  function loadPushQueue() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(PUSH_QUEUE_KEY) || "[]");
+      push.queue = Array.isArray(parsed)
+        ? parsed.filter((entry) => entry && entry.actorUserId === sync.user?.id).slice(-100)
+        : [];
+    } catch {
+      push.queue = [];
+    }
+    savePushQueue();
+  }
+
+  function schedulePushRetry() {
+    if (push.retryTimer) return;
+    push.retryFailures += 1;
+    const delay = Math.min(5 * 60_000, 5_000 * (2 ** Math.min(6, push.retryFailures - 1)));
+    push.retryTimer = window.setTimeout(() => {
+      push.retryTimer = null;
+      void flushPushQueue();
+    }, delay);
+  }
+
+  async function flushPushQueue() {
+    if (!sync.user || push.flushing || !push.queue.length) return;
+    push.flushing = true;
+    try {
+      while (push.queue.length) {
+        const event = push.queue[0];
+        if (event.actorUserId !== sync.user.id) {
+          push.queue.shift();
+          savePushQueue();
+          continue;
+        }
+        const response = await fetchWithTimeout("/api/notifications/events", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(event.payload),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) {
+            console.warn("push event rejected", data.error || response.status);
+            push.queue.shift();
+            savePushQueue();
+            continue;
+          }
+          throw new Error(data.error || "Событие push не отправлено");
+        }
+        push.queue.shift();
+        savePushQueue();
+      }
+      push.retryFailures = 0;
+    } catch (error) {
+      console.warn("push event delivery deferred", error);
+      schedulePushRetry();
+    } finally {
+      push.flushing = false;
+    }
+  }
+
+  window.treshkaServerRole = () => sync.user?.role || "";
+  window.treshkaEmitPushEvent = function (type, details = {}) {
+    if (!sync.user || !type) return "";
+    const payload = {
+      eventId: crypto.randomUUID(),
+      type: String(type),
+      post: String(details.post || ""),
+      entityNo: String(details.entityNo || ""),
+      summary: String(details.summary || ""),
+    };
+    push.queue.push({ actorUserId: sync.user.id, payload });
+    savePushQueue();
+    void flushPushQueue();
+    return payload.eventId;
+  };
+  window.onNativePushRegistration = () => { void registerNativePush(); };
 
   function noteSyncSuccess() {
     sync.consecutiveFailures = 0;
@@ -300,6 +446,10 @@
   async function synchronize() {
     if (!sync.ready || sync.busy || sync.conflict) return;
     if (Date.now() < sync.nextAttemptAt) return;
+    // Re-read the native token even after a successful registration: FCM can
+    // rotate it while the app is open.
+    void registerNativePush();
+    if (push.queue.length) void flushPushQueue();
     if (!canUploadState()) {
       await pollServer();
       return;
@@ -357,6 +507,7 @@
     try {
       const data = await fetchSnapshot();
       sync.user = data.user;
+      loadPushQueue();
       installServerAccountControls();
       sync.revision = data.revision || 0;
       if (data.state) {
@@ -374,6 +525,8 @@
       go("sklad");
       if (!data.state && canUploadState()) await uploadIfChanged();
       else if (canUploadState()) void migrateEmbeddedPhotos();
+      void registerNativePush();
+      void flushPushQueue();
       sync.timer = window.setInterval(synchronize, 2500);
       window.addEventListener("beforeunload", () => { void uploadIfChanged(); });
     } catch (error) {

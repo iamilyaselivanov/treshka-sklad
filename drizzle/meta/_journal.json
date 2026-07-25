@@ -29,6 +29,13 @@
       "when": 1784962605252,
       "tag": "0003_warehouse_full_state",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1784978404619,
+      "tag": "0004_pale_thanos",
+      "breakpoints": true
     }
   ]
 }

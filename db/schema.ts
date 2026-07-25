@@ -75,3 +75,57 @@ export const warehouseFullState = sqliteTable("warehouse_full_state", {
   updatedAt: text("updated_at").notNull(),
   updatedBy: text("updated_by").notNull(),
 });
+
+export const pushDevices = sqliteTable(
+  "push_devices",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    deviceId: text("device_id").notNull(),
+    token: text("token").notNull(),
+    platform: text("platform", { enum: ["android"] }).notNull().default("android"),
+    appVersion: text("app_version").notNull().default(""),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    lastSeenAt: text("last_seen_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("push_devices_device_idx").on(table.deviceId),
+    uniqueIndex("push_devices_token_idx").on(table.token),
+    index("push_devices_user_idx").on(table.userId),
+  ],
+);
+
+export const pushEvents = sqliteTable(
+  "push_events",
+  {
+    id: text("id").primaryKey(),
+    actorUserId: text("actor_user_id").notNull(),
+    eventType: text("event_type").notNull(),
+    post: text("post").notNull().default(""),
+    entityNo: text("entity_no").notNull().default(""),
+    summary: text("summary").notNull().default(""),
+    title: text("title").notNull(),
+    body: text("body").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [index("push_events_created_idx").on(table.createdAt)],
+);
+
+export const pushDeliveries = sqliteTable(
+  "push_deliveries",
+  {
+    id: text("id").primaryKey(),
+    eventId: text("event_id").notNull(),
+    userId: text("user_id").notNull(),
+    deviceId: text("device_id").notNull(),
+    status: text("status", { enum: ["pending", "sent", "failed", "disabled"] }).notNull(),
+    providerMessageId: text("provider_message_id").notNull().default(""),
+    error: text("error").notNull().default(""),
+    attemptedAt: text("attempted_at"),
+  },
+  (table) => [
+    uniqueIndex("push_deliveries_event_device_idx").on(table.eventId, table.deviceId),
+    index("push_deliveries_status_idx").on(table.status),
+  ],
+);

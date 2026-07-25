@@ -25,7 +25,11 @@ async function request(path, init = {}, expected = 200) {
   } catch {
     data = { error: raw };
   }
-  assert.equal(response.status, expected, `${init.method ?? "GET"} ${path}: ${JSON.stringify(data)}`);
+  const expectedStatuses = Array.isArray(expected) ? expected : [expected];
+  assert.ok(
+    expectedStatuses.includes(response.status),
+    `${init.method ?? "GET"} ${path}: expected ${expectedStatuses.join("/")} got ${response.status}: ${JSON.stringify(data)}`,
+  );
   return { response, data, elapsedMs };
 }
 
@@ -54,9 +58,11 @@ async function authenticateOwner() {
 const suffix = Date.now().toString(36);
 const createdIds = [];
 const roleCookies = {};
+const pushDevices = [];
 const timings = {};
 const auth = await authenticateOwner();
 const ownerHeaders = { cookie: auth.cookie };
+roleCookies.owner = auth.cookie;
 timings.ownerAuthentication = auth.elapsedMs;
 
 try {
@@ -107,6 +113,50 @@ try {
     headers: ownerHeaders,
   }, 403);
   await request("/api/users", { headers: { cookie: roleCookies.worker } }, 403);
+
+  for (const role of ["owner", "admin", "storekeeper", "worker"]) {
+    const deviceId = crypto.randomUUID();
+    const token = `${role}-${suffix}-`.padEnd(96, "x");
+    pushDevices.push({ role, deviceId });
+    const registered = await request("/api/devices/register", {
+      method: "POST",
+      headers: { cookie: roleCookies[role], "content-type": "application/json" },
+      body: JSON.stringify({ deviceId, token, platform: "android", appVersion: "1.6" }),
+    });
+    assert.equal(registered.data.ok, true);
+  }
+
+  const pushCases = [
+    { actor: "owner", type: "post_stock_issued", targets: 1 },
+    { actor: "worker", type: "defect_act_created", targets: 3 },
+    { actor: "worker", type: "work_act_created", targets: 3 },
+    { actor: "storekeeper", type: "storekeeper_post_issue_completed", targets: 2 },
+    { actor: "storekeeper", type: "storekeeper_warehouse_return_accepted", targets: 2 },
+  ];
+  for (const pushCase of pushCases) {
+    const event = await request("/api/notifications/events", {
+      method: "POST",
+      headers: { cookie: roleCookies[pushCase.actor], "content-type": "application/json" },
+      body: JSON.stringify({
+        eventId: crypto.randomUUID(),
+        type: pushCase.type,
+        post: "ТЭЧ",
+        entityNo: `TEST-${pushCase.type}`,
+        summary: "Проверка маршрутизации push",
+      }),
+    }, [200, 503]);
+    assert.equal(event.data.targetDevices, pushCase.targets, `${pushCase.type} recipient routing`);
+  }
+  await request("/api/notifications/events", {
+    method: "POST",
+    headers: { cookie: roleCookies.worker, "content-type": "application/json" },
+    body: JSON.stringify({
+      eventId: crypto.randomUUID(),
+      type: "storekeeper_post_issue_completed",
+      post: "ТЭЧ",
+      entityNo: "FORBIDDEN",
+    }),
+  }, 403);
 
   const state = await request("/api/state", { headers: ownerHeaders });
   assert.equal(state.data.user.id, auth.user.id);
@@ -202,6 +252,13 @@ try {
     headers: ownerHeaders,
   }, 404);
 } finally {
+  for (const device of pushDevices) {
+    await request("/api/devices/register", {
+      method: "DELETE",
+      headers: { cookie: roleCookies[device.role], "content-type": "application/json" },
+      body: JSON.stringify({ deviceId: device.deviceId }),
+    });
+  }
   for (const id of createdIds.reverse()) {
     await request(`/api/users?id=${encodeURIComponent(id)}`, {
       method: "DELETE",
@@ -226,5 +283,6 @@ console.log(JSON.stringify({
   everyStateWriteAudited: true,
   parallelLoginThrottleEnforced: true,
   crossOriginStateWriteRejected: true,
+  pushRecipientRoutingVerified: true,
   timingsMs: timings,
 }, null, 2));

@@ -406,7 +406,27 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
   }
 
   async function logout() {
-    await fetch("/api/auth/logout", { method: "POST" });
+    let deviceId = "";
+    try {
+      const bridge = (window as typeof window & {
+        AndroidPush?: { registration: () => string };
+      }).AndroidPush;
+      if (bridge?.registration) {
+        const registration = JSON.parse(bridge.registration()) as { deviceId?: string };
+        deviceId = String(registration.deviceId ?? "");
+      }
+    } catch (error) {
+      console.warn("push device id unavailable", error);
+    }
+    const response = await fetch("/api/auth/logout", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceId }),
+    });
+    if (!response.ok) {
+      notify("Не удалось безопасно выйти. Повторите попытку.");
+      return;
+    }
     loggedOut();
   }
 

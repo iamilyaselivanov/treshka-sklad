@@ -13,7 +13,7 @@ test("release version is 1.6 in web and Android", async () => {
   ]);
   assert.equal(JSON.parse(pkg).version, "1.6.0");
   assert.match(page, /Версия 1\.6/);
-  assert.match(gradle, /versionCode 7/);
+  assert.match(gradle, /versionCode 8/);
   assert.match(gradle, /versionName "1\.6"/);
 });
 
@@ -139,7 +139,7 @@ test("build and local D1 bootstrap use the packaged Drizzle migrations", async (
     text("build/sites-vite-plugin.ts"),
     text("dist/server/wrangler.json"),
   ]);
-  assert.match(JSON.parse(pkg).scripts["db:migrate:local"], /wrangler d1 migrations apply DB --local/);
+  assert.match(JSON.parse(pkg).scripts["db:migrate:local"], /wrangler d1 migrations apply DB --local --persist-to \.wrangler\/state/);
   assert.match(vite, /migrations_dir: "\.\/drizzle"/);
   assert.match(plugin, /resolve\(root, "drizzle"\)/);
   assert.equal(JSON.parse(wrangler).d1_databases[0].migrations_dir, "../../drizzle");
@@ -147,6 +147,7 @@ test("build and local D1 bootstrap use the packaged Drizzle migrations", async (
   await text("dist/.openai/drizzle/0001_famous_the_hunter.sql");
   await text("dist/.openai/drizzle/0002_quick_bloodscream.sql");
   await text("dist/.openai/drizzle/0003_warehouse_full_state.sql");
+  await text("dist/.openai/drizzle/0004_pale_thanos.sql");
 });
 
 test("database migrations build a clean schema and adopt the legacy runtime state table", async () => {
@@ -155,6 +156,7 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
     text("drizzle/0001_famous_the_hunter.sql"),
     text("drizzle/0002_quick_bloodscream.sql"),
     text("drizzle/0003_warehouse_full_state.sql"),
+    text("drizzle/0004_pale_thanos.sql"),
   ]);
   const apply = (database, sql) => {
     for (const statement of sql.split("--> statement-breakpoint")) {
@@ -167,7 +169,7 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   assert.deepEqual(
     clean.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all()
       .map((row) => row.name),
-    ["audit_log", "login_throttle", "products", "sessions", "users", "warehouse_full_state"],
+    ["audit_log", "login_throttle", "products", "push_deliveries", "push_devices", "push_events", "sessions", "users", "warehouse_full_state"],
   );
   clean.close();
 
@@ -188,4 +190,40 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
     5,
   );
   adopted.close();
+});
+
+test("push notifications are server-addressed, durable and connected to Android FCM", async () => {
+  const [eventsRoute, devicesRoute, fcm, bridge, prototype, service, activity, migration] = await Promise.all([
+    text("app/api/notifications/events/route.ts"),
+    text("app/api/devices/register/route.ts"),
+    text("lib/fcm.ts"),
+    text("public/prototype-server.js"),
+    text("public/prototype.html"),
+    text("android/app/src/main/java/com/treshka/sklad/WarehouseFirebaseMessagingService.kt"),
+    text("android/app/src/main/java/com/treshka/sklad/MainActivity.kt"),
+    text("drizzle/0004_pale_thanos.sql"),
+  ]);
+  for (const eventType of [
+    "post_stock_issued",
+    "defect_act_created",
+    "work_act_created",
+    "storekeeper_post_issue_completed",
+    "storekeeper_warehouse_return_accepted",
+  ]) {
+    assert.match(eventsRoute, new RegExp(eventType));
+    assert.match(prototype, new RegExp(eventType));
+  }
+  assert.match(eventsRoute, /users\.assignment = \?/);
+  assert.match(eventsRoute, /users\.role IN \('owner', 'admin', 'storekeeper'\)/);
+  assert.match(eventsRoute, /users\.role IN \('owner', 'admin'\)/);
+  assert.match(devicesRoute, /ON CONFLICT\(device_id\) DO UPDATE/);
+  assert.match(fcm, /firebase\.messaging/);
+  assert.match(fcm, /fcm\.googleapis\.com\/v1\/projects/);
+  assert.match(bridge, /PUSH_QUEUE_KEY/);
+  assert.match(bridge, /registerNativePush/);
+  assert.match(service, /POST_NOTIFICATIONS/);
+  assert.match(activity, /AndroidPush/);
+  assert.match(migration, /CREATE TABLE `push_devices`/);
+  assert.match(migration, /CREATE TABLE `push_events`/);
+  assert.match(migration, /CREATE TABLE `push_deliveries`/);
 });

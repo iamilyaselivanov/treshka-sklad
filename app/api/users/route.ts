@@ -92,6 +92,7 @@ export async function DELETE(request: Request) {
     return Response.json({ error: "Удалять администраторов может только владелец" }, { status: 403 });
   }
   await env.DB.batch([
+    env.DB.prepare("DELETE FROM push_devices WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM users WHERE id = ?").bind(id),
   ]);

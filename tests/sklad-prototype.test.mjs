@@ -1160,6 +1160,8 @@ test('review round — defect validation allows no serial, links/creates a card,
     closeWork(work.no);
     currentRole = 'admin';
     approveWork(work.no);
+    currentRole = 'kladovshik';
+    acceptWorkToWarehouse(work.no);
     const returnedToWarehouse = linked.stock === linkedStockBefore + 1 && !linked.posts[post];
 
     views.newDefekt();
@@ -1277,7 +1279,7 @@ test('v1.3 — admin creates a hashed worker account bound to a post and post no
   await ctx.close();
 });
 
-test('v1.3 — every ordinary work act waits for admin approval; analytics stays outside printable output', async () => {
+test('v1.6 — every work act waits for admin approval and then storekeeper warehouse acceptance', async () => {
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => {
     const base = docs.find((d) => d.kind === 'defekt' && d.status === 'Закрыт' && !String(d.verdict || '').includes('Не подлежит'));
@@ -1296,9 +1298,13 @@ test('v1.3 — every ordinary work act waits for admin approval; analytics stays
     const print = buildWorkActPrintHtml(work, actFileTitle(work));
     currentRole = 'admin';
     approveWork(work.no);
-    return { pending, closed: work.status === 'Закрыт', appHasAnalytics, printHasAnalytics: print.includes('Аналитика: выдано') };
+    const awaitingWarehouse = work.status === 'Ожидает приёмки на склад';
+    currentRole = 'kladovshik';
+    acceptWorkToWarehouse(work.no);
+    return { pending, awaitingWarehouse, closed: work.status === 'Закрыт', appHasAnalytics, printHasAnalytics: print.includes('Аналитика: выдано') };
   });
   assert.equal(r.pending, true);
+  assert.equal(r.awaitingWarehouse, true);
   assert.equal(r.closed, true);
   assert.equal(r.appHasAnalytics, true);
   assert.equal(r.printHasAnalytics, false);

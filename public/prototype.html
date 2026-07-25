@@ -3048,6 +3048,15 @@ function notifyPostUsers(post,title,body,type,entityNo){
   if(recipients.length) recipients.forEach(a=>addNotification({recipientAccountId:a.id,recipientLogin:a.login,recipientRole:a.role,post},title,body,type,entityNo));
   else addNotification({recipientRole:'rabotnik',post},title,body,type,entityNo);
 }
+function emitServerPush(type,details){
+  try{
+    if(typeof window.treshkaEmitPushEvent==='function') return window.treshkaEmitPushEvent(type,details||{});
+  }catch(e){console.warn('Push-событие будет повторено серверным мостом',e);}
+  return '';
+}
+function serverActorRole(){
+  try{return typeof window.treshkaServerRole==='function'?window.treshkaServerRole():'';}catch{return '';}
+}
 function visibleNotifications(){
   return notifications.filter(n=>currentAccountId?n.recipientAccountId===currentAccountId:
     (!n.recipientAccountId&&((n.recipientRole===currentRole)||(!n.recipientRole&&(!n.post||n.post===currentUserPost)))&&(!n.post||n.post===currentUserPost)));
@@ -4667,6 +4676,10 @@ function recordStockTransfer(type,post,lines){
   if(type==='toPost'){
     const body=lines.map(x=>{const i=item(x.id);return `${i?i.name:x.id}: ${x.q}${i?' '+i.unit:''}`;}).join(', ');
     notifyPostUsers(post,'Поступление товара на пост',`${post}: ${body}`,'stock',transfer.no);
+    emitServerPush('post_stock_issued',{post,entityNo:transfer.no,summary:body});
+    if(serverActorRole()==='storekeeper'){
+      emitServerPush('storekeeper_post_issue_completed',{post,entityNo:transfer.no,summary:body});
+    }
   }
   return transfer;
 }
@@ -5140,13 +5153,15 @@ function renderWorkDoc(d){
     const unresolved = hasUnresolvedMismatch(d);
     const closed = d.status==='Закрыт';
     const pending = d.status==='Ожидает согласования';
-    const locked = closed||pending;
+    const awaitingWarehouse = d.status==='Ожидает приёмки на склад';
+    const locked = closed||pending||awaitingWarehouse;
     const analytics=workMaterialAnalytics(d);
     setHdr(d.no+' · Акт выполненных работ', `${esc(d.item)} · из дефектовки ${d.defektDoc}`, true, false);
     const sum = d.materials.map(m=>{const it=item(m.id);return {it,q:m.q};});
     $('content').innerHTML = `
       ${unresolved?`<div class="progress-note bad">⚠ Расхождение по количеству: получено ${d.planQty}, годных ${d.factQty} (брак: ${d.planQty-d.factQty}). Администратору отправлено push-уведомление. Закрыть акт может только администратор.${d.mismatchDecision==='rework'?' Акт возвращён на доработку, но остаётся заблокирован до решения администратора.':''}</div>`
-        : closed?`<div class="progress-note ok">✓ Акт согласован администратором и закрыт — материалы списаны, изделие возвращено на склад${d.mismatchReason?' (принято с расхождением: '+esc(d.mismatchReason)+')':''}</div>`
+        : closed?`<div class="progress-note ok">✓ Акт закрыт — материалы списаны, изделие принято кладовщиком на склад${d.mismatchReason?' (принято с расхождением: '+esc(d.mismatchReason)+')':''}</div>`
+        : awaitingWarehouse?'<div class="progress-note">⏳ Акт согласован. Ожидается приёмка изделия кладовщиком на склад.</div>'
         : pending?'<div class="progress-note">⏳ Акт отправлен администратору. До решения редактирование и списание заблокированы.</div>'
         : '<div class="progress-note">⚠ Черновик — после отправки акт обязан согласовать администратор</div>'}
       <div class="card static">
@@ -5239,9 +5254,13 @@ function renderWorkDoc(d){
                </select></div>
              <button class="btn red" id="mm_submit" disabled onclick="resolveMismatch('${d.no}')">Подтвердить решение администратора</button>`
           : `<button class="btn red" disabled>🔒 Закрыть может только администратор</button>`)
-        : (closed ? '' : pending
+        : (closed ? '' : awaitingWarehouse
+          ? (currentRole==='kladovshik'
+            ? `<button class="btn green" onclick="acceptWorkToWarehouse('${d.no}')">✓ Принять изделие на склад и закрыть акт</button>`
+            : '<button class="btn primary" disabled>⏳ Ожидает приёмки кладовщиком</button>')
+          : pending
           ? (currentRole==='admin'
-            ? `<div class="fld"><label>Комментарий администратора</label><textarea id="approvalReason" placeholder="Причина возврата или комментарий к согласованию"></textarea></div><button class="btn green" onclick="approveWork('${d.no}')">✓ Согласовать и закрыть</button><button class="btn red" onclick="rejectWork('${d.no}')">↩ Вернуть на доработку</button>`
+            ? `<div class="fld"><label>Комментарий администратора</label><textarea id="approvalReason" placeholder="Причина возврата или комментарий к согласованию"></textarea></div><button class="btn green" onclick="approveWork('${d.no}')">✓ Согласовать и передать кладовщику</button><button class="btn red" onclick="rejectWork('${d.no}')">↩ Вернуть на доработку</button>`
             : '<button class="btn primary" disabled>⏳ Ожидает согласования администратора</button>')
           : `<button class="btn green" onclick="closeWork('${d.no}')">Отправить администратору на согласование</button>`)}
       <button class="btn ghost" onclick="printDoc('${d.no}')">⤓ Экспорт в PDF</button>
@@ -5475,7 +5494,11 @@ function approveWork(no){
   const d=docs.find(x=>x.no===no);if(!d||d.status!=='Ожидает согласования'){toast('Акт не ожидает согласования');return false;}
   const shortfalls=findMaterialShortfalls(d);if(shortfalls.length){const s=shortfalls[0];toast(`Недостаточно на посту «${d.post}»: ${s.it.name} — нужно ${s.need}, есть ${s.avail}`);return false;}
   d.approvedBy=accounts.find(a=>a.id===currentAccountId)?.login||'Администратор';d.approvedAt=Date.now();
-  performWorkClose(d,'согласовано администратором'+(($('approvalReason')?.value||'').trim()?' · '+$('approvalReason').value.trim():''));
+  d.approvalNote='согласовано администратором'+(($('approvalReason')?.value||'').trim()?' · '+$('approvalReason').value.trim():'');
+  d.status='Ожидает приёмки на склад';
+  logAction('АВР согласован',`${d.no}: ожидает приёмки кладовщиком`,d.post,d.itemId);
+  toast('✓ Акт согласован и передан кладовщику на приёмку');
+  renderWorkDoc(d);
   return true;
 }
 function rejectWork(no){
@@ -5509,7 +5532,11 @@ function resolveMismatch(no){
       toast(`Недостаточно на посту «${d.post}»: ${s0.it.name} — нужно ${s0.need}, есть ${s0.avail} ${s0.it.unit}`);
       return;
     }
-    performWorkClose(d, 'расхождение принято администратором — '+reason);
+    d.approvalNote='расхождение принято администратором — '+reason;
+    d.status='Ожидает приёмки на склад';
+    logAction('АВР согласован с расхождением',`${d.no}: ожидает приёмки кладовщиком`,d.post,d.itemId);
+    toast('✓ Решение принято. Акт передан кладовщику на приёмку');
+    renderWorkDoc(d);
   }
 }
 // Списывает qty из массива партий на ПОСТУ (p.stock[].lots — поле q, не
@@ -5527,6 +5554,20 @@ function consumePostLotsFifo(lotsArr, qty){
     remaining = roundQuantity(remaining - take);
   }
   return lotsArr.filter(l=>l.q>0);
+}
+function acceptWorkToWarehouse(no){
+  if(currentRole!=='kladovshik'){toast('Принять изделие на склад может только кладовщик');return false;}
+  const d=docs.find(x=>x.no===no);
+  if(!d||d.status!=='Ожидает приёмки на склад'){toast('Акт не ожидает приёмки на склад');return false;}
+  d.warehouseAcceptedAt=Date.now();
+  d.warehouseAcceptedBy='Кладовщик';
+  performWorkClose(d,d.approvalNote||'принято кладовщиком на склад');
+  emitServerPush('storekeeper_warehouse_return_accepted',{
+    post:d.post,
+    entityNo:d.no,
+    summary:`${d.item} · пост ${d.post}`,
+  });
+  return true;
 }
 function performWorkClose(d, note){
   if(d.status==='Закрыт'){ toast('Акт уже закрыт'); return; }
@@ -5638,6 +5679,7 @@ function submitDefekt(){
   logAction('Акт дефектовки закрыт', `${newNo}: ${itemLabel||'изделие'}, заключение: ${verdict}`, postName);
   notifyAdmins('Поступила новая заявка',`${$('f_order').value} · ${itemLabel} · пост ${postName}`,'application',$('f_order').value);
   notifyAdmins('Создан акт дефектовки',`${newNo} · ${itemLabel} · пост ${postName}`,'defekt',newNo);
+  emitServerPush('defect_act_created',{post:postName,entityNo:newNo,summary:itemLabel||'Изделие'});
   if(verdict.includes('Не подлежит')){
     toast('✓ Акт закрыт: изделие уходит в списание');
     setTimeout(()=>go('docs'), 900);
@@ -5667,6 +5709,7 @@ function createWorkFromDefekt(defektNo){
     participants:[], works:[], materials:[], issuedSnapshot, actionTypes:[], resultText:'', otkPassed:false});
   d.workDoc = newNo;
   notifyAdmins('Создан акт выполненных работ',`${newNo} · ${d.item} · пост ${d.post}`,'work',newNo);
+  emitServerPush('work_act_created',{post:d.post,entityNo:newNo,summary:d.item||'Изделие'});
   toast('✓ Акт '+newNo+' создан, привязан к '+defektNo);
   setTimeout(()=>openDoc(docs.indexOf(docs.find(x=>x.no===newNo))), 400);
 }

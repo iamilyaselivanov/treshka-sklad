@@ -70,6 +70,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private lateinit var appStateStore: AppStateStore
     private lateinit var serverSyncManager: ServerSyncManager
+    private lateinit var pushRegistrationStore: PushRegistrationStore
 
     private val scanLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -183,6 +184,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         appStateStore = AppStateStore(this)
+        pushRegistrationStore = PushRegistrationStore(this)
         createNotificationChannel()
 
         webView = WebView(this)
@@ -226,6 +228,7 @@ class MainActivity : AppCompatActivity() {
         webView.addJavascriptInterface(PrintBridge(), "AndroidPrint")
         webView.addJavascriptInterface(PhotoBridge(), "AndroidPhoto")
         webView.addJavascriptInterface(NotificationBridge(), "AndroidNotifications")
+        webView.addJavascriptInterface(PushBridge(), "AndroidPush")
 
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: android.webkit.WebResourceRequest): Boolean {
@@ -273,7 +276,11 @@ class MainActivity : AppCompatActivity() {
 
         if (FirebaseApp.getApps(this).isNotEmpty()) {
             FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
-                serverSyncManager.registerPushToken(token)
+                pushRegistrationStore.saveToken(token)
+                webView.evaluateJavascript(
+                    "document.querySelector('iframe')?.contentWindow?.onNativePushRegistration?.();",
+                    null,
+                )
             }
         }
 
@@ -306,7 +313,11 @@ class MainActivity : AppCompatActivity() {
             val result = serverSyncManager.login(baseUrl, login, password)
             if (FirebaseApp.getApps(this@MainActivity).isNotEmpty()) {
                 FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
-                    serverSyncManager.registerPushToken(token)
+                    pushRegistrationStore.saveToken(token)
+                    webView.evaluateJavascript(
+                        "document.querySelector('iframe')?.contentWindow?.onNativePushRegistration?.();",
+                        null,
+                    )
                 }
             }
             result
@@ -336,9 +347,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         @JavascriptInterface
-        fun registerPushToken(token: String): Boolean = serverSyncManager.registerPushToken(token)
-
-        @JavascriptInterface
         fun uploadImage(dataUrl: String): String = try {
             serverSyncManager.uploadImage(dataUrl)
         } catch (e: Exception) {
@@ -353,6 +361,11 @@ class MainActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun disconnect() = appStateStore.clearSyncAuth()
+    }
+
+    inner class PushBridge {
+        @JavascriptInterface
+        fun registration(): String = pushRegistrationStore.registrationJson()
     }
 
     private fun createNotificationChannel() {

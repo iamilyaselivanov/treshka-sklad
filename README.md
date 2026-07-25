@@ -98,6 +98,30 @@ Sites deployments package `drizzle/**` into `dist/.openai/drizzle/**` and apply
 those tracked migrations to the hosted D1 resource. Runtime route handlers do
 not create tables, so schema history stays under migration control.
 
+## Push-уведомления Android
+
+Push работает через Firebase Cloud Messaging HTTP v1. Код приложения не
+содержит закрытых ключей.
+
+1. Создайте Android-приложение `com.treshka.sklad` в Firebase и положите
+   загруженный клиентский файл в `android/app/google-services.json`.
+2. В секретах среды размещённого сайта задайте:
+   `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`.
+   Это поля сервисного аккаунта Firebase; сам JSON сервисного аккаунта и его
+   закрытый ключ в Git не добавляются.
+3. Перед выпуском APK примените миграцию `drizzle/0004_pale_thanos.sql` вместе
+   с остальными миграциями и соберите Android release. При выходе из аккаунта
+   устройство отзывается, а при следующем входе FCM-токен привязывается к
+   вошедшему сотруднику.
+
+Сервер сам выбирает получателей и не принимает список адресатов от клиента:
+
+- выдача на пост — все активные сотрудники, назначенные на этот пост;
+- новый акт дефектовки или выполненных работ — владелец, администраторы и
+  кладовщики;
+- выдача кладовщиком на пост — владелец и администраторы;
+- приёмка кладовщиком изделия на склад после АВР — владелец и администраторы.
+
 ## Learn More
 
 - [vinext Documentation](https://github.com/cloudflare/vinext)

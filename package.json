@@ -14,7 +14,7 @@
     "test:sklad": "node --test tests/sklad-prototype.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
-    "db:migrate:local": "npm run build && wrangler d1 migrations apply DB --local --config dist/server/wrangler.json"
+    "db:migrate:local": "npm run build && wrangler d1 migrations apply DB --local --persist-to .wrangler/state --config dist/server/wrangler.json"
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",
