@@ -84,7 +84,7 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  const auth = await requireUser(request, ["owner", "admin", "storekeeper"]);
+  const auth = await requireUser(request, ["owner", "admin"]);
   if (auth.response || !auth.user) return auth.response;
   const id = new URL(request.url).searchParams.get("id");
   if (!id) return Response.json({ error: "Не указан товар" }, { status: 400 });

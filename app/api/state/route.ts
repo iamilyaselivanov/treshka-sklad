@@ -44,6 +44,22 @@ function normalizedState(value: unknown): WarehouseState | null {
   return state;
 }
 
+function itemIds(state: WarehouseState) {
+  const result = new Set<string>();
+  const items = Array.isArray(state.items) ? state.items : [];
+  for (const value of items) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const id = String((value as Record<string, unknown>).id ?? "").trim();
+    if (id) result.add(id);
+  }
+  return result;
+}
+
+function removedItemIds(previous: WarehouseState, next: WarehouseState) {
+  const nextIds = itemIds(next);
+  return [...itemIds(previous)].filter((id) => !nextIds.has(id));
+}
+
 export async function GET(request: Request) {
   const auth = await requireUser(request);
   if (auth.response) return auth.response;
@@ -96,6 +112,31 @@ export async function PUT(request: Request) {
       { error: "Требуется номер исходной ревизии. Обновите данные склада" },
       { status: 428 },
     );
+  }
+  if (auth.user.role === "storekeeper" && expectedRevision > 0) {
+    const current = await env.DB.prepare(
+      "SELECT revision, payload FROM warehouse_full_state WHERE state_key = 'main'",
+    ).first<Pick<StateRow, "revision" | "payload">>();
+    if (current?.revision === expectedRevision) {
+      let previous: WarehouseState | null = null;
+      try {
+        previous = normalizedState(JSON.parse(current.payload));
+      } catch {
+        // A damaged server snapshot must never be overwritten through a less privileged session.
+      }
+      if (!previous) {
+        return Response.json(
+          { error: "Серверный снимок повреждён. Обратитесь к владельцу" },
+          { status: 500 },
+        );
+      }
+      if (removedItemIds(previous, state).length > 0) {
+        return Response.json(
+          { error: "Удалять карточки товара может только владелец или администратор" },
+          { status: 403 },
+        );
+      }
+    }
   }
   const payload = JSON.stringify(state);
   const sizeBytes = new TextEncoder().encode(payload).byteLength;

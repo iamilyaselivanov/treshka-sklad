@@ -3398,6 +3398,7 @@ function safePhotoSource(value){
     || (typeof value==='string' && /^\/api\/media\/images\?key=images%2F[0-9a-f-]{36}\.(?:jpg|png|webp)$/.test(value));
 }
 function canManageCatalog(){ return currentRole==='admin' || currentRole==='kladovshik'; }
+function canDeleteCatalogItem(){ return currentRole==='admin'; }
 const item = id => items.find(i=>i.id===id);
 const fmtQ = (i,q) => `${q} ${esc(i.unit)}`;
 
@@ -4512,7 +4513,7 @@ function submitEditItem(id){
 }
 
 function deleteItem(id){
-  if(!canManageCatalog()){ toast('🔒 Недоступно для роли «Работник»'); return false; }
+  if(!canDeleteCatalogItem()){ toast('🔒 Удалять карточки товара может только владелец или администратор'); return false; }
   const i=item(id); if(!i) return false;
   const used=i.stock>0 || i.ext>0 || Object.values(i.posts||{}).some(q=>q>0) || docs.some(d=>d.itemId===id || (d.materials||[]).some(m=>m.id===id));
   if(used){ toast('Нельзя удалить: по товару есть остатки, выдачи или документы'); return false; }
@@ -4965,8 +4966,8 @@ function openItem(id){
       </div>
       ${i.desc?`<div class="card static"><div class="s" style="font-size:12.5px;color:var(--ink)">${esc(i.desc)}</div></div>`:''}
       ${canManageCatalog()?`<div class="btn-row"><button class="btn green" onclick="openStockAdjustment('${i.id}','in')">＋ Поступление</button><button class="btn ghost" onclick="openStockAdjustment('${i.id}','off')">− Списать</button></div>
-      <button class="btn ghost" onclick="openEditItemForm('${i.id}')">✎ Редактировать карточку</button>
-      <button class="btn red" onclick="deleteItem('${i.id}')">Удалить карточку</button>`:''}
+      <button class="btn ghost" onclick="openEditItemForm('${i.id}')">✎ Редактировать карточку</button>`:''}
+      ${canDeleteCatalogItem()?`<button class="btn red" onclick="deleteItem('${i.id}')">Удалить карточку</button>`:''}
       ${i.stock<i.min?`<div class="progress-note">⚠ Остаток ниже минимума — позиция попала в список закупки</div>`:''}
       <div class="sec">Группа ABC-анализа</div>
       <div class="card static"><div class="s" style="font-size:12.5px;color:var(--ink)"><b>${i.abc}</b> — ${ABC_INFO[i.abc]}</div></div>

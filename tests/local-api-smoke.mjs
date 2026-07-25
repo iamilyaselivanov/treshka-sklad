@@ -158,6 +158,28 @@ try {
     }),
   }, 403);
 
+  const product = await request("/api/products", {
+    method: "POST",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({
+      name: "Проверка удаления карточки",
+      sku: `DELETE-${suffix}`,
+      category: "Тест",
+      quantity: 0,
+      unit: "шт",
+      location: "",
+      minimum: 0,
+    }),
+  }, 201);
+  await request(`/api/products?id=${encodeURIComponent(product.data.product.id)}`, {
+    method: "DELETE",
+    headers: { cookie: roleCookies.storekeeper },
+  }, 403);
+  await request(`/api/products?id=${encodeURIComponent(product.data.product.id)}`, {
+    method: "DELETE",
+    headers: { cookie: roleCookies.admin },
+  });
+
   const state = await request("/api/state", { headers: ownerHeaders });
   assert.equal(state.data.user.id, auth.user.id);
   assert.ok(Number.isInteger(state.data.revision));
@@ -217,14 +239,44 @@ try {
   assert.equal("accounts" in sanitized.data.state, false);
   assert.equal("currentAccountId" in sanitized.data.state, false);
   assert.equal("currentRole" in sanitized.data.state, false);
-  const parallelStates = [1, 2].map((marker) => ({
+  const deletionProbeId = `delete-state-${suffix}`;
+  const stateWithDeletionProbe = {
     ...sanitized.data.state,
-    auditLog: [...(sanitized.data.state.auditLog ?? []), { marker }],
+    items: [
+      ...(sanitized.data.state.items ?? []),
+      { id: deletionProbeId, name: "Проверка роли удаления", sku: `STATE-${suffix}`, stock: 0, ext: 0, posts: {} },
+    ],
+  };
+  const deletionProbeSaved = await request("/api/state", {
+    method: "PUT",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({ state: stateWithDeletionProbe, expectedRevision: sanitized.data.revision }),
+  });
+  const stateWithoutDeletionProbe = {
+    ...stateWithDeletionProbe,
+    items: stateWithDeletionProbe.items.filter((item) => item.id !== deletionProbeId),
+  };
+  await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.storekeeper, "content-type": "application/json" },
+    body: JSON.stringify({ state: stateWithoutDeletionProbe, expectedRevision: deletionProbeSaved.data.revision }),
+  }, 403);
+  const adminDeletion = await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.admin, "content-type": "application/json" },
+    body: JSON.stringify({ state: stateWithoutDeletionProbe, expectedRevision: deletionProbeSaved.data.revision }),
+  });
+  const stateAfterDeletion = await request("/api/state", { headers: ownerHeaders });
+  assert.equal(stateAfterDeletion.data.revision, adminDeletion.data.revision);
+  assert.equal(stateAfterDeletion.data.state.items.some((item) => item.id === deletionProbeId), false);
+  const parallelStates = [1, 2].map((marker) => ({
+    ...stateAfterDeletion.data.state,
+    auditLog: [...(stateAfterDeletion.data.state.auditLog ?? []), { marker }],
   }));
   const parallelWrites = await Promise.all(parallelStates.map((candidate) => fetch(new URL("/api/state", baseUrl), {
     method: "PUT",
     headers: { ...ownerHeaders, "content-type": "application/json" },
-    body: JSON.stringify({ state: candidate, expectedRevision: sanitized.data.revision }),
+    body: JSON.stringify({ state: candidate, expectedRevision: stateAfterDeletion.data.revision }),
   })));
   assert.deepEqual(parallelWrites.map((response) => response.status).sort(), [200, 409]);
 

@@ -1087,6 +1087,53 @@ test('review round — catalog generates collision-free SKUs, supports ABC, rece
   await ctx.close();
 });
 
+test('catalog deletion is visible and executable only for an administrator', async () => {
+  const { ctx, page } = await newPage();
+  const result = await page.evaluate(() => {
+    const template = items[0] ? JSON.parse(JSON.stringify(items[0])) : {};
+    const candidate = {
+      ...template,
+      id: 'delete-role-test',
+      name: 'Карточка для проверки удаления',
+      sku: 'DELETE-ROLE-TEST',
+      stock: 0,
+      ext: 0,
+      posts: {},
+      lots: [],
+      history: [],
+      photo: '',
+      photoMedia: null,
+    };
+    items.push(candidate);
+
+    currentRole = 'kladovshik';
+    openItem(candidate.id);
+    const storekeeperSeesButton = document.getElementById('content').textContent.includes('Удалить карточку');
+    const storekeeperDeleted = deleteItem(candidate.id);
+    const existsAfterStorekeeper = items.some((value) => value.id === candidate.id);
+
+    currentRole = 'admin';
+    openItem(candidate.id);
+    const adminSeesButton = document.getElementById('content').textContent.includes('Удалить карточку');
+    const adminDeleted = deleteItem(candidate.id);
+    return {
+      storekeeperSeesButton,
+      storekeeperDeleted,
+      existsAfterStorekeeper,
+      adminSeesButton,
+      adminDeleted,
+      existsAfterAdmin: items.some((value) => value.id === candidate.id),
+    };
+  });
+  assert.equal(result.storekeeperSeesButton, false);
+  assert.equal(result.storekeeperDeleted, false);
+  assert.equal(result.existsAfterStorekeeper, true);
+  assert.equal(result.adminSeesButton, true);
+  assert.equal(result.adminDeleted, true);
+  assert.equal(result.existsAfterAdmin, false);
+  await ctx.close();
+});
+
 test('review round — post movements are listed and an over-limit return is rejected atomically', async () => {
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => {

@@ -87,6 +87,10 @@ test("security hardening keeps state writes privileged and recovery throttling g
     text("drizzle/0003_warehouse_full_state.sql"),
   ]);
   assert.match(stateRoute, /requireUser\(request, \["owner", "admin", "storekeeper"\]\)/);
+  assert.match(stateRoute, /auth\.user\.role === "storekeeper"/);
+  assert.match(stateRoute, /removedItemIds\(previous, state\)/);
+  assert.match(stateRoute, /Удалять карточки товара может только владелец или администратор/);
+  assert.match(productsRoute, /requireUser\(request, \["owner", "admin"\]\)/);
   assert.match(stateRoute, /"state_updated"/);
   assert.doesNotMatch(stateRoute, /revision % 25/);
   assert.match(recoveryRoute, /clientThrottleKey\(request, "recovery-owner"\)/);

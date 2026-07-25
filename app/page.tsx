@@ -184,6 +184,7 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
   const totalUnits = products.reduce((sum, product) => sum + product.quantity, 0);
   const lowCount = products.filter((product) => product.quantity <= product.minimum).length;
   const canManageProducts = currentUser.role !== "worker";
+  const canDeleteProducts = currentUser.role === "owner" || currentUser.role === "admin";
 
   if (useFullSystem) {
     return (
@@ -277,7 +278,7 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
                       {product.quantity} {product.unit}
                       <small>{product.quantity <= product.minimum ? "Ниже минимума" : "В наличии"}</small>
                     </strong>
-                    {canManageProducts && <button className="delete-product" onClick={() => void removeProduct(product)}>Удалить</button>}
+                    {canDeleteProducts && <button className="delete-product" onClick={() => void removeProduct(product)}>Удалить</button>}
                   </article>
                 ))}
               </div>
@@ -395,6 +396,10 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
   );
 
   async function removeProduct(product: Product) {
+    if (!canDeleteProducts) {
+      notify("Удалять карточки товара может только владелец или администратор");
+      return;
+    }
     if (!window.confirm(`Удалить карточку «${product.name}»?`)) return;
     const response = await fetch(`/api/products?id=${encodeURIComponent(product.id)}`, { method: "DELETE" });
     if (!response.ok) {
