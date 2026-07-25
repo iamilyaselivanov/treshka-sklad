@@ -28,6 +28,7 @@
   };
   const PUSH_QUEUE_KEY = "treshka_push_events_v1";
   const MAX_PUSH_QUEUE = 500;
+  const PUSH_EVENT_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 
   async function fetchWithTimeout(input, init = {}, timeoutMs = 15_000) {
     const controller = new AbortController();
@@ -73,8 +74,14 @@
         headers: { "content-type": "application/json" },
         body: JSON.stringify(registration),
       });
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.error || "Устройство не зарегистрировано");
+      if (data.evictedOldest) {
+        console.warn("oldest push device was evicted for this account");
+        if (typeof window.toast === "function") {
+          window.toast("ℹ Старое устройство отключено от push-уведомлений из-за лимита устройств.");
+        }
+      }
       push.registeredKey = key;
       push.registrationFailures = 0;
       push.nextRegistrationAt = 0;
@@ -89,9 +96,25 @@
     }
   }
 
+  function reportDroppedPushEvents(count, reason) {
+    if (!count) return;
+    console.warn(`${count} push event(s) removed: ${reason}`);
+    if (typeof window.toast === "function") {
+      window.toast(`⚠ ${count} старых уведомлений удалено из локальной очереди: ${reason}`);
+    }
+  }
+
+  function pruneExpiredPushEvents() {
+    const cutoff = Date.now() - PUSH_EVENT_TTL_MS;
+    const before = push.queue.length;
+    push.queue = push.queue.filter((entry) => Number(entry.createdAt || Date.now()) >= cutoff);
+    reportDroppedPushEvents(before - push.queue.length, "истёк срок хранения 7 дней");
+  }
+
   function savePushQueue() {
     try {
-      localStorage.setItem(PUSH_QUEUE_KEY, JSON.stringify(push.queue.slice(-MAX_PUSH_QUEUE)));
+      pruneExpiredPushEvents();
+      localStorage.setItem(PUSH_QUEUE_KEY, JSON.stringify(push.queue));
     } catch (error) {
       console.warn("push queue was not persisted", error);
     }
@@ -100,9 +123,19 @@
   function loadPushQueue() {
     try {
       const parsed = JSON.parse(localStorage.getItem(PUSH_QUEUE_KEY) || "[]");
+      const loadedAt = Date.now();
       push.queue = Array.isArray(parsed)
-        ? parsed.filter((entry) => entry && entry.actorUserId && entry.payload).slice(-MAX_PUSH_QUEUE)
+        ? parsed
+          .filter((entry) => entry && entry.actorUserId && entry.payload)
+          .map((entry) => ({ ...entry, createdAt: Number(entry.createdAt || loadedAt) }))
         : [];
+      pruneExpiredPushEvents();
+      if (push.queue.length > MAX_PUSH_QUEUE) {
+        const overflow = push.queue.length - MAX_PUSH_QUEUE;
+        push.queue.splice(0, overflow);
+        reportDroppedPushEvents(overflow, "превышен безопасный предел очереди");
+        savePushQueue();
+      }
     } catch {
       push.queue = [];
     }
@@ -137,6 +170,16 @@
     if (Number.isFinite(next)) schedulePushRetry(Math.max(250, next - Date.now()));
   }
 
+  function deferPushEvent(eventIndex, event, reason) {
+    event.attempts = Number(event.attempts || 0) + 1;
+    const delay = Math.min(5 * 60_000, 5_000 * (2 ** Math.min(6, event.attempts - 1)));
+    event.nextAttemptAt = Date.now() + delay;
+    push.queue.splice(eventIndex, 1);
+    push.queue.push(event);
+    savePushQueue();
+    console.warn("push event delivery deferred", reason);
+  }
+
   async function flushPushQueue() {
     if (!sync.user || push.flushing || !push.queue.length) return;
     push.flushing = true;
@@ -145,12 +188,18 @@
         const eventIndex = nextPushIndex();
         if (eventIndex < 0) break;
         const event = push.queue[eventIndex];
-        const response = await fetchWithTimeout("/api/notifications/events", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(event.payload),
-        });
-        const data = await response.json();
+        let response;
+        try {
+          response = await fetchWithTimeout("/api/notifications/events", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(event.payload),
+          });
+        } catch (error) {
+          deferPushEvent(eventIndex, event, error);
+          continue;
+        }
+        const data = await response.json().catch(() => ({}));
         if (!response.ok) {
           if (response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429) {
             console.warn("push event rejected", data.error || response.status);
@@ -158,13 +207,7 @@
             savePushQueue();
             continue;
           }
-          event.attempts = Number(event.attempts || 0) + 1;
-          const delay = Math.min(5 * 60_000, 5_000 * (2 ** Math.min(6, event.attempts - 1)));
-          event.nextAttemptAt = Date.now() + delay;
-          push.queue.splice(eventIndex, 1);
-          push.queue.push(event);
-          savePushQueue();
-          console.warn("push event delivery deferred", data.error || response.status);
+          deferPushEvent(eventIndex, event, data.error || response.status);
           continue;
         }
         push.queue.splice(eventIndex, 1);
@@ -182,6 +225,14 @@
   window.treshkaServerRole = () => sync.user?.role || "";
   window.treshkaEmitPushEvent = function (type, details = {}) {
     if (!sync.user || !type) return "";
+    pruneExpiredPushEvents();
+    if (push.queue.length >= MAX_PUSH_QUEUE) {
+      console.error("push event was not queued: local queue is full");
+      if (typeof window.toast === "function") {
+        window.toast("⚠ Очередь уведомлений заполнена. Новое событие не поставлено в очередь; проверьте связь с сервером.");
+      }
+      return "";
+    }
     const payload = {
       eventId: crypto.randomUUID(),
       type: String(type),
@@ -189,7 +240,13 @@
       entityNo: String(details.entityNo || ""),
       summary: String(details.summary || ""),
     };
-    push.queue.push({ actorUserId: sync.user.id, payload, attempts: 0, nextAttemptAt: 0 });
+    push.queue.push({
+      actorUserId: sync.user.id,
+      payload,
+      attempts: 0,
+      nextAttemptAt: 0,
+      createdAt: Date.now(),
+    });
     savePushQueue();
     void flushPushQueue();
     return payload.eventId;

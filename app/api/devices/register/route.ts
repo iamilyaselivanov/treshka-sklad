@@ -72,6 +72,12 @@ export async function POST(request: Request) {
       now,
       now,
     ),
+    env.DB.prepare(
+      "DELETE FROM push_deliveries WHERE NOT EXISTS (SELECT 1 FROM push_devices WHERE push_devices.device_id = push_deliveries.device_id)",
+    ),
+    env.DB.prepare(
+      "DELETE FROM push_delivery_attempts WHERE NOT EXISTS (SELECT 1 FROM push_deliveries WHERE push_deliveries.id = push_delivery_attempts.delivery_id)",
+    ),
   ]);
   const evictedOldest = Number(results[2].meta?.changes ?? 0) === 1;
   if (!existing || existing.userId !== auth.user.id || existing.token !== token) {
@@ -89,9 +95,32 @@ export async function DELETE(request: Request) {
   if (!deviceIdPattern.test(deviceId)) {
     return Response.json({ error: "Некорректный идентификатор устройства" }, { status: 400 });
   }
-  await env.DB.prepare(
-    "DELETE FROM push_devices WHERE user_id = ? AND device_id = ?",
-  ).bind(auth.user.id, deviceId).run();
+  await env.DB.batch([
+    env.DB.prepare(
+      `DELETE FROM push_delivery_attempts
+       WHERE delivery_id IN (
+         SELECT id FROM push_deliveries
+         WHERE device_id = ?
+           AND EXISTS (
+             SELECT 1 FROM push_devices
+             WHERE push_devices.device_id = push_deliveries.device_id
+               AND push_devices.user_id = ?
+           )
+       )`,
+    ).bind(deviceId, auth.user.id),
+    env.DB.prepare(
+      `DELETE FROM push_deliveries
+       WHERE device_id = ?
+         AND EXISTS (
+           SELECT 1 FROM push_devices
+           WHERE push_devices.device_id = push_deliveries.device_id
+             AND push_devices.user_id = ?
+         )`,
+    ).bind(deviceId, auth.user.id),
+    env.DB.prepare(
+      "DELETE FROM push_devices WHERE user_id = ? AND device_id = ?",
+    ).bind(auth.user.id, deviceId),
+  ]);
   await audit(auth.user, "push_device_unregistered", `android · ${deviceId.slice(0, 8)}`);
   return Response.json({ ok: true });
 }

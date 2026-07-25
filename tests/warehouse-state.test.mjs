@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   findWarehouseItemId,
+  removeWarehouseItemFromState,
   warehouseDeletionPolicy,
   warehouseItemDeletionIssue,
 } from "../lib/warehouse-state.ts";
@@ -19,7 +20,9 @@ function state(overrides = {}) {
 
 const unusedItem = {
   id: "item-delete",
+  name: "Тестовый товар",
   sku: "DELETE-001",
+  unit: "шт",
   stock: 0,
   ext: 0,
   posts: {},
@@ -85,4 +88,29 @@ test("product endpoint matches shared-state cards only by immutable id", () => {
   assert.equal(findWarehouseItemId(snapshot, unusedItem.id), unusedItem.id);
   assert.equal(findWarehouseItemId(snapshot, "different-id"), "");
   assert.equal(findWarehouseItemId(snapshot, "missing"), "");
+});
+
+test("historical transfers and inventory acts retain product labels after card deletion", () => {
+  const previous = state({
+    items: [unusedItem],
+    stockTransfers: [{ no: "ПМ-1", items: [{ id: unusedItem.id, q: 1 }] }],
+    inventoryActs: [{ no: "ИНВ-1", diffs: [{ id: unusedItem.id, counted: 0 }] }],
+  });
+  const unsafe = state({
+    stockTransfers: previous.stockTransfers,
+    inventoryActs: previous.inventoryActs,
+  });
+  assert.equal(warehouseDeletionPolicy(previous, unsafe, "admin")?.status, 409);
+
+  const archived = removeWarehouseItemFromState(previous, unusedItem.id);
+  assert.equal(warehouseDeletionPolicy(previous, archived, "admin"), null);
+  assert.deepEqual(archived.stockTransfers[0].items[0], {
+    id: unusedItem.id,
+    q: 1,
+    name: unusedItem.name,
+    sku: unusedItem.sku,
+    unit: unusedItem.unit,
+  });
+  assert.equal(archived.inventoryActs[0].diffs[0].name, unusedItem.name);
+  assert.equal(archived.items.length, 0);
 });

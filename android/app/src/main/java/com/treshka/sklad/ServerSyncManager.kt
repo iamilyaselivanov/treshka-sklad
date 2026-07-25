@@ -72,11 +72,27 @@ class ServerSyncManager(
                 val json = JSONObject(response.body)
                 if (json.has("payload") && json.has("revision")) {
                     remote = json.getJSONObject("payload").toString() to json.getLong("revision")
+                    store.savePendingRemoteSnapshot(remote.first, remote.second)
                 }
             }
-            if (remote != null) store.updateServerRevision(remote.second)
-            check(store.requeueConflictedMutation(id)) { "Локальный конфликт не найден" }
-            store.clearPendingRemoteSnapshot()
+            val authoritative = remote
+                ?: throw IllegalStateException(
+                    "Сервер не вернул полный актуальный снимок. Конфликт и обе версии сохранены; повторите позже",
+                )
+            when (store.requeueConflictedMutation(id, authoritative.second)) {
+                ConflictRequeueResult.REQUEUED -> Unit
+                ConflictRequeueResult.MISSING ->
+                    throw IllegalStateException("Локальный конфликт не найден")
+                ConflictRequeueResult.SERVER_ADVANCED ->
+                    throw IllegalStateException(
+                        "Локальный снимок устарел и не может заменить более новую серверную версию. " +
+                            "Выберите серверную версию; локальная копия останется в резервной базе устройства",
+                    )
+                ConflictRequeueResult.INVALID_REMOTE_REVISION ->
+                    throw IllegalStateException(
+                        "Получена некорректная ревизия сервера. Конфликт и обе версии сохранены",
+                    )
+            }
         }
         syncNow()
         return JSONObject().put("ok", true).put("decision", decision).toString()
@@ -91,7 +107,11 @@ class ServerSyncManager(
         executor.execute {
             try {
                 val response = requestJson("${config.baseUrl}/v1/devices/register", "POST", config.authToken, body)
-                if (response.code !in 200..299) Log.w(TAG, "push token registration HTTP ${response.code}")
+                if (response.code !in 200..299) {
+                    Log.w(TAG, "push token registration HTTP ${response.code}")
+                } else if (runCatching { JSONObject(response.body).optBoolean("evictedOldest", false) }.getOrDefault(false)) {
+                    Log.w(TAG, "oldest push device was evicted because the account reached its device limit")
+                }
             } catch (error: Exception) {
                 Log.w(TAG, "push token registration failed", error)
             }
@@ -159,7 +179,7 @@ class ServerSyncManager(
             val request = JSONObject().apply {
                 put("mutationId", pending.mutationId)
                 put("deviceId", config.deviceId)
-                put("baseRevision", config.serverRevision)
+                put("baseRevision", pending.baseRevision)
                 put("schemaVersion", pending.schemaVersion)
                 put("payload", JSONObject(pending.payload))
             }

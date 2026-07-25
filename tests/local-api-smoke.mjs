@@ -60,7 +60,7 @@ const createdIds = [];
 const roleCookies = {};
 const pushDevices = [];
 const timings = {};
-let retryableDeliveryVerified = false;
+let disabledDeliveryTerminalVerified = false;
 const auth = await authenticateOwner();
 const ownerHeaders = { cookie: auth.cookie };
 roleCookies.owner = auth.cookie;
@@ -150,12 +150,17 @@ try {
       body: JSON.stringify(payload),
     }, [200, 503]);
     assert.equal(event.data.targetDevices, pushCase.targets, `${pushCase.type} recipient routing`);
-    if (event.response.status === 503) {
+    if (!event.data.pushConfigured) {
+      assert.equal(event.response.status, 200, `${pushCase.type} disabled Firebase is terminal`);
       assert.equal(
-        Number(event.data.failed ?? 0) + Number(event.data.disabled ?? 0),
+        Number(event.data.disabled ?? 0),
         pushCase.targets,
-        `${pushCase.type} failed deliveries remain retryable`,
+        `${pushCase.type} disabled deliveries are counted once`,
       );
+      assert.equal(Number(event.data.terminal ?? 0), pushCase.targets);
+      disabledDeliveryTerminalVerified = true;
+    } else if (event.response.status === 503) {
+      assert.equal(Number(event.data.failed ?? 0), pushCase.targets);
     }
     if (pushCase.type === "defect_act_created" && event.response.status === 503) {
       const retry = await request("/api/notifications/events", {
@@ -168,7 +173,6 @@ try {
         Number(retry.data.failed ?? 0) + Number(retry.data.disabled ?? 0),
         pushCase.targets,
       );
-      retryableDeliveryVerified = true;
     }
   }
   await request("/api/notifications/events", {
@@ -267,6 +271,7 @@ try {
   sharedState.accounts = [{ id: "must-not-be-stored", role: "owner" }];
   sharedState.currentAccountId = "must-not-be-stored";
   sharedState.currentRole = "admin";
+  const rejectedLargeState = { ...sharedState, rejectedPadding: "x".repeat(128 * 1024) };
   await request("/api/state", {
     method: "PUT",
     headers: {
@@ -275,12 +280,12 @@ try {
       origin: "https://untrusted.example",
       "sec-fetch-site": "cross-site",
     },
-    body: JSON.stringify({ state: sharedState, expectedRevision: state.data.revision }),
+    body: JSON.stringify({ state: rejectedLargeState, expectedRevision: state.data.revision }),
   }, 403);
   await request("/api/state", {
     method: "PUT",
     headers: { cookie: roleCookies.worker, "content-type": "application/json" },
-    body: JSON.stringify({ state: sharedState, expectedRevision: state.data.revision }),
+    body: JSON.stringify({ state: rejectedLargeState, expectedRevision: state.data.revision }),
   }, 403);
   const saved = await request("/api/state", {
     method: "PUT",
@@ -422,6 +427,14 @@ try {
         lots: [],
       },
     ],
+    stockTransfers: [
+      ...(stateAfterDeletion.data.state.stockTransfers ?? []),
+      { no: `MOVE-${suffix}`, type: "toPost", post: "ТЭЧ", items: [{ id: linkedProduct.data.product.id, q: 1 }] },
+    ],
+    inventoryActs: [
+      ...(stateAfterDeletion.data.state.inventoryActs ?? []),
+      { no: `INV-${suffix}`, diffs: [{ id: linkedProduct.data.product.id, counted: 0 }] },
+    ],
   };
   const linkedSaved = await request("/api/state", {
     method: "PUT",
@@ -443,6 +456,13 @@ try {
     stateAfterDeletion.data.state.items.some((item) => item.id === linkedProduct.data.product.id),
     false,
   );
+  const archivedTransferLine = stateAfterDeletion.data.state.stockTransfers
+    .find((entry) => entry.no === `MOVE-${suffix}`).items[0];
+  assert.equal(archivedTransferLine.name, linkedProduct.data.product.name);
+  assert.equal(archivedTransferLine.sku, linkedProduct.data.product.sku);
+  const archivedInventoryLine = stateAfterDeletion.data.state.inventoryActs
+    .find((entry) => entry.no === `INV-${suffix}`).diffs[0];
+  assert.equal(archivedInventoryLine.name, linkedProduct.data.product.name);
   const parallelStates = [1, 2].map((marker) => ({
     ...stateAfterDeletion.data.state,
     auditLog: [...(stateAfterDeletion.data.state.auditLog ?? []), { marker }],
@@ -511,6 +531,6 @@ console.log(JSON.stringify({
   parallelLoginThrottleEnforced: true,
   crossOriginStateWriteRejected: true,
   pushRecipientRoutingVerified: true,
-  retryablePushDeliveryVerified: retryableDeliveryVerified,
+  disabledPushDeliveryTerminalVerified: disabledDeliveryTerminalVerified,
   timingsMs: timings,
 }, null, 2));

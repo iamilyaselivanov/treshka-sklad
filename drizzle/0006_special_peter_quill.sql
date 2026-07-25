@@ -1,6 +1,3 @@
--- Metadata lives in companion tables so this migration is safe to reapply.
--- Existing deployments may still have the legacy item_ids/attempts columns;
--- the application no longer depends on those optional columns.
 CREATE TABLE IF NOT EXISTS `push_delivery_attempts` (
 	`delivery_id` text PRIMARY KEY NOT NULL,
 	`attempts` integer DEFAULT 0 NOT NULL
@@ -14,11 +11,8 @@ CREATE TABLE IF NOT EXISTS `warehouse_state_items` (
 	`item_id` text NOT NULL
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX IF NOT EXISTS `warehouse_state_items_key_idx`
-ON `warehouse_state_items` (`state_key`, `item_id`);
---> statement-breakpoint
-CREATE INDEX IF NOT EXISTS `warehouse_state_items_state_idx`
-ON `warehouse_state_items` (`state_key`);
+CREATE UNIQUE INDEX IF NOT EXISTS `warehouse_state_items_key_idx` ON `warehouse_state_items` (`state_key`,`item_id`);--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS `warehouse_state_items_state_idx` ON `warehouse_state_items` (`state_key`);
 --> statement-breakpoint
 INSERT OR IGNORE INTO `warehouse_state_items` (`state_key`, `item_id`)
 SELECT `warehouse_full_state`.`state_key`,

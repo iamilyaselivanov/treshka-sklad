@@ -12,9 +12,7 @@ type StateRow = {
   updated_by: string;
 };
 
-type StateMetadataRow = Omit<StateRow, "payload"> & {
-  item_ids: string;
-};
+type StateMetadataRow = Omit<StateRow, "payload">;
 
 const MAX_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_COLLECTION_ITEMS = 50_000;
@@ -26,6 +24,11 @@ const OPTIONAL_COLLECTIONS = [
   "auditLog",
   "notifications",
 ] as const;
+
+function uniqueIsoTimestamp() {
+  const suffix = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, "0");
+  return new Date().toISOString().replace("Z", `${suffix}Z`);
+}
 
 function normalizedState(value: unknown): WarehouseState | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -102,7 +105,7 @@ export async function PUT(request: Request) {
     );
   }
   const current = await env.DB.prepare(
-    "SELECT revision, item_ids, updated_at, updated_by FROM warehouse_full_state WHERE state_key = 'main'",
+    "SELECT revision, updated_at, updated_by FROM warehouse_full_state WHERE state_key = 'main'",
   ).first<StateMetadataRow>();
   if (
     (expectedRevision === 0 && current)
@@ -120,22 +123,16 @@ export async function PUT(request: Request) {
     );
   }
   const nextItemIds = warehouseItemIds(state);
-  const serializedItemIds = JSON.stringify([...nextItemIds].sort());
   if (current) {
-    let previousItemIds: string[] | null = null;
-    try {
-      const parsed = JSON.parse(current.item_ids) as unknown;
-      if (Array.isArray(parsed) && parsed.every((value) => typeof value === "string")) {
-        previousItemIds = parsed;
-      }
-    } catch {
-      // A malformed index is rebuilt from the authoritative payload below.
-    }
-    const needsPolicyCheck = !previousItemIds
+    const indexedItems = await env.DB.prepare(
+      "SELECT item_id AS itemId FROM warehouse_state_items WHERE state_key = 'main'",
+    ).all<{ itemId: string }>();
+    const previousItemIds = (indexedItems.results ?? []).map((row) => row.itemId);
+    const needsPolicyCheck = previousItemIds.length === 0
       || previousItemIds.some((itemId) => !nextItemIds.has(itemId));
     if (!needsPolicyCheck) {
       // Normal writes avoid reading and parsing the potentially 4 MB snapshot.
-      // item_ids is maintained atomically with payload below.
+      // warehouse_state_items is maintained atomically with payload below.
     } else {
       const previousRow = await env.DB.prepare(
         "SELECT payload FROM warehouse_full_state WHERE state_key = 'main' AND revision = ?",
@@ -173,18 +170,42 @@ export async function PUT(request: Request) {
     return Response.json({ error: "Данные склада превышают безопасный размер 4 МБ" }, { status: 413 });
   }
   const revision = expectedRevision + 1;
-  const updatedAt = new Date().toISOString();
-  const result = expectedRevision === 0
-    ? await env.DB.prepare(`
-        INSERT INTO warehouse_full_state (state_key, revision, payload, item_ids, updated_at, updated_by)
-        VALUES ('main', 1, ?, ?, ?, ?)
+  const updatedAt = uniqueIsoTimestamp();
+  const stateWrite = expectedRevision === 0
+    ? env.DB.prepare(`
+        INSERT INTO warehouse_full_state (state_key, revision, payload, updated_at, updated_by)
+        VALUES ('main', 1, ?, ?, ?)
         ON CONFLICT(state_key) DO NOTHING
-      `).bind(payload, serializedItemIds, updatedAt, auth.user.callsign).run()
-    : await env.DB.prepare(`
+      `).bind(payload, updatedAt, auth.user.callsign)
+    : env.DB.prepare(`
         UPDATE warehouse_full_state
-        SET revision = ?, payload = ?, item_ids = ?, updated_at = ?, updated_by = ?
+        SET revision = ?, payload = ?, updated_at = ?, updated_by = ?
         WHERE state_key = 'main' AND revision = ?
-      `).bind(revision, payload, serializedItemIds, updatedAt, auth.user.callsign, expectedRevision).run();
+      `).bind(revision, payload, updatedAt, auth.user.callsign, expectedRevision);
+  const results = await env.DB.batch([
+    stateWrite,
+    env.DB.prepare(
+      `DELETE FROM warehouse_state_items
+       WHERE state_key = 'main'
+         AND EXISTS (
+           SELECT 1 FROM warehouse_full_state
+           WHERE state_key = 'main' AND revision = ? AND updated_at = ? AND updated_by = ?
+         )`,
+    ).bind(revision, updatedAt, auth.user.callsign),
+    env.DB.prepare(
+      `INSERT OR IGNORE INTO warehouse_state_items (state_key, item_id)
+       SELECT warehouse_full_state.state_key,
+              TRIM(CAST(json_extract(value, '$.id') AS TEXT))
+       FROM warehouse_full_state,
+            json_each(warehouse_full_state.payload, '$.items')
+       WHERE warehouse_full_state.state_key = 'main'
+         AND warehouse_full_state.revision = ?
+         AND warehouse_full_state.updated_at = ?
+         AND warehouse_full_state.updated_by = ?
+         AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''`,
+    ).bind(revision, updatedAt, auth.user.callsign),
+  ]);
+  const result = results[0];
   if (Number(result.meta?.changes ?? 0) !== 1) {
     const current = await env.DB.prepare(
       "SELECT revision, updated_at, updated_by FROM warehouse_full_state WHERE state_key = 'main'",

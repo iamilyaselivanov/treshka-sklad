@@ -3,8 +3,8 @@ import { audit, requireUser } from "@/lib/auth";
 import { readJsonObject } from "@/lib/http";
 import {
   findWarehouseItemId,
+  removeWarehouseItemFromState,
   warehouseItemDeletionIssue,
-  warehouseItemIds,
 } from "@/lib/warehouse-state";
 import type { WarehouseState } from "@/lib/warehouse-state";
 
@@ -21,6 +21,11 @@ type ProductRow = {
   minimum: number;
   created_at: string;
 };
+
+function uniqueIsoTimestamp() {
+  const suffix = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, "0");
+  return new Date().toISOString().replace("Z", `${suffix}Z`);
+}
 
 function product(row: ProductRow) {
   return {
@@ -135,35 +140,43 @@ export async function DELETE(request: Request) {
           { status: 409 },
         );
       }
-      const nextState = {
-        ...state,
-        items: (state.items as unknown[]).filter((value) =>
-          !value || typeof value !== "object" || Array.isArray(value)
-            || String((value as Record<string, unknown>).id ?? "").trim() !== warehouseItemId),
-      };
+      const nextState = removeWarehouseItemFromState(state, warehouseItemId);
       const nextPayload = JSON.stringify(nextState);
-      const itemIds = JSON.stringify([...warehouseItemIds(nextState)].sort());
-      const updatedAt = new Date().toISOString();
+      const updatedAt = uniqueIsoTimestamp();
       const results = await env.DB.batch([
         env.DB.prepare(
           `UPDATE warehouse_full_state
-           SET revision = ?, payload = ?, item_ids = ?, updated_at = ?, updated_by = ?
-           WHERE state_key = 'main' AND revision = ?`,
+           SET revision = ?, payload = ?, updated_at = ?, updated_by = ?
+           WHERE state_key = 'main' AND revision = ?
+             AND EXISTS (SELECT 1 FROM products WHERE products.id = ?)`,
         ).bind(
           stateRow.revision + 1,
           nextPayload,
-          itemIds,
           updatedAt,
           auth.user.callsign,
           stateRow.revision,
+          id,
         ),
         env.DB.prepare(
-          "DELETE FROM products WHERE id = ? AND changes() = 1",
-        ).bind(id),
+          `DELETE FROM warehouse_state_items
+           WHERE state_key = 'main' AND item_id = ?
+             AND EXISTS (
+               SELECT 1 FROM warehouse_full_state
+               WHERE state_key = 'main' AND revision = ? AND updated_at = ? AND updated_by = ?
+             )`,
+        ).bind(warehouseItemId, stateRow.revision + 1, updatedAt, auth.user.callsign),
+        env.DB.prepare(
+          `DELETE FROM products
+           WHERE id = ?
+             AND EXISTS (
+               SELECT 1 FROM warehouse_full_state
+               WHERE state_key = 'main' AND revision = ? AND updated_at = ? AND updated_by = ?
+             )`,
+        ).bind(id, stateRow.revision + 1, updatedAt, auth.user.callsign),
       ]);
       if (
         Number(results[0].meta?.changes ?? 0) !== 1
-        || Number(results[1].meta?.changes ?? 0) !== 1
+        || Number(results[2].meta?.changes ?? 0) !== 1
       ) {
         return Response.json(
           { error: "Склад изменён другим пользователем. Обновите данные и повторите", conflict: true },

@@ -32,6 +32,47 @@ function referencesItem(value: unknown, itemId: string) {
     || rows(entry.items).some((item) => identifier(item) === itemId);
 }
 
+function archiveReference(value: unknown, itemId: string, item: Record<string, unknown>) {
+  const entry = record(value);
+  if (!entry || identifier(entry) !== itemId) return value;
+  return {
+    ...entry,
+    name: String(entry.name ?? item.name ?? "").trim(),
+    sku: String(entry.sku ?? item.sku ?? "").trim(),
+    unit: String(entry.unit ?? item.unit ?? "").trim(),
+  };
+}
+
+function archiveHistoryCollection(
+  value: unknown,
+  nestedKey: "items" | "diffs",
+  itemId: string,
+  item: Record<string, unknown>,
+) {
+  return rows(value).map((rowValue) => {
+    const row = record(rowValue);
+    if (!row) return rowValue;
+    return {
+      ...row,
+      [nestedKey]: rows(row[nestedKey]).map((entry) => archiveReference(entry, itemId, item)),
+    };
+  });
+}
+
+function historyReferencesAreArchived(state: WarehouseState, itemId: string) {
+  const references = [
+    ...rows(state.stockTransfers).flatMap((value) => rows(record(value)?.items)),
+    ...rows(state.inventoryActs).flatMap((value) => rows(record(value)?.diffs)),
+  ].filter((value) => identifier(value) === itemId);
+  return references.every((value) => {
+    const entry = record(value);
+    return Boolean(
+      String(entry?.name ?? "").trim()
+      && String(entry?.sku ?? "").trim(),
+    );
+  });
+}
+
 export function warehouseItemIds(state: WarehouseState) {
   return new Set(rows(state.items).map(identifier).filter(Boolean));
 }
@@ -110,6 +151,27 @@ export function warehouseItemDeletionIssue(state: WarehouseState, itemId: string
   return null;
 }
 
+export function removeWarehouseItemFromState(state: WarehouseState, itemId: string) {
+  const item = rows(state.items)
+    .map(record)
+    .find((candidate) => String(candidate?.id ?? "").trim() === itemId);
+  if (!item) return state;
+  return {
+    ...state,
+    items: rows(state.items).filter((value) => identifier(value) !== itemId),
+    posts: rows(state.posts).map((postValue) => {
+      const post = record(postValue);
+      if (!post) return postValue;
+      return {
+        ...post,
+        stock: rows(post.stock).filter((stockValue) => identifier(stockValue) !== itemId),
+      };
+    }),
+    stockTransfers: archiveHistoryCollection(state.stockTransfers, "items", itemId, item),
+    inventoryActs: archiveHistoryCollection(state.inventoryActs, "diffs", itemId, item),
+  };
+}
+
 export function warehouseDeletionPolicy(
   previous: WarehouseState,
   next: WarehouseState,
@@ -129,6 +191,12 @@ export function warehouseDeletionPolicy(
       return {
         status: 409,
         error: `Нельзя удалить карточку: ${issue}`,
+      };
+    }
+    if (!historyReferencesAreArchived(next, itemId)) {
+      return {
+        status: 409,
+        error: "Нельзя удалить карточку: в истории движения или инвентаризации отсутствует архивное название товара",
       };
     }
   }

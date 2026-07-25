@@ -3911,7 +3911,7 @@ ext(){
       <button class="btn ghost" style="margin-top:0" onclick="render({fn:views.issueToSklad})">← Выдать на склад</button>
     </div>
     <div class="sec">Движения между складом и постами</div>
-    ${stockTransfers.slice(0,30).map(t=>`<div class="card static"><div class="row"><div class="icbox">${t.type==='toPost'?'→':'←'}</div><div class="grow"><div class="t">${t.type==='toPost'?'Выдано на пост':'Возвращено на склад'} · ${esc(t.post)}</div><div class="s">${esc(t.date)} · ${t.items.map(m=>{const it=item(m.id);return it?`${esc(it.name)} — ${m.q} ${esc(it.unit)}`:m.id;}).join(', ')}</div></div></div></div>`).join('')||'<div class="s" style="padding:8px 0 16px">Движений пока нет</div>'}
+    ${stockTransfers.slice(0,30).map(t=>`<div class="card static"><div class="row"><div class="icbox">${t.type==='toPost'?'→':'←'}</div><div class="grow"><div class="t">${t.type==='toPost'?'Выдано на пост':'Возвращено на склад'} · ${esc(t.post)}</div><div class="s">${esc(t.date)} · ${t.items.map(m=>{const it=item(m.id);const name=it?.name||m.name||m.id;const unit=it?.unit||m.unit||'';return `${esc(name)} — ${m.q}${unit?' '+esc(unit):''}`;}).join(', ')}</div></div></div></div>`).join('')||'<div class="s" style="padding:8px 0 16px">Движений пока нет</div>'}
     <div class="sec">Выдачи на сторону</div>
     <button class="btn primary" style="margin:0 0 10px" onclick="extDraftLines=[]; render({fn:views.issueExt})">＋ Новая выдача на сторону</button>
     <div class="fld" style="margin-bottom:12px">
@@ -4143,13 +4143,13 @@ function renderServerSettings(){
       <button class="btn primary" onclick="connectServer()">Подключить и синхронизировать</button>
     </div>
     ${s.configured?`<button class="btn green" onclick="nativeSyncBridge().syncNow();toast('Синхронизация запущена')">⟳ Синхронизировать сейчас</button><button class="btn ghost" onclick="disconnectServer()">Отключить сервер на этом устройстве</button>`:''}
-    ${conflicts.length?`<div class="sec">Конфликты без потери данных</div>${conflicts.map(c=>`<div class="card static"><div class="t">Устройство ${esc(c.deviceId)}</div><div class="s">Локальная ревизия ${c.baseRevision}, серверная ${c.serverRevision}. Обе копии сохранены.</div><button class="fbtn" style="width:100%;margin-top:8px" onclick="resolveServerConflict(${c.id},'server')">Оставить серверную версию</button><button class="fbtn" style="width:100%;margin-top:6px" onclick="resolveServerConflict(${c.id},'local')">Принять сохранённую локальную версию</button></div>`).join('')}`:''}
+    ${conflicts.length?`<div class="sec">Конфликты без потери данных</div>${conflicts.map(c=>{const skipped=Math.max(0,Number(c.serverChanges||0));const localSafe=Boolean(c.canKeepLocal);return `<div class="card static"><div class="t">Устройство ${esc(c.deviceId)}</div><div class="s">Локальная ревизия ${Number(c.baseRevision||0)}, серверная ${Number(c.serverRevision||0)}. ${skipped?`На сервере уже ${skipped} новых ревизий — старый полный снимок не будет отправлен поверх них.`:'Обе копии сохранены.'}</div><button class="fbtn" style="width:100%;margin-top:8px" onclick="resolveServerConflict(${c.id},'server')">Оставить серверную версию</button><button class="fbtn" style="width:100%;margin-top:6px" ${localSafe?`onclick="resolveServerConflict(${c.id},'local')"`:'disabled'}>${localSafe?'Повторить локальную версию':'Локальная версия защищена от опасной перезаписи'}</button></div>`;}).join('')}`:''}
     <div class="sec">Защита данных</div>
     <div class="card static"><div class="s" style="color:var(--ink);line-height:1.55">Каждое изменение сначала атомарно записывается в SQLite вместе с durable outbox. Сервер принимает mutationId только один раз. При конфликте ни одна версия не перезаписывается: локальный снимок остаётся в очереди, а копия сохраняется на сервере для разбора.</div></div>`;
 }
 function resolveServerConflict(id,decision){
   if(currentRole!=='admin'){toast('Решение конфликтов доступно только администратору');return false;}
-  if(!confirm(decision==='local'?'Сделать локальную конфликтную копию новой серверной версией?':'Оставить серверную версию? Локальная копия сохранится в архиве конфликтов.'))return false;
+  if(!confirm(decision==='local'?'Повторить локальную версию можно только при отсутствии более новых серверных ревизий. Продолжить?':'Оставить серверную версию? Текущая локальная копия сохранится в резервной базе устройства.'))return false;
   const bridge=nativeSyncBridge();
   try{const result=JSON.parse(bridge.resolveConflict(id,decision));if(result.error){toast(result.error);return false;}toast('✓ Конфликт решён, данные сохранены');renderServerSettings();return true;}
   catch(e){toast('Ошибка: '+e.message);return false;}
@@ -4527,6 +4527,12 @@ function deleteItem(id){
   if(i.photoMedia?.key && window.treshkaServerSync?.queueMediaDelete){
     window.treshkaServerSync.queueMediaDelete(i.photoMedia.key);
   }
+  stockTransfers.forEach(t=>(t.items||[]).forEach(line=>{
+    if(line.id===id){line.name=line.name||i.name;line.sku=line.sku||i.sku;line.unit=line.unit||i.unit;}
+  }));
+  inventoryActs.forEach(a=>(a.diffs||[]).forEach(line=>{
+    if(line.id===id){line.name=line.name||i.name;line.sku=line.sku||i.sku;line.unit=line.unit||i.unit;}
+  }));
   const idx=items.indexOf(i); items.splice(idx,1);
   posts.forEach(p=>{p.stock=p.stock.filter(s=>s.id!==id);});
   logAction('Карточка товара удалена', `${i.name} (${i.sku})`);
@@ -4679,7 +4685,7 @@ function transferToSklad(i, postName, qty){
   return qty;
 }
 function recordStockTransfer(type,post,lines){
-  const transfer={no:'ПМ-'+String(stockTransfers.length+1).padStart(4,'0'),type,post,date:nowTimeStr(),createdAt:Date.now(),items:lines.map(x=>({id:x.id,q:x.q}))};
+  const transfer={no:'ПМ-'+String(stockTransfers.length+1).padStart(4,'0'),type,post,date:nowTimeStr(),createdAt:Date.now(),items:lines.map(x=>{const i=item(x.id);return {id:x.id,q:x.q,name:i?.name||'',sku:i?.sku||'',unit:i?.unit||''};})};
   stockTransfers.unshift(transfer);
   if(type==='toPost'){
     const body=lines.map(x=>{const i=item(x.id);return `${i?i.name:x.id}: ${x.q}${i?' '+i.unit:''}`;}).join(', ');

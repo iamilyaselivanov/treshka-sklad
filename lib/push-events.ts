@@ -94,7 +94,10 @@ export function pushRecipientQuery(type: PushEventType) {
   if (audience === "post-members") {
     return {
       sql: `${select}
-            WHERE users.status = 'active' AND TRIM(users.assignment) <> ''`,
+            WHERE users.status = 'active'
+              AND users.role = 'worker'
+              AND TRIM(users.assignment) <> ''
+            LIMIT 2000`,
       filterPost: true,
     };
   }
@@ -103,7 +106,8 @@ export function pushRecipientQuery(type: PushEventType) {
     : "'owner', 'admin', 'storekeeper'";
   return {
     sql: `${select}
-          WHERE users.status = 'active' AND users.role IN (${roles})`,
+          WHERE users.status = 'active' AND users.role IN (${roles})
+          LIMIT 2000`,
     filterPost: false,
   };
 }

@@ -29,7 +29,15 @@ data class PendingSnapshot(
     val payload: String,
     val schemaVersion: Int,
     val attempts: Int,
+    val baseRevision: Long,
 )
+
+enum class ConflictRequeueResult {
+    REQUEUED,
+    MISSING,
+    SERVER_ADVANCED,
+    INVALID_REMOTE_REVISION,
+}
 
 /**
  * Надёжное offline-first хранилище.
@@ -45,7 +53,7 @@ class AppStateStore(context: Context) :
     companion object {
         private const val TAG = "AppStateStore"
         private const val DB_NAME = "sklad_state.db"
-        private const val DB_VERSION = 4
+        private const val DB_VERSION = 5
         private const val STATE_TABLE = "app_state"
         private const val ROW_ID = 1L
     }
@@ -77,7 +85,25 @@ class AppStateStore(context: Context) :
             )
         }
         if (oldVersion < 4) createPendingRemoteTable(db)
+        if (oldVersion < 5 && !hasColumn(db, "sync_outbox", "base_revision")) {
+            db.execSQL(
+                "ALTER TABLE sync_outbox ADD COLUMN base_revision INTEGER NOT NULL DEFAULT 0",
+            )
+        }
     }
+
+    private fun hasColumn(db: SQLiteDatabase, table: String, column: String): Boolean =
+        db.rawQuery("PRAGMA table_info($table)", null).use { cursor ->
+            val nameIndex = cursor.getColumnIndex("name")
+            var found = false
+            while (cursor.moveToNext()) {
+                if (nameIndex >= 0 && cursor.getString(nameIndex) == column) {
+                    found = true
+                    break
+                }
+            }
+            found
+        }
 
     private fun createSyncTables(db: SQLiteDatabase) {
         db.execSQL(
@@ -88,6 +114,7 @@ class AppStateStore(context: Context) :
                 schema_version INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
+                base_revision INTEGER NOT NULL DEFAULT 0,
                 conflict INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT
             )
@@ -179,6 +206,7 @@ class AppStateStore(context: Context) :
                     put("payload", payload)
                     put("schema_version", schemaVersion)
                     put("created_at", System.currentTimeMillis())
+                    put("base_revision", config.serverRevision)
                 }
                 if (db.insertOrThrow("sync_outbox", null, outbox) == -1L) return false
             }
@@ -270,6 +298,7 @@ class AppStateStore(context: Context) :
                             put("payload", c.getString(0))
                             put("schema_version", c.getInt(1))
                             put("created_at", System.currentTimeMillis())
+                            put("base_revision", 0)
                         }
                         db.insertOrThrow("sync_outbox", null, values)
                     }
@@ -344,6 +373,10 @@ class AppStateStore(context: Context) :
         val db = writableDatabase
         db.beginTransaction()
         return try {
+            val baseRevision = db.rawQuery(
+                "SELECT server_revision FROM sync_config WHERE id=1",
+                null,
+            ).use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }
             val pending = db.query(
                 "sync_outbox",
                 arrayOf("mutation_id", "payload", "schema_version", "attempts"),
@@ -355,12 +388,18 @@ class AppStateStore(context: Context) :
                 "1",
             ).use { c ->
                 if (!c.moveToFirst()) null
-                else PendingSnapshot(c.getString(0), c.getString(1), c.getInt(2), c.getInt(3) + 1)
+                else PendingSnapshot(
+                    c.getString(0),
+                    c.getString(1),
+                    c.getInt(2),
+                    c.getInt(3) + 1,
+                    baseRevision,
+                )
             }
             if (pending != null) {
                 db.execSQL(
-                    "UPDATE sync_outbox SET attempts=? WHERE mutation_id=? AND conflict=0",
-                    arrayOf(pending.attempts, pending.mutationId),
+                    "UPDATE sync_outbox SET attempts=?, base_revision=? WHERE mutation_id=? AND conflict=0",
+                    arrayOf(pending.attempts, pending.baseRevision, pending.mutationId),
                 )
             }
             db.setTransactionSuccessful()
@@ -420,18 +459,24 @@ class AppStateStore(context: Context) :
     @Synchronized
     fun conflictedMutationsJson(): String {
         val config = getSyncConfig()
+        val remote = pendingRemoteSnapshot()
         val result = JSONArray()
         readableDatabase.rawQuery(
-            "SELECT rowid, mutation_id, created_at, COALESCE(last_error, '') FROM sync_outbox WHERE conflict=1 ORDER BY created_at ASC",
+            "SELECT rowid, mutation_id, created_at, COALESCE(last_error, ''), base_revision FROM sync_outbox WHERE conflict=1 ORDER BY created_at ASC",
             null,
         ).use { cursor ->
             while (cursor.moveToNext()) {
+                val baseRevision = cursor.getLong(4)
+                val serverRevision = remote?.second ?: config?.serverRevision ?: 0
                 result.put(JSONObject().apply {
                     put("id", cursor.getLong(0))
                     put("mutationId", cursor.getString(1))
                     put("deviceId", config?.deviceId ?: "")
-                    put("baseRevision", config?.serverRevision ?: 0)
-                    put("serverRevision", pendingRemoteSnapshot()?.second ?: config?.serverRevision ?: 0)
+                    put("baseRevision", baseRevision)
+                    put("serverRevision", serverRevision)
+                    put("serverChanges", (serverRevision - baseRevision).coerceAtLeast(0))
+                    put("remoteAvailable", remote != null)
+                    put("canKeepLocal", remote != null && serverRevision == baseRevision)
                     put("createdAt", cursor.getLong(2))
                     put("error", cursor.getString(3))
                 })
@@ -445,22 +490,26 @@ class AppStateStore(context: Context) :
         writableDatabase.delete("sync_outbox", "rowid=? AND conflict=1", arrayOf(localId.toString())) == 1
 
     @Synchronized
-    fun requeueConflictedMutation(localId: Long): Boolean {
+    fun requeueConflictedMutation(localId: Long, remoteRevision: Long): ConflictRequeueResult {
         val db = writableDatabase
         db.beginTransaction()
         return try {
             var payload: String? = null
             var schemaVersion = 0
+            var baseRevision = 0L
             db.rawQuery(
-                "SELECT payload, schema_version FROM sync_outbox WHERE rowid=? AND conflict=1",
+                "SELECT payload, schema_version, base_revision FROM sync_outbox WHERE rowid=? AND conflict=1",
                 arrayOf(localId.toString()),
             ).use { cursor ->
                 if (cursor.moveToFirst()) {
                     payload = cursor.getString(0)
                     schemaVersion = cursor.getInt(1)
+                    baseRevision = cursor.getLong(2)
                 }
             }
-            if (payload == null) return false
+            if (payload == null) return ConflictRequeueResult.MISSING
+            if (remoteRevision < baseRevision) return ConflictRequeueResult.INVALID_REMOTE_REVISION
+            if (remoteRevision > baseRevision) return ConflictRequeueResult.SERVER_ADVANCED
             db.delete("sync_outbox", "rowid=? AND conflict=1", arrayOf(localId.toString()))
             val values = ContentValues().apply {
                 put("mutation_id", UUID.randomUUID().toString())
@@ -468,11 +517,17 @@ class AppStateStore(context: Context) :
                 put("schema_version", schemaVersion)
                 put("created_at", System.currentTimeMillis())
                 put("attempts", 0)
+                put("base_revision", remoteRevision)
                 put("conflict", 0)
             }
-            if (db.insertOrThrow("sync_outbox", null, values) == -1L) return false
+            db.insertOrThrow("sync_outbox", null, values)
+            db.execSQL(
+                "UPDATE sync_config SET server_revision=?, last_error=NULL WHERE id=1",
+                arrayOf(remoteRevision),
+            )
+            db.delete("sync_remote_pending", "id=1", null)
             db.setTransactionSuccessful()
-            true
+            ConflictRequeueResult.REQUEUED
         } finally {
             db.endTransaction()
         }
@@ -505,14 +560,6 @@ class AppStateStore(context: Context) :
     @Synchronized
     fun clearPendingRemoteSnapshot() {
         writableDatabase.delete("sync_remote_pending", "id=1", null)
-    }
-
-    @Synchronized
-    fun updateServerRevision(revision: Long) {
-        writableDatabase.execSQL(
-            "UPDATE sync_config SET server_revision=? WHERE id=1",
-            arrayOf(revision),
-        )
     }
 
     @Synchronized

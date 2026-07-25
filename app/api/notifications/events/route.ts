@@ -18,7 +18,11 @@ type DeviceRow = {
   deviceId: string;
   token: string;
   assignment?: string;
-  attempts?: number;
+};
+
+type DeliveryDeviceRow = DeviceRow & {
+  attempts: number;
+  deliveryId: string;
 };
 
 type ExistingEventRow = {
@@ -97,18 +101,29 @@ export async function POST(request: Request) {
          (id, event_id, user_id, device_id, status, provider_message_id, error)
        VALUES (?, ?, ?, ?, 'pending', '', '')`,
     ).bind(crypto.randomUUID(), eventId, device.userId, device.deviceId)));
+    await env.DB.batch(rows.map((device) => env.DB.prepare(
+      `INSERT OR IGNORE INTO push_delivery_attempts (delivery_id, attempts)
+       SELECT id, 0 FROM push_deliveries WHERE event_id = ? AND device_id = ?`,
+    ).bind(eventId, device.deviceId)));
   }
+  // "disabled" means this deployment has no Firebase credentials. It is a
+  // terminal delivery state, not a retryable provider failure.
+  await env.DB.prepare(
+    "UPDATE push_deliveries SET status = 'dead' WHERE event_id = ? AND status = 'disabled'",
+  ).bind(eventId).run();
 
   const pending = await env.DB.prepare(
     `SELECT push_deliveries.user_id AS userId,
-            push_deliveries.device_id AS deviceId,
-            push_devices.token,
-            push_deliveries.attempts
+             push_deliveries.device_id AS deviceId,
+             push_deliveries.id AS deliveryId,
+             push_devices.token,
+             COALESCE(push_delivery_attempts.attempts, 0) AS attempts
      FROM push_deliveries
      JOIN push_devices ON push_devices.device_id = push_deliveries.device_id
+     LEFT JOIN push_delivery_attempts ON push_delivery_attempts.delivery_id = push_deliveries.id
      WHERE push_deliveries.event_id = ?
-       AND push_deliveries.status IN ('pending', 'failed', 'disabled')`,
-  ).bind(eventId).all<DeviceRow>();
+       AND push_deliveries.status IN ('pending', 'failed')`,
+  ).bind(eventId).all<DeliveryDeviceRow>();
 
   const MAX_DELIVERY_ATTEMPTS = 8;
   let sent = 0;
@@ -131,30 +146,41 @@ export async function POST(request: Request) {
     })));
     const attemptedAt = new Date().toISOString();
     const updates: D1PreparedStatement[] = [];
-    const invalidTokens: string[] = [];
+    const invalidDeviceIds: string[] = [];
     for (const { device, result } of results) {
       if (result.status === "sent") {
         sent += 1;
         updates.push(env.DB.prepare(
-          "UPDATE push_deliveries SET status = 'sent', provider_message_id = ?, error = '', attempted_at = ?, attempts = attempts + 1 WHERE event_id = ? AND device_id = ?",
+          "UPDATE push_deliveries SET status = 'sent', provider_message_id = ?, error = '', attempted_at = ? WHERE event_id = ? AND device_id = ?",
         ).bind(result.providerMessageId, attemptedAt, eventId, device.deviceId));
       } else {
         const attempts = Number(device.attempts ?? 0) + 1;
-        const terminalFailure = result.status === "failed"
-          && (result.unregisterToken || attempts >= MAX_DELIVERY_ATTEMPTS);
+        const terminalFailure = result.status === "disabled"
+          || (result.status === "failed"
+            && (result.unregisterToken || attempts >= MAX_DELIVERY_ATTEMPTS));
         if (terminalFailure) terminal += 1;
-        else if (result.status === "disabled") disabled += 1;
-        else failed += 1;
+        if (result.status === "disabled") disabled += 1;
+        else if (!terminalFailure) failed += 1;
         updates.push(env.DB.prepare(
-          "UPDATE push_deliveries SET status = ?, error = ?, attempted_at = ?, attempts = attempts + 1 WHERE event_id = ? AND device_id = ?",
+          "UPDATE push_deliveries SET status = ?, error = ?, attempted_at = ? WHERE event_id = ? AND device_id = ?",
         ).bind(terminalFailure ? "dead" : result.status, result.error, attemptedAt, eventId, device.deviceId));
-        if (result.status === "failed" && result.unregisterToken) invalidTokens.push(device.token);
+        if (result.status === "failed" && result.unregisterToken) invalidDeviceIds.push(device.deviceId);
       }
+      updates.push(env.DB.prepare(
+        `INSERT INTO push_delivery_attempts (delivery_id, attempts)
+         VALUES (?, ?)
+         ON CONFLICT(delivery_id) DO UPDATE SET attempts = excluded.attempts`,
+      ).bind(device.deliveryId, Number(device.attempts ?? 0) + 1));
     }
     if (updates.length) await env.DB.batch(updates);
-    if (invalidTokens.length) {
-      await env.DB.batch(invalidTokens.map((token) =>
-        env.DB.prepare("DELETE FROM push_devices WHERE token = ?").bind(token)));
+    if (invalidDeviceIds.length) {
+      await env.DB.batch(invalidDeviceIds.flatMap((deviceId) => [
+        env.DB.prepare(
+          "DELETE FROM push_delivery_attempts WHERE delivery_id IN (SELECT id FROM push_deliveries WHERE device_id = ?)",
+        ).bind(deviceId),
+        env.DB.prepare("DELETE FROM push_deliveries WHERE device_id = ?").bind(deviceId),
+        env.DB.prepare("DELETE FROM push_devices WHERE device_id = ?").bind(deviceId),
+      ]));
     }
   }
 
@@ -175,6 +201,12 @@ export async function POST(request: Request) {
     env.DB.prepare(
       "DELETE FROM push_events WHERE id IN (SELECT id FROM push_events ORDER BY created_at DESC LIMIT -1 OFFSET 10000)",
     ),
+    env.DB.prepare(
+      "DELETE FROM push_deliveries WHERE NOT EXISTS (SELECT 1 FROM push_devices WHERE push_devices.device_id = push_deliveries.device_id)",
+    ),
+    env.DB.prepare(
+      "DELETE FROM push_delivery_attempts WHERE NOT EXISTS (SELECT 1 FROM push_deliveries WHERE push_deliveries.id = push_delivery_attempts.delivery_id)",
+    ),
   ]);
   const responseBody = {
     ok: true,
@@ -187,15 +219,13 @@ export async function POST(request: Request) {
   };
   if (
     rows.length
-    && (!responseBody.pushConfigured || responseBody.failed > 0 || responseBody.disabled > 0)
+    && responseBody.failed > 0
   ) {
     return Response.json(
       {
         ...responseBody,
         ok: false,
-        error: responseBody.pushConfigured
-          ? "Не все push доставлены; событие сохранено для автоматического повтора"
-          : "Firebase на сервере ещё не настроен; событие сохранено для повтора",
+        error: "Не все push доставлены; событие сохранено для автоматического повтора",
       },
       { status: 503 },
     );

@@ -89,7 +89,7 @@ test("security hardening keeps state writes privileged and recovery throttling g
   assert.match(stateRoute, /requireUser\(request, \["owner", "admin", "storekeeper"\]\)/);
   assert.match(stateRoute, /warehouseDeletionPolicy\(previous, state, auth\.user\.role\)/);
   assert.match(stateRoute, /terminal: true, recover: "server"/);
-  assert.match(stateRoute, /SELECT revision, item_ids, updated_at, updated_by/);
+  assert.match(stateRoute, /SELECT item_id AS itemId FROM warehouse_state_items/);
   assert.match(productsRoute, /requireUser\(request, \["owner", "admin"\]\)/);
   assert.match(stateRoute, /"state_updated"/);
   assert.doesNotMatch(stateRoute, /revision % 25/);
@@ -98,7 +98,7 @@ test("security hardening keeps state writes privileged and recovery throttling g
   assert.match(auth, /failures = login_throttle\.failures \+ 1/);
   assert.match(auth, /DELETE FROM login_throttle WHERE login = \? AND last_attempt_at = \?/);
   assert.match(auth, /fetchSite !== "same-origin" && fetchSite !== "none"/);
-  assert.match(auth, /drained >= 8_192/);
+  assert.match(auth, /MAX_REJECTED_BODY_DRAIN_BYTES = 4 \* 1024 \* 1024 \+ 64 \* 1024/);
   assert.doesNotMatch(`${auth}\n${stateRoute}\n${productsRoute}`, /CREATE TABLE IF NOT EXISTS/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS `warehouse_full_state`/);
 });
@@ -122,17 +122,23 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.match(browserSync, /sync\.conflict \|\| !canUploadState\(\)/);
   assert.match(androidStore, /SyncTokenVault/);
   assert.match(androidStore, /AndroidKeyStore/);
-  assert.match(androidStore, /DB_VERSION = 4/);
+  assert.match(androidStore, /DB_VERSION = 5/);
+  assert.match(androidStore, /base_revision INTEGER NOT NULL DEFAULT 0/);
   assert.match(androidStore, /conflict INTEGER NOT NULL DEFAULT 0/);
   assert.match(androidStore, /fun claimNextPending\(\)/);
-  assert.match(androidStore, /UPDATE sync_outbox SET attempts=\? WHERE mutation_id=\? AND conflict=0/);
+  assert.match(androidStore, /UPDATE sync_outbox SET attempts=\?, base_revision=\? WHERE mutation_id=\? AND conflict=0/);
   assert.match(androidStore, /db\.delete\("sync_outbox", "attempts = 0 AND conflict = 0"/);
   assert.doesNotMatch(androidStore, /fun markMutationAttempted\(/);
   assert.match(androidSync, /store\.markMutationConflicted\(pending\.mutationId, message\)/);
   assert.match(androidSync, /store\.sendablePendingCount\(\) == 0/);
   assert.match(androidSync, /store\.savePendingRemoteSnapshot\(payload, revision\)/);
   assert.match(androidSync, /store\.discardConflictedMutation\(id\)/);
-  assert.match(androidSync, /store\.requeueConflictedMutation\(id\)/);
+  assert.match(androidSync, /store\.requeueConflictedMutation\(id, authoritative\.second\)/);
+  assert.match(androidSync, /ConflictRequeueResult\.SERVER_ADVANCED/);
+  assert.match(androidSync, /pending\.baseRevision/);
+  assert.doesNotMatch(androidSync, /store\.updateServerRevision/);
+  assert.match(androidStore, /remoteRevision > baseRevision/);
+  assert.match(androidStore, /db\.delete\("sync_remote_pending", "id=1"/);
   assert.match(androidSync, /val retryable = response\.code == 408/);
   assert.match(androidSync, /store\.markMutationConflicted\(pending\.mutationId, message\)/);
   assert.doesNotMatch(androidSync, /scheduleRetry\(pending\.attempts, pending\.mutationId\)/);
@@ -162,6 +168,7 @@ test("build and local D1 bootstrap use the packaged Drizzle migrations", async (
   await text("dist/.openai/drizzle/0003_warehouse_full_state.sql");
   await text("dist/.openai/drizzle/0004_pale_thanos.sql");
   await text("dist/.openai/drizzle/0005_hard_moira_mactaggert.sql");
+  await text("dist/.openai/drizzle/0006_special_peter_quill.sql");
 });
 
 test("database migrations build a clean schema and adopt the legacy runtime state table", async () => {
@@ -172,20 +179,23 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
     text("drizzle/0003_warehouse_full_state.sql"),
     text("drizzle/0004_pale_thanos.sql"),
     text("drizzle/0005_hard_moira_mactaggert.sql"),
+    text("drizzle/0006_special_peter_quill.sql"),
   ]);
   const apply = (database, sql) => {
     for (const statement of sql.split("--> statement-breakpoint")) {
       if (statement.trim()) database.exec(statement);
     }
   };
+  assert.doesNotMatch(migrations[5], /ALTER TABLE/);
+  assert.doesNotMatch(migrations[6], /ALTER TABLE/);
 
   const clean = new DatabaseSync(":memory:");
   for (const migration of migrations) apply(clean, migration);
-  for (const migration of migrations.slice(0, 3)) apply(clean, migration);
+  for (const migration of migrations) apply(clean, migration);
   assert.deepEqual(
     clean.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all()
       .map((row) => row.name),
-    ["audit_log", "login_throttle", "products", "push_deliveries", "push_devices", "push_events", "sessions", "users", "warehouse_full_state"],
+    ["audit_log", "login_throttle", "products", "push_deliveries", "push_delivery_attempts", "push_devices", "push_events", "sessions", "users", "warehouse_full_state", "warehouse_state_items"],
   );
   clean.close();
 
@@ -235,25 +245,18 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
     1,
   );
   apply(adopted, migrations[5]);
+  apply(adopted, migrations[6]);
   assert.deepEqual(
-    adopted.prepare("SELECT name FROM pragma_table_info('warehouse_full_state') WHERE name='item_ids'").all()
-      .map((row) => row.name),
-    ["item_ids"],
-  );
-  assert.deepEqual(
-    adopted.prepare("SELECT name FROM pragma_table_info('push_deliveries') WHERE name='attempts'").all()
-      .map((row) => row.name),
-    ["attempts"],
-  );
-  assert.deepEqual(
-    JSON.parse(adopted.prepare("SELECT item_ids AS itemIds FROM warehouse_full_state WHERE state_key='main'").get().itemIds),
+    adopted.prepare("SELECT item_id AS itemId FROM warehouse_state_items WHERE state_key='main'").all()
+      .map((row) => row.itemId),
     ["legacy-item"],
   );
+  assert.equal(adopted.prepare("SELECT COUNT(*) AS count FROM push_delivery_attempts").get().count, 0);
   adopted.close();
 });
 
 test("push notifications are server-addressed, durable and connected to Android FCM", async () => {
-  const [eventsRoute, pushEvents, devicesRoute, fcm, bridge, prototype, service, activity, migration] = await Promise.all([
+  const [eventsRoute, pushEvents, devicesRoute, fcm, bridge, prototype, service, activity, migration, metadataMigration] = await Promise.all([
     text("app/api/notifications/events/route.ts"),
     text("lib/push-events.ts"),
     text("app/api/devices/register/route.ts"),
@@ -263,6 +266,7 @@ test("push notifications are server-addressed, durable and connected to Android 
     text("android/app/src/main/java/com/treshka/sklad/WarehouseFirebaseMessagingService.kt"),
     text("android/app/src/main/java/com/treshka/sklad/MainActivity.kt"),
     text("drizzle/0004_pale_thanos.sql"),
+    text("drizzle/0006_special_peter_quill.sql"),
   ]);
   for (const eventType of [
     "post_stock_issued",
@@ -283,16 +287,23 @@ test("push notifications are server-addressed, durable and connected to Android 
   assert.match(devicesRoute, /MAX_DEVICES_PER_USER = 8/);
   assert.match(devicesRoute, /ORDER BY last_seen_at ASC/);
   assert.match(devicesRoute, /evictedOldest/);
-  assert.match(eventsRoute, /responseBody\.failed > 0 \|\| responseBody\.disabled > 0/);
+  assert.match(eventsRoute, /result\.status === "disabled"/);
+  assert.match(eventsRoute, /rows\.length\s*&& responseBody\.failed > 0/);
+  assert.match(eventsRoute, /push_delivery_attempts/);
+  assert.match(eventsRoute, /DELETE FROM push_deliveries WHERE NOT EXISTS/);
   assert.match(eventsRoute, /Promise\.all\(batch\.map/);
   assert.match(eventsRoute, /offset \+= 8/);
   assert.match(fcm, /firebase\.messaging/);
   assert.match(fcm, /fcm\.googleapis\.com\/v1\/projects/);
   assert.match(fcm, /pendingAccessToken/);
+  assert.match(fcm, /!forceRefresh \|\| pendingAccessToken\.forced/);
   assert.match(fcm, /response\.status === 401/);
   assert.match(fcm, /response\.status === 429 \|\| response\.status >= 500/);
   assert.match(bridge, /PUSH_QUEUE_KEY/);
   assert.match(bridge, /MAX_PUSH_QUEUE = 500/);
+  assert.match(bridge, /PUSH_EVENT_TTL_MS/);
+  assert.match(bridge, /response\.json\(\)\.catch\(\(\) => \(\{\}\)\)/);
+  assert.match(bridge, /Очередь уведомлений заполнена/);
   assert.match(bridge, /nextAttemptAt/);
   assert.match(bridge, /push\.queue\.splice\(eventIndex, 1\);\s*push\.queue\.push\(event\)/);
   assert.doesNotMatch(bridge, /parsed\.filter\(\(entry\) => entry && entry\.actorUserId === sync\.user/);
@@ -302,4 +313,6 @@ test("push notifications are server-addressed, durable and connected to Android 
   assert.match(migration, /CREATE TABLE IF NOT EXISTS `push_devices`/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS `push_events`/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS `push_deliveries`/);
+  assert.match(metadataMigration, /CREATE TABLE IF NOT EXISTS `push_delivery_attempts`/);
+  assert.match(metadataMigration, /CREATE TABLE IF NOT EXISTS `warehouse_state_items`/);
 });

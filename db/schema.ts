@@ -77,6 +77,18 @@ export const warehouseFullState = sqliteTable("warehouse_full_state", {
   updatedBy: text("updated_by").notNull(),
 });
 
+export const warehouseStateItems = sqliteTable(
+  "warehouse_state_items",
+  {
+    stateKey: text("state_key").notNull(),
+    itemId: text("item_id").notNull(),
+  },
+  (table) => [
+    uniqueIndex("warehouse_state_items_key_idx").on(table.stateKey, table.itemId),
+    index("warehouse_state_items_state_idx").on(table.stateKey),
+  ],
+);
+
 export const pushDevices = sqliteTable(
   "push_devices",
   {
@@ -120,7 +132,7 @@ export const pushDeliveries = sqliteTable(
     eventId: text("event_id").notNull(),
     userId: text("user_id").notNull(),
     deviceId: text("device_id").notNull(),
-    status: text("status", { enum: ["pending", "sent", "failed", "disabled"] }).notNull(),
+    status: text("status", { enum: ["pending", "sent", "failed", "disabled", "dead"] }).notNull(),
     providerMessageId: text("provider_message_id").notNull().default(""),
     error: text("error").notNull().default(""),
     attemptedAt: text("attempted_at"),
@@ -131,3 +143,8 @@ export const pushDeliveries = sqliteTable(
     index("push_deliveries_status_idx").on(table.status),
   ],
 );
+
+export const pushDeliveryAttempts = sqliteTable("push_delivery_attempts", {
+  deliveryId: text("delivery_id").primaryKey(),
+  attempts: integer("attempts").notNull().default(0),
+});

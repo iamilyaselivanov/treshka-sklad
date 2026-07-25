@@ -21,7 +21,7 @@ export type PushSendResult =
   | { status: "failed"; error: string; unregisterToken: boolean };
 
 let cachedAccessToken: { value: string; expiresAt: number } | null = null;
-let pendingAccessToken: Promise<string> | null = null;
+let pendingAccessToken: { request: Promise<string>; forced: boolean } | null = null;
 
 function firebaseConfig(): FirebaseConfig | null {
   const bindings = env as unknown as Record<string, unknown>;
@@ -105,13 +105,16 @@ async function firebaseAccessToken(config: FirebaseConfig, forceRefresh = false)
   if (!forceRefresh && cachedAccessToken && cachedAccessToken.expiresAt > Date.now() + 60_000) {
     return cachedAccessToken.value;
   }
-  if (pendingAccessToken) return pendingAccessToken;
+  if (pendingAccessToken && (!forceRefresh || pendingAccessToken.forced)) {
+    return pendingAccessToken.request;
+  }
   const request = requestFirebaseAccessToken(config);
-  pendingAccessToken = request;
+  const pending = { request, forced: forceRefresh };
+  pendingAccessToken = pending;
   try {
     return await request;
   } finally {
-    if (pendingAccessToken === request) pendingAccessToken = null;
+    if (pendingAccessToken === pending) pendingAccessToken = null;
   }
 }
 

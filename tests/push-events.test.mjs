@@ -63,8 +63,6 @@ function createRoutingDatabase() {
 test("post stock notifications reach every active member of that post and nobody else", () => {
   const database = createRoutingDatabase();
   assert.deepEqual(recipientDevices(database, "post_stock_issued"), [
-    "device-admin-post",
-    "device-store-post",
     "device-worker-1",
     "device-worker-2",
   ]);

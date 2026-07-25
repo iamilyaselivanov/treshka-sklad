@@ -18,6 +18,10 @@ const SESSION_COOKIE = "treshka_session";
 const SESSION_SECONDS = 60 * 60 * 24 * 7;
 const AUDIT_RETENTION_DAYS = 180;
 const AUDIT_MAX_ROWS = 5_000;
+// A normal warehouse snapshot may be close to the 4 MiB route limit. Drain
+// rejected requests up to the same envelope so Cloudflare can reuse the
+// connection, while still refusing to consume an unbounded hostile stream.
+const MAX_REJECTED_BODY_DRAIN_BYTES = 4 * 1024 * 1024 + 64 * 1024;
 
 type ThrottleRow = {
   blocked_until: string | null;
@@ -211,7 +215,7 @@ async function discardRequestBody(request: Request) {
     const reader = request.body?.getReader();
     if (!reader) return;
     const contentLength = Number(request.headers.get("content-length") ?? 0);
-    if (Number.isFinite(contentLength) && contentLength > 8_192) {
+    if (Number.isFinite(contentLength) && contentLength > MAX_REJECTED_BODY_DRAIN_BYTES) {
       await reader.cancel("rejected request body exceeds drain limit");
       return;
     }
@@ -220,7 +224,7 @@ async function discardRequestBody(request: Request) {
       const chunk = await reader.read();
       if (chunk.done) break;
       drained += chunk.value.byteLength;
-      if (drained >= 8_192) {
+      if (drained >= MAX_REJECTED_BODY_DRAIN_BYTES) {
         await reader.cancel("rejected request body drain limit reached");
         break;
       }
