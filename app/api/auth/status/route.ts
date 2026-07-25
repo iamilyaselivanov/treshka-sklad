@@ -1,10 +1,9 @@
 import { env } from "cloudflare:workers";
-import { ensureAuthSchema, getSessionUser } from "@/lib/auth";
+import { getSessionUser } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  await ensureAuthSchema();
   const [count, user] = await Promise.all([
     env.DB.prepare("SELECT COUNT(*) AS count FROM users").first<{ count: number }>(),
     getSessionUser(request),

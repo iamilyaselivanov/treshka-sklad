@@ -12,7 +12,6 @@ type StateRow = {
 
 const MAX_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_COLLECTION_ITEMS = 50_000;
-let stateSchemaPromise: Promise<unknown> | null = null;
 const REQUIRED_COLLECTIONS = ["items", "posts", "docs"] as const;
 const OPTIONAL_COLLECTIONS = [
   "extIssues",
@@ -45,28 +44,9 @@ function normalizedState(value: unknown): WarehouseState | null {
   return state;
 }
 
-async function ensureSchema() {
-  if (!stateSchemaPromise) {
-    stateSchemaPromise = env.DB.prepare(`
-      CREATE TABLE IF NOT EXISTS warehouse_full_state (
-        state_key TEXT PRIMARY KEY NOT NULL,
-        revision INTEGER NOT NULL DEFAULT 0,
-        payload TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        updated_by TEXT NOT NULL
-      )
-    `).run().catch((error) => {
-      stateSchemaPromise = null;
-      throw error;
-    });
-  }
-  await stateSchemaPromise;
-}
-
 export async function GET(request: Request) {
   const auth = await requireUser(request);
   if (auth.response) return auth.response;
-  await ensureSchema();
   const row = await env.DB.prepare(
     "SELECT revision, payload, updated_at, updated_by FROM warehouse_full_state WHERE state_key = 'main'",
   ).first<StateRow>();
@@ -98,9 +78,8 @@ export async function GET(request: Request) {
 }
 
 export async function PUT(request: Request) {
-  const auth = await requireUser(request);
+  const auth = await requireUser(request, ["owner", "admin", "storekeeper"]);
   if (auth.response || !auth.user) return auth.response;
-  await ensureSchema();
   let body: { state?: unknown; expectedRevision?: unknown };
   try {
     body = (await request.json()) as typeof body;
@@ -151,8 +130,10 @@ export async function PUT(request: Request) {
       { status: 409, headers: { "cache-control": "no-store" } },
     );
   }
-  if (revision === 1 || revision % 25 === 0) {
-    await audit(auth.user, revision === 1 ? "state_created" : "state_checkpoint", `${sizeBytes} байт · ревизия ${revision}`);
-  }
+  await audit(
+    auth.user,
+    revision === 1 ? "state_created" : "state_updated",
+    `${sizeBytes} байт · ревизия ${revision}`,
+  );
   return Response.json({ revision, sizeBytes, updatedAt });
 }

@@ -18,7 +18,13 @@ async function request(path, init = {}, expected = 200) {
   const startedAt = performance.now();
   const response = await fetch(new URL(path, baseUrl), init);
   const elapsedMs = Math.round(performance.now() - startedAt);
-  const data = await response.json();
+  const raw = await response.text();
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    data = { error: raw };
+  }
   assert.equal(response.status, expected, `${init.method ?? "GET"} ${path}: ${JSON.stringify(data)}`);
   return { response, data, elapsedMs };
 }
@@ -79,6 +85,20 @@ try {
     timings[`login_${definition.role}`] = login.elapsedMs;
   }
 
+  const bruteTarget = definitions.find((definition) => definition.role === "worker");
+  const parallelFailures = await Promise.all(Array.from({ length: 5 }, () =>
+    fetch(new URL("/api/auth/login", baseUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ login: bruteTarget.login, password: "Definitely-Wrong-1600" }),
+    })));
+  assert.deepEqual(parallelFailures.map((response) => response.status), [401, 401, 401, 401, 401]);
+  await request("/api/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ login: bruteTarget.login, password: bruteTarget.password }),
+  }, 429);
+
   const users = await request("/api/users", { headers: ownerHeaders });
   assert.equal(users.data.users.filter((user) => createdIds.includes(user.id)).length, 3);
 
@@ -106,12 +126,34 @@ try {
   sharedState.accounts = [{ id: "must-not-be-stored", role: "owner" }];
   sharedState.currentAccountId = "must-not-be-stored";
   sharedState.currentRole = "admin";
+  await request("/api/state", {
+    method: "PUT",
+    headers: {
+      ...ownerHeaders,
+      "content-type": "application/json",
+      origin: "https://untrusted.example",
+      "sec-fetch-site": "cross-site",
+    },
+    body: JSON.stringify({ state: sharedState, expectedRevision: state.data.revision }),
+  }, 403);
+  await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.worker, "content-type": "application/json" },
+    body: JSON.stringify({ state: sharedState, expectedRevision: state.data.revision }),
+  }, 403);
   const saved = await request("/api/state", {
     method: "PUT",
     headers: { ...ownerHeaders, "content-type": "application/json" },
     body: JSON.stringify({ state: sharedState, expectedRevision: state.data.revision }),
   });
   assert.equal(saved.data.revision, state.data.revision + 1);
+  const stateAudit = await request("/api/audit", { headers: ownerHeaders });
+  assert.ok(
+    stateAudit.data.entries.some((entry) =>
+      ["state_created", "state_updated"].includes(entry.action)
+      && entry.details.includes(`ревизия ${saved.data.revision}`)),
+    "Every successful state write must be present in the audit log",
+  );
 
   const staleWrite = await request("/api/state", {
     method: "PUT",
@@ -180,5 +222,9 @@ console.log(JSON.stringify({
   parallelStateRaceResolved: true,
   authFieldsStrippedFromState: true,
   mediaUploadReadDelete: true,
+  workerStateWriteRejected: true,
+  everyStateWriteAudited: true,
+  parallelLoginThrottleEnforced: true,
+  crossOriginStateWriteRejected: true,
   timingsMs: timings,
 }, null, 2));

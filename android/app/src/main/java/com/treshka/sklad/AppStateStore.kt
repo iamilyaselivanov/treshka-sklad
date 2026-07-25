@@ -4,9 +4,17 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
 import android.util.Log
 import org.json.JSONObject
+import java.security.KeyStore
 import java.util.UUID
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 data class SyncConfig(
     val baseUrl: String,
@@ -19,6 +27,7 @@ data class PendingSnapshot(
     val mutationId: String,
     val payload: String,
     val schemaVersion: Int,
+    val attempts: Int,
 )
 
 /**
@@ -39,6 +48,8 @@ class AppStateStore(context: Context) :
         private const val STATE_TABLE = "app_state"
         private const val ROW_ID = 1L
     }
+
+    private val tokenVault = SyncTokenVault(context.applicationContext)
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -136,6 +147,11 @@ class AppStateStore(context: Context) :
             if (!writeState(db, payload, schemaVersion)) return false
             val config = readSyncConfig(db)
             if (config != null && config.baseUrl.isNotBlank() && config.authToken.isNotBlank()) {
+                // Every outbox row contains a complete state snapshot. Untried
+                // intermediate snapshots are therefore superseded by this one.
+                // Attempted rows stay until the server confirms their idempotency
+                // key, so a lost response can never duplicate a mutation.
+                db.delete("sync_outbox", "attempts = 0", null)
                 val outbox = ContentValues().apply {
                     put("mutation_id", UUID.randomUUID().toString())
                     put("payload", payload)
@@ -198,15 +214,20 @@ class AppStateStore(context: Context) :
 
     @Synchronized
     fun configureSync(baseUrl: String, authToken: String) {
+        val normalizedToken = authToken.trim()
+        require(normalizedToken.length <= 8_192) { "Некорректный токен сервера" }
         val db = writableDatabase
         db.beginTransaction()
+        var previousToken: String? = null
         try {
             val previous = readSyncConfig(db)
+            previousToken = previous?.authToken
+            if (normalizedToken.isBlank()) tokenVault.clear() else tokenVault.store(normalizedToken)
             val normalized = baseUrl.trimEnd('/')
             val newServer = previous == null || previous.baseUrl != normalized
             db.execSQL(
                 "UPDATE sync_config SET base_url=?, auth_token=?, server_revision=CASE WHEN ? THEN 0 ELSE server_revision END, last_error=NULL WHERE id=1",
-                arrayOf(normalized, authToken, if (newServer) 1 else 0),
+                arrayOf(normalized, "", if (newServer) 1 else 0),
             )
             // При первом подключении существующая локальная база обязательно
             // становится первой outbox-мутацией. Если сервер уже непустой,
@@ -233,6 +254,15 @@ class AppStateStore(context: Context) :
                 }
             }
             db.setTransactionSuccessful()
+        } catch (error: Exception) {
+            // SQLite and Android Keystore cannot share one transaction. Restore
+            // the previous secret if the database part fails after encryption.
+            val tokenToRestore = previousToken
+            runCatching {
+                if (tokenToRestore.isNullOrBlank()) tokenVault.clear()
+                else tokenVault.store(tokenToRestore)
+            }
+            throw error
         } finally {
             db.endTransaction()
         }
@@ -240,6 +270,7 @@ class AppStateStore(context: Context) :
 
     @Synchronized
     fun clearSyncAuth() {
+        tokenVault.clear()
         writableDatabase.execSQL(
             "UPDATE sync_config SET auth_token='', last_error=NULL WHERE id=1",
         )
@@ -248,22 +279,48 @@ class AppStateStore(context: Context) :
     @Synchronized
     fun getSyncConfig(): SyncConfig? = readSyncConfig(readableDatabase)
 
-    private fun readSyncConfig(db: SQLiteDatabase): SyncConfig? = db.query(
-        "sync_config",
-        arrayOf("base_url", "auth_token", "device_id", "server_revision"),
-        "id=1",
-        null,
-        null,
-        null,
-        null,
-    ).use { c ->
-        if (!c.moveToFirst()) null else SyncConfig(c.getString(0), c.getString(1), c.getString(2), c.getLong(3))
+    private fun readSyncConfig(db: SQLiteDatabase): SyncConfig? {
+        var baseUrl = ""
+        var legacyToken = ""
+        var deviceId = ""
+        var serverRevision = 0L
+        val found = db.query(
+            "sync_config",
+            arrayOf("base_url", "auth_token", "device_id", "server_revision"),
+            "id=1",
+            null,
+            null,
+            null,
+            null,
+        ).use { c ->
+            if (!c.moveToFirst()) false
+            else {
+                baseUrl = c.getString(0)
+                legacyToken = c.getString(1)
+                deviceId = c.getString(2)
+                serverRevision = c.getLong(3)
+                true
+            }
+        }
+        if (!found) return null
+
+        var secureToken = tokenVault.load()
+        if (secureToken.isBlank() && legacyToken.isNotBlank()) {
+            // One-time migration from v1.6 builds that stored the bearer token
+            // in plain SQLite. Never fall back to keeping the plaintext value.
+            tokenVault.store(legacyToken)
+            secureToken = legacyToken
+        }
+        if (legacyToken.isNotBlank()) {
+            db.execSQL("UPDATE sync_config SET auth_token='' WHERE id=1")
+        }
+        return SyncConfig(baseUrl, secureToken, deviceId, serverRevision)
     }
 
     @Synchronized
     fun nextPending(): PendingSnapshot? = readableDatabase.query(
         "sync_outbox",
-        arrayOf("mutation_id", "payload", "schema_version"),
+        arrayOf("mutation_id", "payload", "schema_version", "attempts"),
         null,
         null,
         null,
@@ -271,7 +328,7 @@ class AppStateStore(context: Context) :
         "created_at ASC",
         "1",
     ).use { c ->
-        if (!c.moveToFirst()) null else PendingSnapshot(c.getString(0), c.getString(1), c.getInt(2))
+        if (!c.moveToFirst()) null else PendingSnapshot(c.getString(0), c.getString(1), c.getInt(2), c.getInt(3))
     }
 
     @Synchronized
@@ -299,12 +356,20 @@ class AppStateStore(context: Context) :
     }
 
     @Synchronized
+    fun markMutationAttempted(mutationId: String) {
+        writableDatabase.execSQL(
+            "UPDATE sync_outbox SET attempts=attempts+1 WHERE mutation_id=?",
+            arrayOf(mutationId),
+        )
+    }
+
+    @Synchronized
     fun markSyncError(mutationId: String?, error: String) {
         val db = writableDatabase
         db.execSQL("UPDATE sync_config SET last_error=? WHERE id=1", arrayOf(error.take(1000)))
         if (mutationId != null) {
             db.execSQL(
-                "UPDATE sync_outbox SET attempts=attempts+1,last_error=? WHERE mutation_id=?",
+                "UPDATE sync_outbox SET last_error=? WHERE mutation_id=?",
                 arrayOf(error.take(1000), mutationId),
             )
         }
@@ -334,5 +399,67 @@ class AppStateStore(context: Context) :
                 }
             }
         }.toString()
+    }
+}
+
+private class SyncTokenVault(context: Context) {
+    companion object {
+        private const val KEY_ALIAS = "treshka_sync_token_v1"
+        private const val PREFS = "treshka_secure_sync"
+        private const val IV = "token_iv"
+        private const val VALUE = "token_value"
+    }
+
+    private val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    private fun secretKey(): SecretKey {
+        val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
+        return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").run {
+            init(
+                KeyGenParameterSpec.Builder(
+                    KEY_ALIAS,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+                )
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .build()
+            )
+            generateKey()
+        }
+    }
+
+    fun store(token: String) {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey())
+        val encrypted = cipher.doFinal(token.toByteArray(Charsets.UTF_8))
+        check(
+            preferences.edit()
+                .putString(IV, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
+                .putString(VALUE, Base64.encodeToString(encrypted, Base64.NO_WRAP))
+                .commit()
+        ) { "Не удалось безопасно сохранить токен" }
+    }
+
+    fun load(): String {
+        val iv = preferences.getString(IV, null) ?: return ""
+        val encrypted = preferences.getString(VALUE, null) ?: return ""
+        return try {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                secretKey(),
+                GCMParameterSpec(128, Base64.decode(iv, Base64.NO_WRAP)),
+            )
+            String(cipher.doFinal(Base64.decode(encrypted, Base64.NO_WRAP)), Charsets.UTF_8)
+        } catch (error: Exception) {
+            Log.e("SyncTokenVault", "Stored token cannot be decrypted", error)
+            clear()
+            ""
+        }
+    }
+
+    fun clear() {
+        preferences.edit().remove(IV).remove(VALUE).apply()
     }
 }

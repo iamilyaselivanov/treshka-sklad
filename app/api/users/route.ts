@@ -1,12 +1,12 @@
 import { env } from "cloudflare:workers";
-import { audit, ensureAuthSchema, hashPassword, requireUser, Role } from "@/lib/auth";
+import { audit, hashPassword, requireUser, Role } from "@/lib/auth";
+import { readJsonObject } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 
 const allowedRoles: Role[] = ["admin", "storekeeper", "worker"];
 
 export async function GET(request: Request) {
-  await ensureAuthSchema();
   const auth = await requireUser(request, ["owner", "admin"]);
   if (auth.response) return auth.response;
   const result = await env.DB.prepare(
@@ -16,10 +16,10 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  await ensureAuthSchema();
   const auth = await requireUser(request, ["owner", "admin"]);
   if (auth.response || !auth.user) return auth.response;
-  const body = (await request.json()) as Record<string, unknown>;
+  const body = await readJsonObject(request);
+  if (!body) return Response.json({ error: "Некорректный JSON" }, { status: 400 });
   const callsign = String(body.callsign ?? "").trim();
   const login = String(body.login ?? "").trim().toLocaleLowerCase("ru");
   const password = String(body.password ?? "");
@@ -52,10 +52,10 @@ export async function POST(request: Request) {
 }
 
 export async function PATCH(request: Request) {
-  await ensureAuthSchema();
   const auth = await requireUser(request, ["owner", "admin"]);
   if (auth.response || !auth.user) return auth.response;
-  const body = (await request.json()) as Record<string, unknown>;
+  const body = await readJsonObject(request);
+  if (!body) return Response.json({ error: "Некорректный JSON" }, { status: 400 });
   const id = String(body.id ?? "");
   const status = String(body.status ?? "");
   const password = String(body.password ?? "");
@@ -80,7 +80,6 @@ export async function PATCH(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  await ensureAuthSchema();
   const auth = await requireUser(request, ["owner", "admin"]);
   if (auth.response || !auth.user) return auth.response;
   const id = new URL(request.url).searchParams.get("id") ?? "";

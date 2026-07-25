@@ -13,7 +13,30 @@
     pendingRemote: null,
     lastError: null,
     pendingMediaDeletes: new Set(),
+    consecutiveFailures: 0,
+    nextAttemptAt: 0,
   };
+
+  async function fetchWithTimeout(input, init = {}, timeoutMs = 15_000) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(input, { ...init, signal: controller.signal });
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }
+
+  function noteSyncSuccess() {
+    sync.consecutiveFailures = 0;
+    sync.nextAttemptAt = 0;
+  }
+
+  function noteSyncFailure() {
+    sync.consecutiveFailures += 1;
+    const exponent = Math.min(sync.consecutiveFailures - 1, 6);
+    sync.nextAttemptAt = Date.now() + Math.min(60_000, 1_000 * (2 ** exponent));
+  }
 
   function normalizedState() {
     const state = serializeAppState();
@@ -40,7 +63,7 @@
 
   async function refreshServerAccounts() {
     if (!sync.user || !["owner", "admin"].includes(sync.user.role)) return;
-    const response = await fetch("/api/users", { cache: "no-store" });
+    const response = await fetchWithTimeout("/api/users", { cache: "no-store" });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Не удалось загрузить аккаунты");
     accounts.length = 0;
@@ -84,7 +107,7 @@
       if (callsign.length < 2) { toast("Укажите позывной"); return false; }
       if (password.length < 8) { toast("Пароль должен содержать минимум 8 символов"); return false; }
       if (role === "worker" && !assignment) { toast("Выберите пост работника"); return false; }
-      const response = await fetch("/api/users", {
+      const response = await fetchWithTimeout("/api/users", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ callsign, login, password, role, assignment }),
@@ -99,7 +122,7 @@
     window.deleteServerAccount = async function (id) {
       const account = accounts.find((entry) => entry.id === id);
       if (!account || !confirm("Удалить аккаунт «" + (account.callsign || account.login) + "»?")) return false;
-      const response = await fetch("/api/users?id=" + encodeURIComponent(id), { method: "DELETE" });
+      const response = await fetchWithTimeout("/api/users?id=" + encodeURIComponent(id), { method: "DELETE" });
       const data = await response.json();
       if (!response.ok) { toast(data.error || "Аккаунт не удалён"); return false; }
       toast("✓ Аккаунт удалён");
@@ -116,7 +139,7 @@
   }
 
   window.treshkaStorePhoto = async function (dataUrl) {
-    const response = await fetch("/api/media/images", {
+    const response = await fetchWithTimeout("/api/media/images", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ dataUrl }),
@@ -128,7 +151,7 @@
 
   window.treshkaDeletePhoto = async function (key) {
     if (!key) return false;
-    const response = await fetch("/api/media/images?key=" + encodeURIComponent(key), { method: "DELETE" });
+    const response = await fetchWithTimeout("/api/media/images?key=" + encodeURIComponent(key), { method: "DELETE" });
     return response.ok;
   };
 
@@ -194,24 +217,25 @@
   }
 
   async function fetchSnapshot() {
-    const response = await fetch("/api/state", { cache: "no-store" });
+    const response = await fetchWithTimeout("/api/state", { cache: "no-store" });
     const data = await response.json();
     if (response.status === 401 || !data.user) {
       parent.postMessage({ type: "treshka-auth-required" }, location.origin);
       throw new Error("Требуется повторный вход");
     }
     if (!response.ok) throw new Error(data.error || "Не удалось получить склад");
+    noteSyncSuccess();
     return data;
   }
 
   async function uploadIfChanged() {
-    if (!sync.ready || sync.busy || sync.conflict) return;
+    if (!sync.ready || sync.busy || sync.conflict) return false;
     const state = normalizedState();
     const payload = JSON.stringify(state);
-    if (payload === sync.lastUploaded) return;
+    if (payload === sync.lastUploaded) return true;
     sync.busy = true;
     try {
-      const response = await fetch("/api/state", {
+      const response = await fetchWithTimeout("/api/state", {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ state, expectedRevision: sync.revision }),
@@ -219,17 +243,21 @@
       const data = await response.json();
       if (response.status === 409 && data.conflict) {
         announceConflict(await fetchSnapshot());
-        return;
+        return false;
       }
       if (!response.ok) throw new Error(data.error || "Ошибка сохранения");
       sync.revision = data.revision;
       sync.lastUploaded = payload;
       sync.lastError = null;
+      noteSyncSuccess();
       void cleanupPendingMedia();
+      return true;
     } catch (error) {
       console.error("server state upload failed", error);
       sync.lastError = error.message || "Ошибка сохранения";
+      noteSyncFailure();
       toast("⚠ Сервер не сохранил изменения. Повторяем автоматически.");
+      return false;
     } finally {
       sync.busy = false;
     }
@@ -247,9 +275,11 @@
         return;
       }
       applyRemoteSnapshot(snapshot, true);
+      noteSyncSuccess();
     } catch (error) {
       console.error("server state poll failed", error);
       sync.lastError = error.message || "Ошибка синхронизации";
+      noteSyncFailure();
     } finally {
       sync.busy = false;
     }
@@ -257,27 +287,50 @@
 
   async function synchronize() {
     if (!sync.ready || sync.busy || sync.conflict) return;
+    if (Date.now() < sync.nextAttemptAt) return;
     const localPayload = JSON.stringify(normalizedState());
     if (localPayload !== sync.lastUploaded) await uploadIfChanged();
     else await pollServer();
   }
 
   async function resolveConflict(strategy) {
-    if (!sync.conflict || !sync.pendingRemote) return;
+    if (!sync.conflict || !sync.pendingRemote) return false;
     const snapshot = sync.pendingRemote;
-    sync.conflict = false;
-    sync.pendingRemote = null;
-    sync.revision = Number(snapshot.revision || 0);
     if (strategy === "server") {
+      try {
+        // Validate and apply first. If the snapshot is incompatible, the
+        // conflict remains visible and the local state is not acknowledged as
+        // resolved.
+        applyRemoteSnapshot(snapshot, false);
+      } catch (error) {
+        sync.lastError = error.message || "Сервер вернул несовместимые данные";
+        toast("⚠ Серверная версия повреждена. Локальные данные сохранены.");
+        return false;
+      }
       sync.pendingMediaDeletes.clear();
-      applyRemoteSnapshot(snapshot, false);
+      sync.conflict = false;
+      sync.pendingRemote = null;
       toast("✓ Загружена серверная версия");
     } else {
+      sync.conflict = false;
+      sync.pendingRemote = null;
+      sync.revision = Number(snapshot.revision || 0);
       sync.lastUploaded = "";
       toast("Сохраняем ваши изменения поверх новой ревизии…");
-      await uploadIfChanged();
+      const uploaded = await uploadIfChanged();
+      if (!uploaded) {
+        // A fresh 409 installs a newer pending snapshot itself. For transport
+        // errors restore the original conflict so pull cannot overwrite the
+        // unsent local state and the user can retry explicitly.
+        if (!sync.conflict) {
+          sync.conflict = true;
+          sync.pendingRemote = snapshot;
+        }
+        return false;
+      }
     }
     parent.postMessage({ type: "treshka-sync-resolved" }, location.origin);
+    return true;
   }
 
   async function initialize() {
@@ -308,6 +361,7 @@
       toast("⚠ Нет связи с сервером. Изменения сохраняются на устройстве.");
       sync.ready = true;
       sync.lastError = error.message || "Нет связи с сервером";
+      noteSyncFailure();
       sync.timer = window.setInterval(synchronize, 3000);
     }
   }

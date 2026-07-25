@@ -27,10 +27,12 @@ import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.WebResourceResponse
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import java.io.ByteArrayOutputStream
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileOutputStream
 import org.json.JSONObject
@@ -213,6 +215,8 @@ class MainActivity : AppCompatActivity() {
             setSupportMultipleWindows(true)
             allowFileAccess = false
             allowContentAccess = false
+            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            safeBrowsingEnabled = true
         }
 
         webView.addJavascriptInterface(WebAppInterface(appStateStore, serverSyncManager), "AndroidStorage")
@@ -226,12 +230,41 @@ class MainActivity : AppCompatActivity() {
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: android.webkit.WebResourceRequest): Boolean {
                 val uri = request.url
-                return if (uri.scheme == "https" && uri.host == APP_HOST) {
+                val trustedPage = uri.scheme == "https"
+                    && uri.host == APP_HOST
+                    && (uri.path == "/" || uri.path == "/prototype.html")
+                return if (trustedPage) {
                     false
                 } else {
-                    startActivity(Intent(Intent.ACTION_VIEW, uri))
+                    try {
+                        startActivity(Intent(Intent.ACTION_VIEW, uri))
+                    } catch (error: Exception) {
+                        Log.w("MainActivity", "No handler for external URL", error)
+                    }
                     true
                 }
+            }
+
+            override fun shouldInterceptRequest(
+                view: WebView,
+                request: android.webkit.WebResourceRequest,
+            ): WebResourceResponse? {
+                val uri = request.url
+                if ((uri.scheme == "http" || uri.scheme == "https") && uri.host != APP_HOST) {
+                    // Javascript interfaces are exposed to every frame in a
+                    // WebView. Blocking all cross-origin frames and scripts keeps
+                    // an embedded third-party document from reaching the native
+                    // storage, scanner, file, photo and notification bridges.
+                    return WebResourceResponse(
+                        "text/plain",
+                        "UTF-8",
+                        403,
+                        "Forbidden",
+                        mapOf("Cache-Control" to "no-store"),
+                        ByteArrayInputStream(ByteArray(0)),
+                    )
+                }
+                return super.shouldInterceptRequest(view, request)
             }
         }
         webView.webChromeClient = PrintPopupChromeClient()

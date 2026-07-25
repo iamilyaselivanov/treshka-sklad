@@ -67,3 +67,11 @@ export const loginThrottle = sqliteTable("login_throttle", {
   blockedUntil: text("blocked_until"),
   lastAttemptAt: text("last_attempt_at").notNull(),
 });
+
+export const warehouseFullState = sqliteTable("warehouse_full_state", {
+  stateKey: text("state_key").primaryKey(),
+  revision: integer("revision").notNull().default(0),
+  payload: text("payload").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  updatedBy: text("updated_by").notNull(),
+});

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 const text = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
@@ -75,4 +76,88 @@ test("server accounts support permanent-password creation and protected deletion
   assert.match(bridge, /window\.requestRoleSwitch/);
   assert.match(stateRoute, /user: auth\.user/);
   assert.doesNotMatch(bridge, /fetch\("\/api\/auth\/status"/);
+});
+
+test("security hardening keeps state writes privileged and recovery throttling global", async () => {
+  const [stateRoute, recoveryRoute, auth, productsRoute, migration] = await Promise.all([
+    text("app/api/state/route.ts"),
+    text("app/api/auth/recover-owner/route.ts"),
+    text("lib/auth.ts"),
+    text("app/api/products/route.ts"),
+    text("drizzle/0003_warehouse_full_state.sql"),
+  ]);
+  assert.match(stateRoute, /requireUser\(request, \["owner", "admin", "storekeeper"\]\)/);
+  assert.match(stateRoute, /"state_updated"/);
+  assert.doesNotMatch(stateRoute, /revision % 25/);
+  assert.match(recoveryRoute, /clientThrottleKey\(request, "recovery-owner"\)/);
+  assert.doesNotMatch(recoveryRoute, /clientThrottleKey\(request, "recovery", login\)/);
+  assert.match(auth, /failures = login_throttle\.failures \+ 1/);
+  assert.match(auth, /DELETE FROM login_throttle WHERE login = \? AND last_attempt_at = \?/);
+  assert.match(auth, /fetchSite !== "same-origin" && fetchSite !== "none"/);
+  assert.doesNotMatch(`${auth}\n${stateRoute}\n${productsRoute}`, /CREATE TABLE IF NOT EXISTS/);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS `warehouse_full_state`/);
+});
+
+test("sync hardening keeps conflicts recoverable and Android secrets protected", async () => {
+  const [browserSync, androidStore, androidSync, activity, manifest, extractionRules] = await Promise.all([
+    text("public/prototype-server.js"),
+    text("android/app/src/main/java/com/treshka/sklad/AppStateStore.kt"),
+    text("android/app/src/main/java/com/treshka/sklad/ServerSyncManager.kt"),
+    text("android/app/src/main/java/com/treshka/sklad/MainActivity.kt"),
+    text("android/app/src/main/AndroidManifest.xml"),
+    text("android/app/src/main/res/xml/data_extraction_rules.xml"),
+  ]);
+  assert.match(browserSync, /fetchWithTimeout/);
+  assert.match(browserSync, /noteSyncFailure/);
+  assert.match(browserSync, /sync\.conflict = true;\s*sync\.pendingRemote = snapshot;/);
+  assert.match(browserSync, /Серверная версия повреждена\. Локальные данные сохранены/);
+  assert.match(androidStore, /SyncTokenVault/);
+  assert.match(androidStore, /AndroidKeyStore/);
+  assert.match(androidStore, /db\.delete\("sync_outbox", "attempts = 0"/);
+  assert.match(androidSync, /scheduleRetry\(pending\.attempts \+ 1\)/);
+  assert.match(activity, /uri\.host != APP_HOST/);
+  assert.match(manifest, /android:allowBackup="false"/);
+  assert.match(manifest, /android:dataExtractionRules="@xml\/data_extraction_rules"/);
+  assert.match(extractionRules, /<exclude domain="root" path="\." \/>/);
+});
+
+test("database migrations build a clean schema and adopt the legacy runtime state table", async () => {
+  const migrations = await Promise.all([
+    text("drizzle/0000_unique_vampiro.sql"),
+    text("drizzle/0001_famous_the_hunter.sql"),
+    text("drizzle/0002_quick_bloodscream.sql"),
+    text("drizzle/0003_warehouse_full_state.sql"),
+  ]);
+  const apply = (database, sql) => {
+    for (const statement of sql.split("--> statement-breakpoint")) {
+      if (statement.trim()) database.exec(statement);
+    }
+  };
+
+  const clean = new DatabaseSync(":memory:");
+  for (const migration of migrations) apply(clean, migration);
+  assert.deepEqual(
+    clean.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all()
+      .map((row) => row.name),
+    ["audit_log", "login_throttle", "products", "sessions", "users", "warehouse_full_state"],
+  );
+  clean.close();
+
+  const adopted = new DatabaseSync(":memory:");
+  for (const migration of migrations.slice(0, 3)) apply(adopted, migration);
+  adopted.exec(`
+    CREATE TABLE warehouse_full_state (
+      state_key TEXT PRIMARY KEY NOT NULL,
+      revision INTEGER NOT NULL DEFAULT 0,
+      payload TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      updated_by TEXT NOT NULL
+    )
+  `);
+  apply(adopted, migrations[3]);
+  assert.equal(
+    adopted.prepare("SELECT COUNT(*) AS count FROM pragma_table_info('warehouse_full_state')").get().count,
+    5,
+  );
+  adopted.close();
 });

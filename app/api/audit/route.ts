@@ -1,8 +1,7 @@
 import { env } from "cloudflare:workers";
-import { ensureAuthSchema, requireUser } from "@/lib/auth";
+import { requireUser } from "@/lib/auth";
 
 export async function GET(request: Request) {
-  await ensureAuthSchema();
   const auth = await requireUser(request, ["owner", "admin"]);
   if (auth.response) return auth.response;
   const result = await env.DB.prepare(

@@ -18,70 +18,64 @@ const SESSION_COOKIE = "treshka_session";
 const SESSION_SECONDS = 60 * 60 * 24 * 7;
 const AUDIT_RETENTION_DAYS = 180;
 const AUDIT_MAX_ROWS = 5_000;
-let authSchemaPromise: Promise<unknown> | null = null;
 
-const usersSql = `
-  CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY NOT NULL,
-    callsign TEXT NOT NULL,
-    login TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    role TEXT NOT NULL,
-    assignment TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'active',
-    created_at TEXT NOT NULL,
-    last_login_at TEXT
-  )
-`;
+type ThrottleRow = {
+  blocked_until: string | null;
+  last_attempt_at: string;
+};
 
-const sessionsSql = `
-  CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY NOT NULL,
-    user_id TEXT NOT NULL,
-    token_hash TEXT NOT NULL UNIQUE,
-    expires_at TEXT NOT NULL,
-    created_at TEXT NOT NULL
-  )
-`;
+export async function isThrottleBlocked(key: string, windowMs: number, now = new Date()) {
+  const row = await env.DB.prepare(
+    "SELECT blocked_until, last_attempt_at FROM login_throttle WHERE login = ?",
+  ).bind(key).first<ThrottleRow>();
+  if (!row) return false;
 
-const auditSql = `
-  CREATE TABLE IF NOT EXISTS audit_log (
-    id TEXT PRIMARY KEY NOT NULL,
-    user_id TEXT,
-    callsign TEXT NOT NULL,
-    action TEXT NOT NULL,
-    details TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL
-  )
-`;
+  const nowMs = now.getTime();
+  if (row.blocked_until && Date.parse(row.blocked_until) > nowMs) return true;
 
-const throttleSql = `
-  CREATE TABLE IF NOT EXISTS login_throttle (
-    login TEXT PRIMARY KEY NOT NULL,
-    failures INTEGER NOT NULL DEFAULT 0,
-    blocked_until TEXT,
-    last_attempt_at TEXT NOT NULL
-  )
-`;
-
-export async function ensureAuthSchema() {
-  if (!authSchemaPromise) {
-    const db = env.DB;
-    authSchemaPromise = db.batch([
-      db.prepare(usersSql),
-      db.prepare(sessionsSql),
-      db.prepare(auditSql),
-      db.prepare(throttleSql),
-      db.prepare("CREATE INDEX IF NOT EXISTS users_role_idx ON users(role)"),
-      db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS single_owner_idx ON users(role) WHERE role = 'owner'"),
-      db.prepare("CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions(user_id)"),
-      db.prepare("CREATE INDEX IF NOT EXISTS audit_created_idx ON audit_log(created_at)"),
-    ]).catch((error) => {
-      authSchemaPromise = null;
-      throw error;
-    });
+  const lastAttemptMs = Date.parse(row.last_attempt_at);
+  const expired = Boolean(row.blocked_until)
+    || !Number.isFinite(lastAttemptMs)
+    || lastAttemptMs + windowMs <= nowMs;
+  if (expired) {
+    // Matching the observed timestamp prevents delayed cleanup from deleting a
+    // newer failure that a concurrent request has just recorded.
+    await env.DB.prepare(
+      "DELETE FROM login_throttle WHERE login = ? AND last_attempt_at = ?",
+    ).bind(key, row.last_attempt_at).run();
   }
-  await authSchemaPromise;
+  return false;
+}
+
+export async function recordThrottleFailure(
+  key: string,
+  maxFailures: number,
+  blockMs: number,
+  now = new Date(),
+) {
+  const blockedUntil = new Date(now.getTime() + blockMs).toISOString();
+  await env.DB.prepare(
+    `INSERT INTO login_throttle (login, failures, blocked_until, last_attempt_at)
+     VALUES (?, 1, CASE WHEN 1 >= ? THEN ? ELSE NULL END, ?)
+     ON CONFLICT(login) DO UPDATE SET
+       failures = login_throttle.failures + 1,
+       blocked_until = CASE
+         WHEN login_throttle.failures + 1 >= ? THEN ?
+         ELSE login_throttle.blocked_until
+       END,
+       last_attempt_at = excluded.last_attempt_at`,
+  ).bind(
+    key,
+    maxFailures,
+    blockedUntil,
+    now.toISOString(),
+    maxFailures,
+    blockedUntil,
+  ).run();
+}
+
+export async function clearThrottle(key: string) {
+  await env.DB.prepare("DELETE FROM login_throttle WHERE login = ?").bind(key).run();
 }
 
 export async function secureEqual(left: string, right: string) {
@@ -153,7 +147,6 @@ function cookieValue(request: Request, name: string) {
 }
 
 export async function createSession(userId: string) {
-  await ensureAuthSchema();
   const token = bytesToBase64(crypto.getRandomValues(new Uint8Array(32)));
   const now = new Date();
   const expires = new Date(now.getTime() + SESSION_SECONDS * 1000);
@@ -181,7 +174,6 @@ export async function createSession(userId: string) {
 }
 
 export async function deleteSession(request: Request) {
-  await ensureAuthSchema();
   const token = cookieValue(request, SESSION_COOKIE);
   if (token) await env.DB.prepare("DELETE FROM sessions WHERE token_hash = ?").bind(await digest(token)).run();
 }
@@ -191,7 +183,6 @@ export function clearSessionCookie() {
 }
 
 export async function getSessionUser(request: Request): Promise<SessionUser | null> {
-  await ensureAuthSchema();
   const token = cookieValue(request, SESSION_COOKIE);
   if (!token) return null;
   const row = await env.DB.prepare(
@@ -202,7 +193,23 @@ export async function getSessionUser(request: Request): Promise<SessionUser | nu
   return row ?? null;
 }
 
+export function isTrustedMutationRequest(request: Request) {
+  if (request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS") return true;
+  const fetchSite = request.headers.get("sec-fetch-site");
+  if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") return false;
+  const origin = request.headers.get("origin");
+  if (!origin) return true;
+  try {
+    return new URL(origin).origin === new URL(request.url).origin;
+  } catch {
+    return false;
+  }
+}
+
 export async function requireUser(request: Request, roles?: Role[]) {
+  if (!isTrustedMutationRequest(request)) {
+    return { user: null, response: Response.json({ error: "Недоверенный источник запроса" }, { status: 403 }) };
+  }
   const user = await getSessionUser(request);
   if (!user) return { user: null, response: Response.json({ error: "Требуется вход" }, { status: 401 }) };
   if (roles && !roles.includes(user.role)) {
@@ -212,7 +219,6 @@ export async function requireUser(request: Request, roles?: Role[]) {
 }
 
 export async function audit(user: SessionUser | null, action: string, details = "") {
-  await ensureAuthSchema();
   const now = new Date();
   const cutoff = new Date(now.getTime() - AUDIT_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
   await env.DB.batch([

@@ -6,6 +6,7 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -18,8 +19,9 @@ class ServerSyncManager(
     private val onRemoteState: (String, Long) -> Unit,
 ) {
     companion object { private const val TAG = "ServerSync" }
-    private val executor = Executors.newSingleThreadExecutor()
+    private val executor = Executors.newSingleThreadScheduledExecutor()
     private val running = AtomicBoolean(false)
+    private val retryScheduled = AtomicBoolean(false)
 
     fun login(baseUrl: String, login: String, password: String): String {
         val normalized = baseUrl.trim().trimEnd('/')
@@ -59,8 +61,19 @@ class ServerSyncManager(
 
     fun registerPushToken(token: String): Boolean {
         val config = store.getSyncConfig() ?: return false
+        if (token.isBlank()) return false
         val body = JSONObject().put("deviceId", config.deviceId).put("pushToken", token).toString()
-        return requestJson("${config.baseUrl}/v1/devices/register", "POST", config.authToken, body).code in 200..299
+        // Firebase invokes its success callback on the main thread. Network I/O
+        // here used to freeze or crash the Activity with NetworkOnMainThread.
+        executor.execute {
+            try {
+                val response = requestJson("${config.baseUrl}/v1/devices/register", "POST", config.authToken, body)
+                if (response.code !in 200..299) Log.w(TAG, "push token registration HTTP ${response.code}")
+            } catch (error: Exception) {
+                Log.w(TAG, "push token registration failed", error)
+            }
+        }
+        return true
     }
 
     fun uploadImage(dataUrl: String): String {
@@ -104,6 +117,7 @@ class ServerSyncManager(
             } catch (e: Exception) {
                 Log.e(TAG, "sync failed", e)
                 store.markSyncError(null, e.message ?: "Ошибка синхронизации")
+                scheduleRetry(store.nextPending()?.attempts ?: 1)
             } finally {
                 running.set(false)
                 onStatus(store.syncStatusJson())
@@ -123,6 +137,7 @@ class ServerSyncManager(
                 put("schemaVersion", pending.schemaVersion)
                 put("payload", JSONObject(pending.payload))
             }
+            store.markMutationAttempted(pending.mutationId)
             val response = requestJson(
                 "${config.baseUrl}/v1/sync/push",
                 "POST",
@@ -131,10 +146,18 @@ class ServerSyncManager(
             )
             if (response.code == 409) {
                 store.markSyncError(pending.mutationId, "Конфликт версий: локальные данные сохранены в очереди и не перезаписаны")
+                // The server keeps this mutation as a conflict snapshot. Retry
+                // with the same idempotency key: after an administrator resolves
+                // it, the server returns its applied revision and the outbox can
+                // advance instead of remaining stuck until an app restart.
+                scheduleRetry(pending.attempts + 1)
                 return
             }
             if (response.code !in 200..299) {
                 store.markSyncError(pending.mutationId, "HTTP ${response.code}: ${response.body.take(300)}")
+                if (response.code == 408 || response.code == 429 || response.code >= 500) {
+                    scheduleRetry(pending.attempts + 1)
+                }
                 return
             }
             val revision = JSONObject(response.body).getLong("revision")
@@ -161,6 +184,16 @@ class ServerSyncManager(
                 store.markSyncError(null, "Pull HTTP ${response.code}")
             }
         }
+    }
+
+    private fun scheduleRetry(attempt: Int) {
+        if (!retryScheduled.compareAndSet(false, true)) return
+        val exponent = (attempt - 1).coerceIn(0, 6)
+        val delaySeconds = (5L * (1L shl exponent)).coerceAtMost(300L)
+        executor.schedule({
+            retryScheduled.set(false)
+            syncNow()
+        }, delaySeconds, TimeUnit.SECONDS)
     }
 
     private data class HttpResult(val code: Int, val body: String)

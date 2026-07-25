@@ -1,11 +1,12 @@
 import { env } from "cloudflare:workers";
-import { audit, clearSessionCookie, ensureAuthSchema, hashPassword, requireUser, verifyPassword } from "@/lib/auth";
+import { audit, clearSessionCookie, hashPassword, requireUser, verifyPassword } from "@/lib/auth";
+import { readJsonObject } from "@/lib/http";
 
 export async function POST(request: Request) {
-  await ensureAuthSchema();
   const auth = await requireUser(request);
   if (auth.response || !auth.user) return auth.response;
-  const body = (await request.json()) as Record<string, unknown>;
+  const body = await readJsonObject(request);
+  if (!body) return Response.json({ error: "Некорректный JSON" }, { status: 400 });
   const currentPassword = String(body.currentPassword ?? "");
   const newPassword = String(body.newPassword ?? "");
   if (newPassword.length < 8 || newPassword.length > 256) return Response.json({ error: "Новый пароль должен содержать от 8 до 256 символов" }, { status: 400 });

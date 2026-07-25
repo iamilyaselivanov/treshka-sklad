@@ -1,11 +1,12 @@
 import { env } from "cloudflare:workers";
-import { audit, clearSessionCookie, ensureAuthSchema, requireUser, verifyPassword } from "@/lib/auth";
+import { audit, clearSessionCookie, requireUser, verifyPassword } from "@/lib/auth";
+import { readJsonObject } from "@/lib/http";
 
 export async function POST(request: Request) {
-  await ensureAuthSchema();
   const auth = await requireUser(request, ["owner"]);
   if (auth.response || !auth.user) return auth.response;
-  const body = (await request.json()) as Record<string, unknown>;
+  const body = await readJsonObject(request);
+  if (!body) return Response.json({ error: "Некорректный JSON" }, { status: 400 });
   const targetId = String(body.targetUserId ?? "");
   const password = String(body.currentPassword ?? "");
   const current = await env.DB.prepare("SELECT password_hash FROM users WHERE id = ?")

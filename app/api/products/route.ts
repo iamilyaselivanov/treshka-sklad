@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { audit, requireUser } from "@/lib/auth";
+import { readJsonObject } from "@/lib/http";
 
 export const dynamic = "force-dynamic";
 
@@ -14,28 +15,6 @@ type ProductRow = {
   minimum: number;
   created_at: string;
 };
-
-const createProductsSql = `
-  CREATE TABLE IF NOT EXISTS products (
-    id TEXT PRIMARY KEY NOT NULL,
-    name TEXT NOT NULL,
-    sku TEXT NOT NULL UNIQUE,
-    category TEXT NOT NULL DEFAULT '',
-    quantity REAL NOT NULL DEFAULT 0,
-    unit TEXT NOT NULL DEFAULT 'шт',
-    location TEXT NOT NULL DEFAULT '',
-    minimum REAL NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL
-  )
-`;
-
-async function ensureSchema() {
-  const db = env.DB;
-  await db.batch([
-    db.prepare(createProductsSql),
-    db.prepare("CREATE INDEX IF NOT EXISTS products_name_idx ON products(name)"),
-  ]);
-}
 
 function product(row: ProductRow) {
   return {
@@ -54,7 +33,6 @@ function product(row: ProductRow) {
 export async function GET(request: Request) {
   const auth = await requireUser(request);
   if (auth.response) return auth.response;
-  await ensureSchema();
   const result = await env.DB.prepare(
     "SELECT id, name, sku, category, quantity, unit, location, minimum, created_at FROM products ORDER BY created_at DESC",
   ).all<ProductRow>();
@@ -64,8 +42,8 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const auth = await requireUser(request, ["owner", "admin", "storekeeper"]);
   if (auth.response || !auth.user) return auth.response;
-  await ensureSchema();
-  const body = (await request.json()) as Record<string, unknown>;
+  const body = await readJsonObject(request);
+  if (!body) return Response.json({ error: "Некорректный JSON" }, { status: 400 });
   const name = String(body.name ?? "").trim();
   const sku = String(body.sku ?? "").trim();
   const category = String(body.category ?? "").trim();
@@ -108,7 +86,6 @@ export async function POST(request: Request) {
 export async function DELETE(request: Request) {
   const auth = await requireUser(request, ["owner", "admin", "storekeeper"]);
   if (auth.response || !auth.user) return auth.response;
-  await ensureSchema();
   const id = new URL(request.url).searchParams.get("id");
   if (!id) return Response.json({ error: "Не указан товар" }, { status: 400 });
   const existing = await env.DB.prepare("SELECT name, sku FROM products WHERE id = ?").bind(id).first<{ name: string; sku: string }>();
