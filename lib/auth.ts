@@ -206,13 +206,31 @@ export function isTrustedMutationRequest(request: Request) {
   }
 }
 
+async function discardRequestBody(request: Request) {
+  try {
+    const reader = request.body?.getReader();
+    if (!reader) return;
+    while (!(await reader.read()).done) {
+      // Drain rejected mutation bodies without retaining them in memory. This
+      // lets the runtime reuse the connection instead of resetting the client.
+    }
+  } catch {
+    // The body may already be closed by the runtime; rejection still proceeds.
+  }
+}
+
 export async function requireUser(request: Request, roles?: Role[]) {
   if (!isTrustedMutationRequest(request)) {
+    await discardRequestBody(request);
     return { user: null, response: Response.json({ error: "Недоверенный источник запроса" }, { status: 403 }) };
   }
   const user = await getSessionUser(request);
-  if (!user) return { user: null, response: Response.json({ error: "Требуется вход" }, { status: 401 }) };
+  if (!user) {
+    await discardRequestBody(request);
+    return { user: null, response: Response.json({ error: "Требуется вход" }, { status: 401 }) };
+  }
   if (roles && !roles.includes(user.role)) {
+    await discardRequestBody(request);
     return { user: null, response: Response.json({ error: "Недостаточно прав" }, { status: 403 }) };
   }
   return { user, response: null };

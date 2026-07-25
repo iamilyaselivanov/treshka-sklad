@@ -146,6 +146,13 @@ try {
       }),
     }, [200, 503]);
     assert.equal(event.data.targetDevices, pushCase.targets, `${pushCase.type} recipient routing`);
+    if (event.response.status === 503) {
+      assert.equal(
+        Number(event.data.failed ?? 0) + Number(event.data.disabled ?? 0),
+        pushCase.targets,
+        `${pushCase.type} failed deliveries remain retryable`,
+      );
+    }
   }
   await request("/api/notifications/events", {
     method: "POST",
@@ -157,6 +164,31 @@ try {
       entityNo: "FORBIDDEN",
     }),
   }, 403);
+
+  for (let index = 0; index < 7; index += 1) {
+    const deviceId = crypto.randomUUID();
+    pushDevices.push({ role: "owner", deviceId });
+    await request("/api/devices/register", {
+      method: "POST",
+      headers: { ...ownerHeaders, "content-type": "application/json" },
+      body: JSON.stringify({
+        deviceId,
+        token: `owner-extra-${index}-${suffix}`.padEnd(96, "x"),
+        platform: "android",
+        appVersion: "1.6",
+      }),
+    });
+  }
+  await request("/api/devices/register", {
+    method: "POST",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({
+      deviceId: crypto.randomUUID(),
+      token: `owner-over-limit-${suffix}`.padEnd(96, "x"),
+      platform: "android",
+      appVersion: "1.6",
+    }),
+  }, 429);
 
   const product = await request("/api/products", {
     method: "POST",
@@ -244,7 +276,7 @@ try {
     ...sanitized.data.state,
     items: [
       ...(sanitized.data.state.items ?? []),
-      { id: deletionProbeId, name: "Проверка роли удаления", sku: `STATE-${suffix}`, stock: 0, ext: 0, posts: {} },
+      { id: deletionProbeId, name: "Проверка роли удаления", sku: `STATE-${suffix}`, stock: 1, ext: 0, posts: {}, lots: [] },
     ],
   };
   const deletionProbeSaved = await request("/api/state", {
@@ -261,10 +293,61 @@ try {
     headers: { cookie: roleCookies.storekeeper, "content-type": "application/json" },
     body: JSON.stringify({ state: stateWithoutDeletionProbe, expectedRevision: deletionProbeSaved.data.revision }),
   }, 403);
-  const adminDeletion = await request("/api/state", {
+  await request("/api/state", {
     method: "PUT",
     headers: { cookie: roleCookies.admin, "content-type": "application/json" },
     body: JSON.stringify({ state: stateWithoutDeletionProbe, expectedRevision: deletionProbeSaved.data.revision }),
+  }, 409);
+  const originalDocs = stateWithDeletionProbe.docs ?? [];
+  const stateWithDocumentReference = {
+    ...stateWithDeletionProbe,
+    items: stateWithDeletionProbe.items.map((item) =>
+      item.id === deletionProbeId ? { ...item, stock: 0 } : item),
+    docs: [...originalDocs, { no: `DOC-${suffix}`, kind: "work", itemId: deletionProbeId, materials: [] }],
+  };
+  const documentReferenceSaved = await request("/api/state", {
+    method: "PUT",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: stateWithDocumentReference,
+      expectedRevision: deletionProbeSaved.data.revision,
+    }),
+  });
+  const withoutDocumentReferencedItem = {
+    ...stateWithDocumentReference,
+    items: stateWithDocumentReference.items.filter((item) => item.id !== deletionProbeId),
+  };
+  await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.admin, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: withoutDocumentReferencedItem,
+      expectedRevision: documentReferenceSaved.data.revision,
+    }),
+  }, 409);
+  const safeStateWithProbe = {
+    ...stateWithDocumentReference,
+    docs: originalDocs,
+  };
+  const safeProbeSaved = await request("/api/state", {
+    method: "PUT",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: safeStateWithProbe,
+      expectedRevision: documentReferenceSaved.data.revision,
+    }),
+  });
+  const safeStateWithoutProbe = {
+    ...safeStateWithProbe,
+    items: safeStateWithProbe.items.filter((item) => item.id !== deletionProbeId),
+  };
+  const adminDeletion = await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.admin, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: safeStateWithoutProbe,
+      expectedRevision: safeProbeSaved.data.revision,
+    }),
   });
   const stateAfterDeletion = await request("/api/state", { headers: ownerHeaders });
   assert.equal(stateAfterDeletion.data.revision, adminDeletion.data.revision);

@@ -150,17 +150,28 @@ class ServerSyncManager(
             if (response.code == 409) {
                 val message = "Конфликт версий: локальные данные сохранены отдельно и не перезаписаны"
                 store.markMutationConflicted(pending.mutationId, message)
-                // Park this mutation so it no longer blocks pull. Retry the same
-                // idempotency key later; an administrator may resolve it first.
-                scheduleRetry(pending.attempts, pending.mutationId)
-                break
+                // A conflict requires an explicit user decision. Automatically
+                // releasing it with the same stale baseRevision creates an
+                // endless 409 loop and must never enable pull over local work.
+                return
             }
             if (response.code !in 200..299) {
-                store.markSyncError(pending.mutationId, "HTTP ${response.code}: ${response.body.take(300)}")
-                if (response.code == 408 || response.code == 429 || response.code >= 500) {
+                val message = "HTTP ${response.code}: ${response.body.take(300)}"
+                val retryable = response.code == 408
+                    || response.code == 425
+                    || response.code == 429
+                    || response.code >= 500
+                if (retryable) {
+                    store.markSyncError(pending.mutationId, message)
                     scheduleRetry(pending.attempts)
+                    return
                 }
-                return
+                // A permanent 4xx must leave the FIFO lane and become a visible,
+                // explicitly resolvable conflict. Otherwise the same rejected
+                // row blocks every newer snapshot forever.
+                store.markMutationConflicted(pending.mutationId, message)
+                if (response.code == 401 || response.code == 403) return
+                continue
             }
             val revision = JSONObject(response.body).getLong("revision")
             store.markMutationApplied(pending.mutationId, revision)
@@ -169,7 +180,7 @@ class ServerSyncManager(
 
         // Серверный снимок применяется только при пустом outbox. Поэтому
         // несинхронизированные локальные изменения никогда не затираются pull-ом.
-        if (store.sendablePendingCount() == 0) {
+        if (store.pendingCount() == 0) {
             config = store.getSyncConfig() ?: return
             val response = requestJson(
                 "${config.baseUrl}/v1/sync/pull?afterRevision=${config.serverRevision}",
@@ -188,15 +199,12 @@ class ServerSyncManager(
         }
     }
 
-    private fun scheduleRetry(attempt: Int, conflictedMutationId: String? = null) {
+    private fun scheduleRetry(attempt: Int) {
         if (!retryScheduled.compareAndSet(false, true)) return
         val exponent = (attempt - 1).coerceIn(0, 6)
         val delaySeconds = (5L * (1L shl exponent)).coerceAtMost(300L)
         executor.schedule({
             retryScheduled.set(false)
-            if (conflictedMutationId != null) {
-                store.releaseMutationConflict(conflictedMutationId)
-            }
             syncNow()
         }, delaySeconds, TimeUnit.SECONDS)
     }

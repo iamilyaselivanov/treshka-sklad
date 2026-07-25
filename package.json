@@ -9,7 +9,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/release.test.mjs tests/rendered-html.test.mjs tests/sklad-prototype.test.mjs",
+    "test": "npm run build && node --test tests/release.test.mjs tests/rendered-html.test.mjs tests/warehouse-state.test.mjs tests/sklad-prototype.test.mjs && node tests/run-local-api-smoke.mjs",
     "test:api-local": "node tests/local-api-smoke.mjs",
     "test:sklad": "node --test tests/sklad-prototype.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",

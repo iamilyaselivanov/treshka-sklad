@@ -6,6 +6,7 @@ import { isFirebasePushConfigured } from "@/lib/fcm";
 export const dynamic = "force-dynamic";
 
 const deviceIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const MAX_DEVICES_PER_USER = 8;
 
 export async function POST(request: Request) {
   const auth = await requireUser(request);
@@ -31,13 +32,25 @@ export async function POST(request: Request) {
   const existing = await env.DB.prepare(
     "SELECT user_id AS userId, token FROM push_devices WHERE device_id = ?",
   ).bind(deviceId).first<{ userId: string; token: string }>();
-  await env.DB.batch([
+  const results = await env.DB.batch([
     env.DB.prepare("DELETE FROM push_devices WHERE last_seen_at < ?").bind(staleBefore),
-    env.DB.prepare("DELETE FROM push_devices WHERE token = ? AND device_id <> ?").bind(token, deviceId),
+    env.DB.prepare(
+      `DELETE FROM push_devices
+       WHERE token = ? AND device_id <> ?
+         AND (
+           user_id = ?
+           OR (SELECT COUNT(*) FROM push_devices WHERE user_id = ?) < ?
+         )`,
+    ).bind(token, deviceId, auth.user.id, auth.user.id, MAX_DEVICES_PER_USER),
     env.DB.prepare(
       `INSERT INTO push_devices
          (id, user_id, device_id, token, platform, app_version, created_at, updated_at, last_seen_at)
-       VALUES (?, ?, ?, ?, 'android', ?, ?, ?, ?)
+       SELECT ?, ?, ?, ?, 'android', ?, ?, ?, ?
+       WHERE EXISTS (
+         SELECT 1 FROM push_devices WHERE device_id = ? AND user_id = ?
+       ) OR (
+         SELECT COUNT(*) FROM push_devices WHERE user_id = ?
+       ) < ?
        ON CONFLICT(device_id) DO UPDATE SET
          user_id = excluded.user_id,
          token = excluded.token,
@@ -45,8 +58,27 @@ export async function POST(request: Request) {
          app_version = excluded.app_version,
          updated_at = excluded.updated_at,
          last_seen_at = excluded.last_seen_at`,
-    ).bind(crypto.randomUUID(), auth.user.id, deviceId, token, appVersion, now, now, now),
+    ).bind(
+      crypto.randomUUID(),
+      auth.user.id,
+      deviceId,
+      token,
+      appVersion,
+      now,
+      now,
+      now,
+      deviceId,
+      auth.user.id,
+      auth.user.id,
+      MAX_DEVICES_PER_USER,
+    ),
   ]);
+  if (Number(results[2].meta?.changes ?? 0) !== 1) {
+    return Response.json(
+      { error: `К аккаунту уже привязано максимум устройств: ${MAX_DEVICES_PER_USER}` },
+      { status: 429 },
+    );
+  }
   if (!existing || existing.userId !== auth.user.id || existing.token !== token) {
     await audit(auth.user, "push_device_registered", `${platform} · ${deviceId.slice(0, 8)}`);
   }

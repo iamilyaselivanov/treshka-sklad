@@ -209,6 +209,17 @@
     return !!sync.user && ["owner", "admin", "storekeeper"].includes(sync.user.role);
   }
 
+  function adoptServerUser(user) {
+    const changed = !sync.user || sync.user.id !== user.id;
+    sync.user = user;
+    applyServerRole();
+    if (changed) {
+      push.registeredKey = "";
+      loadPushQueue();
+      installServerAccountControls();
+    }
+  }
+
   const localRenderAccounts = window.renderAccounts;
 
   async function refreshServerAccounts() {
@@ -374,6 +385,11 @@
       throw new Error("Требуется повторный вход");
     }
     if (!response.ok) throw new Error(data.error || "Не удалось получить склад");
+    // The first request may fail while the device is offline. Adopt the user on
+    // every later successful fetch before deciding whether local changes may be
+    // uploaded; otherwise an owner is misclassified as read-only and poll can
+    // overwrite their offline work.
+    adoptServerUser(data.user);
     noteSyncSuccess();
     return data;
   }
@@ -506,9 +522,6 @@
   async function initialize() {
     try {
       const data = await fetchSnapshot();
-      sync.user = data.user;
-      loadPushQueue();
-      installServerAccountControls();
       sync.revision = data.revision || 0;
       if (data.state) {
         if (!applyAppState(data.state)) throw new Error("Сервер вернул несовместимые данные");
@@ -519,7 +532,6 @@
         stockTransfers.length = 0;
         inventoryActs.length = 0;
       }
-      applyServerRole();
       sync.lastUploaded = data.state || !canUploadState() ? JSON.stringify(normalizedState()) : "";
       sync.ready = true;
       go("sklad");

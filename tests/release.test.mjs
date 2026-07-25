@@ -87,9 +87,7 @@ test("security hardening keeps state writes privileged and recovery throttling g
     text("drizzle/0003_warehouse_full_state.sql"),
   ]);
   assert.match(stateRoute, /requireUser\(request, \["owner", "admin", "storekeeper"\]\)/);
-  assert.match(stateRoute, /auth\.user\.role === "storekeeper"/);
-  assert.match(stateRoute, /removedItemIds\(previous, state\)/);
-  assert.match(stateRoute, /Удалять карточки товара может только владелец или администратор/);
+  assert.match(stateRoute, /warehouseDeletionPolicy\(previous, state, auth\.user\.role\)/);
   assert.match(productsRoute, /requireUser\(request, \["owner", "admin"\]\)/);
   assert.match(stateRoute, /"state_updated"/);
   assert.doesNotMatch(stateRoute, /revision % 25/);
@@ -128,8 +126,12 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.match(androidStore, /db\.delete\("sync_outbox", "attempts = 0 AND conflict = 0"/);
   assert.doesNotMatch(androidStore, /fun markMutationAttempted\(/);
   assert.match(androidSync, /store\.markMutationConflicted\(pending\.mutationId, message\)/);
-  assert.match(androidSync, /store\.sendablePendingCount\(\) == 0/);
-  assert.match(androidSync, /scheduleRetry\(pending\.attempts, pending\.mutationId\)/);
+  assert.match(androidSync, /store\.pendingCount\(\) == 0/);
+  assert.match(androidSync, /val retryable = response\.code == 408/);
+  assert.match(androidSync, /store\.markMutationConflicted\(pending\.mutationId, message\)/);
+  assert.doesNotMatch(androidSync, /scheduleRetry\(pending\.attempts, pending\.mutationId\)/);
+  assert.doesNotMatch(androidSync, /releaseMutationConflict\(conflictedMutationId\)/);
+  assert.match(browserSync, /adoptServerUser\(data\.user\)/);
   assert.match(activity, /uri\.host != APP_HOST/);
   assert.match(manifest, /android:allowBackup="false"/);
   assert.match(manifest, /android:dataExtractionRules="@xml\/data_extraction_rules"/);
@@ -193,6 +195,33 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
     adopted.prepare("SELECT COUNT(*) AS count FROM pragma_table_info('warehouse_full_state')").get().count,
     5,
   );
+  adopted.exec(`
+    CREATE TABLE push_deliveries (
+      id TEXT PRIMARY KEY NOT NULL, event_id TEXT NOT NULL, user_id TEXT NOT NULL,
+      device_id TEXT NOT NULL, status TEXT NOT NULL, provider_message_id TEXT DEFAULT '' NOT NULL,
+      error TEXT DEFAULT '' NOT NULL, attempted_at TEXT
+    );
+    CREATE TABLE push_devices (
+      id TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, device_id TEXT NOT NULL,
+      token TEXT NOT NULL, platform TEXT DEFAULT 'android' NOT NULL,
+      app_version TEXT DEFAULT '' NOT NULL, created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL, last_seen_at TEXT NOT NULL
+    );
+    CREATE TABLE push_events (
+      id TEXT PRIMARY KEY NOT NULL, actor_user_id TEXT NOT NULL, event_type TEXT NOT NULL,
+      post TEXT DEFAULT '' NOT NULL, entity_no TEXT DEFAULT '' NOT NULL,
+      summary TEXT DEFAULT '' NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    INSERT INTO push_events
+      (id, actor_user_id, event_type, post, entity_no, summary, title, body, created_at)
+    VALUES ('legacy-event', 'owner', 'work_act_created', 'ТЭЧ', 'АВР-1', '', 'Акт', 'Тест', '2026-07-25');
+  `);
+  apply(adopted, migrations[4]);
+  assert.equal(
+    adopted.prepare("SELECT COUNT(*) AS count FROM push_events WHERE id='legacy-event'").get().count,
+    1,
+  );
   adopted.close();
 });
 
@@ -221,13 +250,16 @@ test("push notifications are server-addressed, durable and connected to Android 
   assert.match(eventsRoute, /users\.role IN \('owner', 'admin', 'storekeeper'\)/);
   assert.match(eventsRoute, /users\.role IN \('owner', 'admin'\)/);
   assert.match(devicesRoute, /ON CONFLICT\(device_id\) DO UPDATE/);
+  assert.match(devicesRoute, /MAX_DEVICES_PER_USER = 8/);
+  assert.match(devicesRoute, /status: 429/);
+  assert.match(eventsRoute, /responseBody\.failed > 0 \|\| responseBody\.disabled > 0/);
   assert.match(fcm, /firebase\.messaging/);
   assert.match(fcm, /fcm\.googleapis\.com\/v1\/projects/);
   assert.match(bridge, /PUSH_QUEUE_KEY/);
   assert.match(bridge, /registerNativePush/);
   assert.match(service, /POST_NOTIFICATIONS/);
   assert.match(activity, /AndroidPush/);
-  assert.match(migration, /CREATE TABLE `push_devices`/);
-  assert.match(migration, /CREATE TABLE `push_events`/);
-  assert.match(migration, /CREATE TABLE `push_deliveries`/);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS `push_devices`/);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS `push_events`/);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS `push_deliveries`/);
 });

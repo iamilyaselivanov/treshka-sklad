@@ -210,9 +210,18 @@ export async function POST(request: Request) {
     failed,
     disabled,
   };
-  if (rows.length && !responseBody.pushConfigured) {
+  if (
+    rows.length
+    && (!responseBody.pushConfigured || responseBody.failed > 0 || responseBody.disabled > 0)
+  ) {
     return Response.json(
-      { ...responseBody, ok: false, error: "Firebase на сервере ещё не настроен; событие сохранено для повтора" },
+      {
+        ...responseBody,
+        ok: false,
+        error: responseBody.pushConfigured
+          ? "Не все push доставлены; событие сохранено для автоматического повтора"
+          : "Firebase на сервере ещё не настроен; событие сохранено для повтора",
+      },
       { status: 503 },
     );
   }

@@ -1,5 +1,7 @@
 import { env } from "cloudflare:workers";
 import { audit, requireUser } from "@/lib/auth";
+import { warehouseDeletionPolicy } from "@/lib/warehouse-state";
+import type { WarehouseState } from "@/lib/warehouse-state";
 
 export const dynamic = "force-dynamic";
 
@@ -21,8 +23,6 @@ const OPTIONAL_COLLECTIONS = [
   "notifications",
 ] as const;
 
-type WarehouseState = Record<string, unknown>;
-
 function normalizedState(value: unknown): WarehouseState | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const state = { ...(value as WarehouseState) };
@@ -42,22 +42,6 @@ function normalizedState(value: unknown): WarehouseState | null {
   delete state.currentRole;
   delete state.currentUserPost;
   return state;
-}
-
-function itemIds(state: WarehouseState) {
-  const result = new Set<string>();
-  const items = Array.isArray(state.items) ? state.items : [];
-  for (const value of items) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
-    const id = String((value as Record<string, unknown>).id ?? "").trim();
-    if (id) result.add(id);
-  }
-  return result;
-}
-
-function removedItemIds(previous: WarehouseState, next: WarehouseState) {
-  const nextIds = itemIds(next);
-  return [...itemIds(previous)].filter((id) => !nextIds.has(id));
 }
 
 export async function GET(request: Request) {
@@ -113,29 +97,43 @@ export async function PUT(request: Request) {
       { status: 428 },
     );
   }
-  if (auth.user.role === "storekeeper" && expectedRevision > 0) {
-    const current = await env.DB.prepare(
-      "SELECT revision, payload FROM warehouse_full_state WHERE state_key = 'main'",
-    ).first<Pick<StateRow, "revision" | "payload">>();
-    if (current?.revision === expectedRevision) {
-      let previous: WarehouseState | null = null;
-      try {
-        previous = normalizedState(JSON.parse(current.payload));
-      } catch {
-        // A damaged server snapshot must never be overwritten through a less privileged session.
-      }
-      if (!previous) {
-        return Response.json(
-          { error: "Серверный снимок повреждён. Обратитесь к владельцу" },
-          { status: 500 },
-        );
-      }
-      if (removedItemIds(previous, state).length > 0) {
-        return Response.json(
-          { error: "Удалять карточки товара может только владелец или администратор" },
-          { status: 403 },
-        );
-      }
+  const current = await env.DB.prepare(
+    "SELECT revision, payload, updated_at, updated_by FROM warehouse_full_state WHERE state_key = 'main'",
+  ).first<StateRow>();
+  if (
+    (expectedRevision === 0 && current)
+    || (expectedRevision > 0 && current?.revision !== expectedRevision)
+  ) {
+    return Response.json(
+      {
+        error: "Склад уже изменён другим пользователем",
+        conflict: true,
+        currentRevision: current?.revision ?? 0,
+        updatedAt: current?.updated_at ?? null,
+        updatedBy: current?.updated_by ?? null,
+      },
+      { status: 409, headers: { "cache-control": "no-store" } },
+    );
+  }
+  if (current) {
+    let previous: WarehouseState | null = null;
+    try {
+      previous = normalizedState(JSON.parse(current.payload));
+    } catch {
+      // Never overwrite a damaged snapshot before an owner can export/recover it.
+    }
+    if (!previous) {
+      return Response.json(
+        { error: "Серверный снимок повреждён. Обратитесь к владельцу" },
+        { status: 500 },
+      );
+    }
+    const deletionPolicy = warehouseDeletionPolicy(previous, state, auth.user.role);
+    if (deletionPolicy) {
+      return Response.json(
+        { error: deletionPolicy.error },
+        { status: deletionPolicy.status },
+      );
     }
   }
   const payload = JSON.stringify(state);

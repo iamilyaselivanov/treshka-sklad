@@ -1,4 +1,7 @@
-CREATE TABLE `push_deliveries` (
+-- Some v1.6 deployments created these tables before Drizzle recorded this
+-- migration. Every statement is idempotent so the migration can adopt those
+-- databases without dropping delivery history or failing the deployment.
+CREATE TABLE IF NOT EXISTS `push_deliveries` (
 	`id` text PRIMARY KEY NOT NULL,
 	`event_id` text NOT NULL,
 	`user_id` text NOT NULL,
@@ -9,9 +12,9 @@ CREATE TABLE `push_deliveries` (
 	`attempted_at` text
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `push_deliveries_event_device_idx` ON `push_deliveries` (`event_id`,`device_id`);--> statement-breakpoint
-CREATE INDEX `push_deliveries_status_idx` ON `push_deliveries` (`status`);--> statement-breakpoint
-CREATE TABLE `push_devices` (
+CREATE UNIQUE INDEX IF NOT EXISTS `push_deliveries_event_device_idx` ON `push_deliveries` (`event_id`,`device_id`);--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS `push_deliveries_status_idx` ON `push_deliveries` (`status`);--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS `push_devices` (
 	`id` text PRIMARY KEY NOT NULL,
 	`user_id` text NOT NULL,
 	`device_id` text NOT NULL,
@@ -23,10 +26,10 @@ CREATE TABLE `push_devices` (
 	`last_seen_at` text NOT NULL
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `push_devices_device_idx` ON `push_devices` (`device_id`);--> statement-breakpoint
-CREATE UNIQUE INDEX `push_devices_token_idx` ON `push_devices` (`token`);--> statement-breakpoint
-CREATE INDEX `push_devices_user_idx` ON `push_devices` (`user_id`);--> statement-breakpoint
-CREATE TABLE `push_events` (
+CREATE UNIQUE INDEX IF NOT EXISTS `push_devices_device_idx` ON `push_devices` (`device_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS `push_devices_token_idx` ON `push_devices` (`token`);--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS `push_devices_user_idx` ON `push_devices` (`user_id`);--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS `push_events` (
 	`id` text PRIMARY KEY NOT NULL,
 	`actor_user_id` text NOT NULL,
 	`event_type` text NOT NULL,
@@ -38,4 +41,4 @@ CREATE TABLE `push_events` (
 	`created_at` text NOT NULL
 );
 --> statement-breakpoint
-CREATE INDEX `push_events_created_idx` ON `push_events` (`created_at`);
+CREATE INDEX IF NOT EXISTS `push_events_created_idx` ON `push_events` (`created_at`);

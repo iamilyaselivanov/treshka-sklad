@@ -1,6 +1,8 @@
 import { env } from "cloudflare:workers";
 import { audit, requireUser } from "@/lib/auth";
 import { readJsonObject } from "@/lib/http";
+import { findWarehouseItemId, warehouseItemDeletionIssue } from "@/lib/warehouse-state";
+import type { WarehouseState } from "@/lib/warehouse-state";
 
 export const dynamic = "force-dynamic";
 
@@ -88,8 +90,52 @@ export async function DELETE(request: Request) {
   if (auth.response || !auth.user) return auth.response;
   const id = new URL(request.url).searchParams.get("id");
   if (!id) return Response.json({ error: "Не указан товар" }, { status: 400 });
-  const existing = await env.DB.prepare("SELECT name, sku FROM products WHERE id = ?").bind(id).first<{ name: string; sku: string }>();
+  const existing = await env.DB.prepare(
+    "SELECT name, sku, quantity FROM products WHERE id = ?",
+  ).bind(id).first<{ name: string; sku: string; quantity: number }>();
+  if (!existing) return Response.json({ error: "Товар не найден" }, { status: 404 });
+  if (Number(existing.quantity) > 0) {
+    return Response.json(
+      { error: "Нельзя удалить карточку: на складе есть остаток" },
+      { status: 409 },
+    );
+  }
+  const stateRow = await env.DB.prepare(
+    "SELECT payload FROM warehouse_full_state WHERE state_key = 'main'",
+  ).first<{ payload: string }>();
+  if (stateRow) {
+    let state: WarehouseState | null = null;
+    try {
+      const parsed = JSON.parse(stateRow.payload) as unknown;
+      state = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as WarehouseState
+        : null;
+    } catch {
+      return Response.json(
+        { error: "Серверный снимок повреждён. Карточка не удалена" },
+        { status: 500 },
+      );
+    }
+    if (!state) {
+      return Response.json(
+        { error: "Серверный снимок повреждён. Карточка не удалена" },
+        { status: 500 },
+      );
+    }
+    const warehouseItemId = findWarehouseItemId(state, id, existing.sku);
+    if (warehouseItemId) {
+      const issue = warehouseItemDeletionIssue(state, warehouseItemId);
+      return Response.json(
+        {
+          error: issue
+            ? `Нельзя удалить карточку: ${issue}`
+            : "Карточка существует в основном складе. Удалите её через карточку товара",
+        },
+        { status: 409 },
+      );
+    }
+  }
   await env.DB.prepare("DELETE FROM products WHERE id = ?").bind(id).run();
-  if (existing) await audit(auth.user, "product_deleted", `${existing.name} · ${existing.sku}`);
+  await audit(auth.user, "product_deleted", `${existing.name} · ${existing.sku}`);
   return Response.json({ ok: true });
 }
