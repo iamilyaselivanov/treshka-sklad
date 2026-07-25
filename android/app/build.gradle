@@ -2,6 +2,9 @@ plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
 }
+if (file('google-services.json').exists()) {
+    apply plugin: 'com.google.gms.google-services'
+}
 
 android {
     namespace 'com.treshka.sklad'
@@ -11,8 +14,8 @@ android {
         applicationId "com.treshka.sklad"
         minSdk 26
         targetSdk 34
-        versionCode 2
-        versionName "1.1"
+        versionCode 7
+        versionName "1.6"
     }
 
     buildTypes {
@@ -31,6 +34,11 @@ android {
     }
 }
 
+def isolatedBuildDir = System.getenv('TRESHKA_BUILD_DIR')
+if (isolatedBuildDir) {
+    layout.buildDirectory = file(isolatedBuildDir)
+}
+
 dependencies {
     implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'androidx.appcompat:appcompat:1.7.0'
@@ -42,4 +50,6 @@ dependencies {
     implementation 'androidx.camera:camera-lifecycle:1.3.4'
     implementation 'androidx.camera:camera-view:1.3.4'
     implementation 'com.google.mlkit:barcode-scanning:17.3.0'
+    implementation platform('com.google.firebase:firebase-bom:34.16.0')
+    implementation 'com.google.firebase:firebase-messaging'
 }

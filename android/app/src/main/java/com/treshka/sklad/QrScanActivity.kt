@@ -137,7 +137,7 @@ class QrScanActivity : AppCompatActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
-    @androidx.camera.core.ExperimentalGetImage
+    @androidx.annotation.OptIn(markerClass = [androidx.camera.core.ExperimentalGetImage::class])
     private fun processFrame(imageProxy: ImageProxy, scanner: com.google.mlkit.vision.barcode.BarcodeScanner) {
         val mediaImage = imageProxy.image
         if (mediaImage == null) { imageProxy.close(); return }

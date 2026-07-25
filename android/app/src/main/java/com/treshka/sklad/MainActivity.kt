@@ -4,6 +4,8 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.app.Dialog
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -31,6 +33,12 @@ import androidx.core.content.ContextCompat
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import org.json.JSONObject
+import com.google.firebase.FirebaseApp
+import com.google.firebase.messaging.FirebaseMessaging
+
+private const val APP_URL = "https://sklad-ok-prototype.janfoody2016.chatgpt.site/"
+private const val APP_HOST = "sklad-ok-prototype.janfoody2016.chatgpt.site"
 
 /**
  * ТРЁШКА склад — нативная Android-обёртка над однофайловым HTML/JS прототипом
@@ -53,9 +61,13 @@ import java.io.FileOutputStream
  *    приложения молча ничего не делает).
  */
 class MainActivity : AppCompatActivity() {
+    companion object {
+        const val NOTIFICATION_CHANNEL_ID = "treshka_sklad_events"
+    }
 
     private lateinit var webView: WebView
     private lateinit var appStateStore: AppStateStore
+    private lateinit var serverSyncManager: ServerSyncManager
 
     private val scanLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -161,15 +173,37 @@ class MainActivity : AppCompatActivity() {
     // экспорт в Excel не падал молча на старых устройствах.
     private val requestStoragePermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* результат неважен: saveExportedFile() сам проверит и вернёт false при отказе */ }
+    private val requestNotificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* уведомления также остаются во внутреннем центре приложения */ }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         appStateStore = AppStateStore(this)
+        createNotificationChannel()
 
         webView = WebView(this)
         setContentView(webView)
+        serverSyncManager = ServerSyncManager(
+            appStateStore,
+            onStatus = { json ->
+                runOnUiThread {
+                    webView.evaluateJavascript(
+                        "window.onNativeSyncStatus && window.onNativeSyncStatus(${jsStringLiteral(json)});",
+                        null,
+                    )
+                }
+            },
+            onRemoteState = { payload, revision ->
+                runOnUiThread {
+                    webView.evaluateJavascript(
+                        "window.onNativeRemoteState && window.onNativeRemoteState(${jsStringLiteral(payload)}, $revision);",
+                        null,
+                    )
+                }
+            },
+        )
 
         webView.settings.apply {
             javaScriptEnabled = true
@@ -177,25 +211,152 @@ class MainActivity : AppCompatActivity() {
             cacheMode = WebSettings.LOAD_DEFAULT
             javaScriptCanOpenWindowsAutomatically = true
             setSupportMultipleWindows(true)
-            allowFileAccess = true
+            allowFileAccess = false
+            allowContentAccess = false
         }
 
-        webView.addJavascriptInterface(WebAppInterface(appStateStore), "AndroidStorage")
+        webView.addJavascriptInterface(WebAppInterface(appStateStore, serverSyncManager), "AndroidStorage")
+        webView.addJavascriptInterface(SyncBridge(), "AndroidSync")
         webView.addJavascriptInterface(ScannerBridge(), "AndroidScanner")
         webView.addJavascriptInterface(FileExportBridge(), "AndroidFiles")
         webView.addJavascriptInterface(PrintBridge(), "AndroidPrint")
         webView.addJavascriptInterface(PhotoBridge(), "AndroidPhoto")
+        webView.addJavascriptInterface(NotificationBridge(), "AndroidNotifications")
 
-        webView.webViewClient = WebViewClient()
+        webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView, request: android.webkit.WebResourceRequest): Boolean {
+                val uri = request.url
+                return if (uri.scheme == "https" && uri.host == APP_HOST) {
+                    false
+                } else {
+                    startActivity(Intent(Intent.ACTION_VIEW, uri))
+                    true
+                }
+            }
+        }
         webView.webChromeClient = PrintPopupChromeClient()
 
-        webView.loadUrl("file:///android_asset/prototype.html")
+        webView.loadUrl(APP_URL)
+
+        if (FirebaseApp.getApps(this).isNotEmpty()) {
+            FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
+                serverSyncManager.registerPushToken(token)
+            }
+        }
 
         if (Build.VERSION.SDK_INT in Build.VERSION_CODES.O..Build.VERSION_CODES.P) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 != PackageManager.PERMISSION_GRANTED
             ) {
                 requestStoragePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    inner class SyncBridge {
+        @JavascriptInterface
+        fun configure(baseUrl: String, token: String): Boolean {
+            val normalized = baseUrl.trim().trimEnd('/')
+            if (!normalized.startsWith("https://")) return false
+            appStateStore.configureSync(normalized, token.trim())
+            serverSyncManager.syncNow()
+            return true
+        }
+
+        @JavascriptInterface
+        fun login(baseUrl: String, login: String, password: String): String = try {
+            val result = serverSyncManager.login(baseUrl, login, password)
+            if (FirebaseApp.getApps(this@MainActivity).isNotEmpty()) {
+                FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
+                    serverSyncManager.registerPushToken(token)
+                }
+            }
+            result
+        } catch (e: Exception) {
+            JSONObject().put("error", e.message ?: "Ошибка входа").toString()
+        }
+
+        @JavascriptInterface
+        fun createUser(json: String): String = try {
+            serverSyncManager.createUser(json)
+        } catch (e: Exception) {
+            JSONObject().put("error", e.message ?: "Ошибка создания пользователя").toString()
+        }
+
+        @JavascriptInterface
+        fun listConflicts(): String = try {
+            serverSyncManager.listConflicts()
+        } catch (e: Exception) {
+            JSONObject().put("error", e.message ?: "Ошибка загрузки конфликтов").toString()
+        }
+
+        @JavascriptInterface
+        fun resolveConflict(id: Long, decision: String): String = try {
+            serverSyncManager.resolveConflict(id, decision)
+        } catch (e: Exception) {
+            JSONObject().put("error", e.message ?: "Ошибка решения конфликта").toString()
+        }
+
+        @JavascriptInterface
+        fun registerPushToken(token: String): Boolean = serverSyncManager.registerPushToken(token)
+
+        @JavascriptInterface
+        fun uploadImage(dataUrl: String): String = try {
+            serverSyncManager.uploadImage(dataUrl)
+        } catch (e: Exception) {
+            JSONObject().put("error", e.message ?: "Ошибка загрузки фотографии").toString()
+        }
+
+        @JavascriptInterface
+        fun status(): String = appStateStore.syncStatusJson()
+
+        @JavascriptInterface
+        fun syncNow() = serverSyncManager.syncNow()
+
+        @JavascriptInterface
+        fun disconnect() = appStateStore.clearSyncAuth()
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    NOTIFICATION_CHANNEL_ID,
+                    "События склада",
+                    NotificationManager.IMPORTANCE_DEFAULT
+                ).apply { description = "Поступления на пост, заявки и согласование актов" }
+            )
+        }
+    }
+
+    inner class NotificationBridge {
+        @JavascriptInterface
+        fun notify(title: String, body: String) {
+            runOnUiThread {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                    ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                ) return@runOnUiThread
+                val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    android.app.Notification.Builder(this@MainActivity, NOTIFICATION_CHANNEL_ID)
+                } else {
+                    @Suppress("DEPRECATION")
+                    android.app.Notification.Builder(this@MainActivity)
+                }
+                val notification = builder
+                    .setSmallIcon(android.R.drawable.ic_dialog_info)
+                    .setContentTitle(title.take(80))
+                    .setContentText(body.take(240))
+                    .setStyle(android.app.Notification.BigTextStyle().bigText(body.take(1000)))
+                    .setAutoCancel(true)
+                    .build()
+                (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+                    .notify((System.currentTimeMillis() and 0x7fffffff).toInt(), notification)
             }
         }
     }
@@ -244,11 +405,19 @@ class MainActivity : AppCompatActivity() {
                     }
                     val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                         ?: return false
-                    resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: return false
-                    values.clear()
-                    values.put(MediaStore.Downloads.IS_PENDING, 0)
-                    resolver.update(uri, values, null, null)
-                    true
+                    var published = false
+                    try {
+                        resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: return false
+                        values.clear()
+                        values.put(MediaStore.Downloads.IS_PENDING, 0)
+                        published = resolver.update(uri, values, null, null) > 0
+                        published
+                    } finally {
+                        // Не оставляем в Downloads невидимый/повреждённый файл,
+                        // если поток не открылся, запись оборвалась или публикация
+                        // IS_PENDING=0 не удалась.
+                        if (!published) runCatching { resolver.delete(uri, null, null) }
+                    }
                 } else {
                     if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.WRITE_EXTERNAL_STORAGE)
                         != PackageManager.PERMISSION_GRANTED
@@ -284,37 +453,32 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Поля бланка акта (см. buildWorkActDocumentXml()/prototype.html: w:pgMar
-    // top=1134 right=850 bottom=1134 left=1701 twips = 2/1.5/2/3 см) — переведены
-    // в милы (1/1000 дюйма), как того требует PrintAttributes.Margins. Раньше
-    // PrintAttributes.Builder().build() без единого заданного параметра означал,
-    // что реальный формат страницы/поля печатного PDF зависели от того, что
-    // подставит система/принтер по умолчанию (не обязательно A4) — печатная
-    // форма могла не совпадать с .docx-версией того же акта.
-    private fun cmToMils(cm: Double): Int = Math.round(cm / 2.54 * 1000).toInt()
-
     private fun printHtmlContent(html: String, jobName: String, pageFormat: String) {
         val printWebView = WebView(this)
         printWebView.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, url: String?) {
                 val printManager = getSystemService(PRINT_SERVICE) as PrintManager
                 val adapter = view.createPrintDocumentAdapter(jobName)
-                // 'label' (этикетка товара, 60×40мм) держит собственный @page в HTML —
-                // принудительный A4 здесь сломал бы её формат, поэтому для неё
-                // оставляем незаданные атрибуты, как было раньше.
+                // CSS задаёт внутренние поля документа, поэтому нативные поля
+                // всегда нулевые: иначе Android добавлял их второй раз. Для
+                // этикетки задаём реальный носитель 60×40 мм (размеры в mils),
+                // чтобы драйвер принтера не подменял его A4/Letter.
                 val attributes = if (pageFormat == "label") {
-                    PrintAttributes.Builder().build()
+                    PrintAttributes.Builder()
+                        .setMediaSize(
+                            PrintAttributes.MediaSize(
+                                "TRESHKA_LABEL_60X40",
+                                "ТРЁШКА 60×40 мм",
+                                2362,
+                                1575,
+                            )
+                        )
+                        .setMinMargins(PrintAttributes.Margins.NO_MARGINS)
+                        .build()
                 } else {
                     PrintAttributes.Builder()
                         .setMediaSize(PrintAttributes.MediaSize.ISO_A4)
-                        .setMinMargins(
-                            PrintAttributes.Margins(
-                                cmToMils(3.0), // left
-                                cmToMils(2.0), // top
-                                cmToMils(1.5), // right
-                                cmToMils(2.0), // bottom
-                            )
-                        )
+                        .setMinMargins(PrintAttributes.Margins.NO_MARGINS)
                         .build()
                 }
                 printManager.print(jobName, adapter, attributes)
@@ -452,11 +616,17 @@ class MainActivity : AppCompatActivity() {
         flushWebAppState()
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (::serverSyncManager.isInitialized) serverSyncManager.syncNow()
+    }
+
     override fun onStop() {
         super.onStop()
         flushWebAppState()
     }
 
+    @Suppress("MissingSuperCall")
     override fun onBackPressed() {
         // #8 ревью: раньше здесь проверялась только webView.canGoBack() — реальная
         // история навигации WebView, которая в этом SPA почти не продвигается

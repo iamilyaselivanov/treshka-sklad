@@ -27,6 +27,7 @@ import assert from 'node:assert/strict';
 import { chromium } from 'playwright-core';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
 
 const PROTOTYPE_PATH = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -208,6 +209,12 @@ test('#5/#6 — privileged roles require a PIN; rabotnik cannot export the whole
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => {
     const out = {};
+    out.startsAsWorker = currentRole === 'rabotnik';
+    out.pinsUpdated = ROLE_PINS.admin === '21208' && ROLE_PINS.kladovshik === '21208';
+    const state = serializeAppState();
+    out.rolePersisted = state.currentRole === 'rabotnik';
+    currentRole = 'rabotnik';
+    out.savedAdminRestoredOnLoad = applyAppState({ ...state, currentRole: 'admin' }) && currentRole === 'admin';
     currentRole = 'admin';
     requestRoleSwitch('rabotnik');
     out.rabotnikNoPinNeeded = currentRole === 'rabotnik';
@@ -382,7 +389,7 @@ test('#8 — native back handler drives the JS navigation stack (sheet > sklad d
   await ctx.close();
 });
 
-test('regression — QR encodes the immutable item id and survives a SKU rename', async () => {
+test('regression — QR changes with the SKU while the scanner remains backward-compatible with legacy internal-id labels', async () => {
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => {
     const i = items.find((x) => x.id === 'flux');
@@ -390,12 +397,14 @@ test('regression — QR encodes the immutable item id and survives a SKU rename'
     const oldSku = i.sku;
     i.sku = 'РМ-9999-NEW';
     const after = genQR(i.id);
-    const encodesId = qrValue(i).includes(i.id) && !qrValue(i).includes(oldSku);
+    const encodesNewSku = qrValue(i).includes(i.sku) && !qrValue(i).includes(i.id);
+    const legacyCodeStillResolves = items.find((x) => x.id === i.id) === i;
     i.sku = oldSku;
-    return { sameImage: before === after, encodesId };
+    return { imageChanged: before !== after, encodesNewSku, legacyCodeStillResolves };
   });
-  assert.equal(r.sameImage, true);
-  assert.equal(r.encodesId, true);
+  assert.equal(r.imageChanged, true);
+  assert.equal(r.encodesNewSku, true);
+  assert.equal(r.legacyCodeStillResolves, true);
   await ctx.close();
 });
 
@@ -438,15 +447,15 @@ test('regression — app version is shown to the user on the "Ещё" screen', a
     render({ fn: views.more });
     return { version: APP_VERSION, html: document.getElementById('content').innerHTML };
   });
-  assert.equal(r.version, '1.1');
-  assert.ok(r.html.includes('версия 1.1'), 'more() screen must render the current app version');
+  assert.equal(r.version, '1.6');
+  assert.ok(r.html.includes('версия 1.6'), 'more() screen must render the current app version');
   await ctx.close();
 });
 
 test('regression — app version is also shown in the persistent top masthead on every screen', async () => {
   const { ctx, page } = await newPage();
   const text = await page.evaluate(() => document.getElementById('mastVersion').textContent);
-  assert.equal(text, 'v1.1');
+  assert.equal(text, 'v1.6');
   await ctx.close();
 });
 
@@ -465,7 +474,7 @@ for (const [screen, inputId, text] of [
 ]) {
   test(`regression — "${screen}" search input keeps focus while typing (was closing the keyboard after 1 char)`, async () => {
     const { ctx, page } = await newPage();
-    await page.evaluate((s) => go(s), screen);
+    await page.evaluate((s) => { currentRole = 'admin'; go(s); }, screen);
     await page.click('#' + inputId);
     await page.type('#' + inputId, text, { delay: 25 });
     const value = await page.inputValue('#' + inputId);
@@ -499,6 +508,7 @@ test('regression — "add material" button in an open work act stays on-screen a
   await page.goto(PROTOTYPE_URL);
   await page.waitForTimeout(250);
   await page.evaluate(() => {
+    currentRole = 'admin';
     const idx = docs.findIndex((d) => d.no === 'АВР-145');
     openDoc(idx);
   });
@@ -536,7 +546,7 @@ test('regression — exported act filename is human-readable (act number, date, 
   const { ctx, page } = await newPage(() => {
     window.__savedFiles = [];
     window.AndroidFiles = {
-      saveExportedFile: (base64, filename, mime) => { window.__savedFiles.push(filename); return true; },
+      saveExportedFile: (...args) => { window.__savedFiles.push(args[1]); return true; },
     };
     window.__printCalls = [];
     window.AndroidPrint = { printHtml: (html, job) => { window.__printCalls.push(job); } };
@@ -601,7 +611,7 @@ test('regression — closing a work act requires at least one "Тип дейст
   await ctx.close();
 });
 
-test('regression — schema migration v1→v2 backfills work-act fields and upgrades legacy string works to {type,qty}', async () => {
+test('regression — schema migration v1→v3 preserves old data and backfills work/photo fields', async () => {
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => {
     const base = JSON.parse(JSON.stringify(serializeAppState()));
@@ -609,7 +619,10 @@ test('regression — schema migration v1→v2 backfills work-act fields and upgr
     legacy.schemaVersion = 1;
     legacy.docs = legacy.docs.map((d) => {
       if (d.kind !== 'work') return d;
-      const { actionTypes, resultText, otkPassed, ...rest } = d;
+      const rest = { ...d };
+      delete rest.actionTypes;
+      delete rest.resultText;
+      delete rest.otkPassed;
       return { ...rest, works: (d.works || []).map((w) => w.type) }; // старый формат: works — массив строк
     });
     const migrated = migrateAppState(legacy);
@@ -624,11 +637,65 @@ test('regression — schema migration v1→v2 backfills work-act fields and upgr
     };
   });
   assert.equal(r.migratedOk, true, 'v1 data must migrate cleanly to the current schema');
-  assert.equal(r.schemaVersion, 2);
+  assert.equal(r.schemaVersion, 4);
   assert.equal(r.hasActionTypes, true, 'migration must backfill actionTypes:[] where missing');
   assert.equal(r.resultTextIsString, true, 'migration must backfill resultText:\'\' where missing');
   assert.equal(r.otkPassedIsBool, true, 'migration must backfill otkPassed:false where missing');
   assert.equal(r.firstWorkIsObject, true, 'migration must convert legacy string work entries to {type, qty:1} objects');
+  await ctx.close();
+});
+
+test('v1.3 — application photo is stored in the defect card and automatically attached to the work act by reference', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.__photoBridgeCalls = [];
+    window.AndroidPhoto = { pickPhoto: (target) => window.__photoBridgeCalls.push(target) };
+  });
+  const r = await page.evaluate(() => {
+    currentRole = 'admin';
+    views.newDefekt();
+    requestDefektApplicationPhoto();
+    const target = window.__photoBridgeCalls[0];
+    const photo = 'data:image/jpeg;base64,ZmFrZS1hcHBsaWNhdGlvbi1waG90bw==';
+    window.onPhotoPicked(target, photo, null);
+    const previewShown = !!document.querySelector('#defektPhotoBox img');
+
+    document.getElementById('f_order').value = 'З-TEST-PHOTO';
+    document.getElementById('f_item_name').value = 'Тестовое изделие';
+    document.getElementById('f_serial').value = '123456';
+    document.getElementById('f_date').value = '22.07.2026';
+    document.getElementById('f_from').value = 'Тестовое подразделение';
+    document.getElementById('f_post').value = posts[0].name;
+    document.getElementById('f_callsign').value = 'Тест';
+    document.getElementById('f_fault').value = 'Тестовая неисправность';
+    document.getElementById('f_defects').value = 'Тестовый дефект';
+    document.getElementById('f_verdict').value = 'Ремонтопригодно';
+    submitDefekt();
+
+    const defekt = docs.find((d) => d.kind === 'defekt' && d.orderNo === 'З-TEST-PHOTO');
+    createWorkFromDefekt(defekt.no);
+    const work = docs.find((d) => d.kind === 'work' && d.defektDoc === defekt.no);
+    renderWorkDoc(work);
+    const attachedInWorkCard = !!document.querySelector('.doc-photo img[src^="data:image/jpeg"]');
+    const serialized = JSON.stringify(serializeAppState());
+    const encodedPayload = 'ZmFrZS1hcHBsaWNhdGlvbi1waG90bw==';
+    const storedCopies = serialized.split(encodedPayload).length - 1;
+    return {
+      target,
+      previewShown,
+      defektHasPhoto: defekt.applicationPhoto === photo,
+      workSource: work.applicationPhotoSource,
+      resolvedPhoto: workApplicationPhoto(work),
+      attachedInWorkCard,
+      storedCopies,
+    };
+  });
+  assert.equal(r.target, '__defekt_application_photo__', 'photo picker must receive the dedicated defect-draft target');
+  assert.equal(r.previewShown, true, 'selected application photo must be previewed before the defect is submitted');
+  assert.equal(r.defektHasPhoto, true, 'the photo must be stored in the created defect card');
+  assert.ok(r.workSource && r.workSource.startsWith('ДФ-'), 'work act must retain an explicit reference to the source defect photo');
+  assert.ok(r.resolvedPhoto.startsWith('data:image/jpeg'), 'work act must resolve the photo through its linked defect');
+  assert.equal(r.attachedInWorkCard, true, 'work-act card must visibly render the inherited application photo');
+  assert.equal(r.storedCopies, 1, 'Base64 photo payload must be stored once, not duplicated into the work act');
   await ctx.close();
 });
 
@@ -690,8 +757,9 @@ test('regression — exportWorkActDocx() produces a real, valid, parseable .docx
   assert.ok(docXml.includes('Ремонт'), 'document.xml must contain the selected action type');
   assert.ok(docXml.includes('1. Результат выполненных работ: произведено:'), 'document.xml must contain the numbered result heading');
   assert.ok(docXml.includes('- отремонтировано'), 'document.xml must contain the auto-derived result status as a bullet line');
+  assert.ok(docXml.includes('Выполнены следующие работы:'), 'document.xml must contain the introductory line from the supplied template');
   assert.ok(docXml.includes('Герасимчук'), 'document.xml must contain the fixed "Передал" signer');
-  assert.ok(docXml.includes('<w:br/>'), '"Передал" signer name must be on its own explicit line break, not just concatenated after the title/blank');
+  assert.ok(/Передал:<\/w:t>[\s\S]*?<\/w:tr><w:tr>[\s\S]*?Командир ремонтного взвода/.test(docXml), 'signature headings and positions must be in separate table rows');
   assert.ok(docXml.includes('ОТК пройдено ответственный командир отделения ремонтного поста'), 'document.xml must contain the fixed blank OTK signature line');
   assert.ok(docXml.includes('Флюс паяльный ТТ'), 'document.xml must list the act\'s materials table (from d.materials)');
   assert.ok(docXml.includes('арт. РМ-0012'), 'material article must be folded into the material name (sample has no separate 4th column)');
@@ -701,7 +769,7 @@ test('regression — exportWorkActDocx() produces a real, valid, parseable .docx
   // Таблицы должны иметь закреплённые ширины колонок (tblLayout fixed), а не
   // пустой tblGrid, который Word мог бы перераспределить по содержимому.
   assert.ok(docXml.includes('w:type="fixed"'), 'work/materials tables must use a fixed table layout with explicit column widths');
-  assert.ok(docXml.includes('w:gridSpan w:val="3"'), 'the merged row above the works table (action type/item/order/date) must span all 3 columns');
+  assert.ok((docXml.match(/w:gridSpan w:val="3"/g) || []).length >= 2, 'both the works and materials tables must have the merged descriptive row');
   // Блок подписей — двухколоночный, БЕЗ рамок (ревью #6).
   assert.ok(/w:val="none"[\s\S]{0,40}w:sz="0"/.test(docXml), 'the signature table must use explicit "none" borders (borderless two-column layout)');
   // ZIP должен содержать styles.xml с Times New Roman 14pt по умолчанию — подстраховка,
@@ -723,6 +791,7 @@ test('regression — the updated PDF/print form for a work act matches the new t
   assert.ok(r.html.includes('«17» июля 2026 г.'), 'print form must show the long-form Russian date');
   assert.ok(r.html.includes('Ремонт'), 'print form must show the selected action type(s) in the merged header row');
   assert.ok(r.html.includes('Наименование работ'), 'print form must include the "Наименование работ" table');
+  assert.ok(r.html.includes('Выполнены следующие работы:'), 'print form must include the introductory line from the Word template');
   assert.ok(r.html.includes('№ п/п'), 'print form work/materials tables must include the "№ п/п" column (was missing before)');
   assert.ok(r.html.includes('Сборочные работы'), 'print form must list the act\'s works (from d.works)');
   assert.ok(r.html.includes('арт. РМ-0012'), 'print form materials table must fold the article into the material name, matching the 3-column sample');
@@ -730,10 +799,24 @@ test('regression — the updated PDF/print form for a work act matches the new t
   assert.ok(r.html.includes('- отремонтировано'), 'print form must show the auto-derived result status as a bullet line');
   assert.ok(r.html.includes('ОТК пройдено ответственный командир отделения ремонтного поста'), 'print form must include the fixed blank OTK signature line');
   assert.ok(r.html.includes('Герасимчук'), 'print form must include the fixed "Передал" signer');
+  assert.equal((r.html.match(/class="mergedrow"/g) || []).length, 2, 'both the works and materials tables must contain the merged descriptive row');
+  assert.ok(r.html.includes('(подпись)'), 'signature block must have separate signature/name rows, matching the Word template');
   assert.ok(r.html.includes('Times New Roman'), 'print form must use Times New Roman, matching the .docx export');
   assert.ok(r.html.includes('14pt'), 'print form must use 14pt text, matching the .docx export');
   assert.ok(r.html.includes('size:A4'), 'print form @page must target A4, matching the .docx page size');
   await ctx.close();
+});
+
+test('Android printing uses native 60x40 media and does not double the CSS A4 margins', () => {
+  const mainActivity = readFileSync(path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '..', 'android', 'app', 'src', 'main', 'java', 'com', 'treshka', 'sklad', 'MainActivity.kt',
+  ), 'utf8');
+  assert.ok(mainActivity.includes('TRESHKA_LABEL_60X40'), 'label printing must use an explicit custom media size');
+  assert.ok(mainActivity.includes('2362') && mainActivity.includes('1575'), 'custom label media must be 60x40 mm in mils');
+  assert.ok(mainActivity.includes('PrintAttributes.Margins.NO_MARGINS'), 'native margins must stay zero because CSS owns document margins');
+  assert.ok(mainActivity.includes('resolver.delete(uri, null, null)'), 'a failed MediaStore export must clean up its pending URI');
+  assert.ok(mainActivity.includes('resolver.update(uri, values, null, null) > 0'), 'export success must require the pending file to be published');
 });
 
 test('regression — the PDF/print form for a дефектовка act stays on its own simple layout (unaffected by the work-act template change)', async () => {
@@ -847,5 +930,553 @@ test('regression — rabotnik can no longer freely reassign their own bound post
     return currentUserPost;
   }, r.otherPost);
   assert.equal(right, r.otherPost, 'the correct admin PIN must allow the post reassignment to go through');
+  await ctx.close();
+});
+
+test('v1.3 — quantity input accepts only whole numbers and rejects fractions, letters, negatives, zero and exponent notation', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => ({
+    integer: parseQuantity('15'),
+    zeroAllowed: parseQuantity('0', true),
+    comma: parseQuantity('1,5'),
+    dot: parseQuantity('2.75'),
+    letters: parseQuantity('1abc'),
+    negative: parseQuantity('-1'),
+    zeroDenied: parseQuantity('0'),
+    exponent: parseQuantity('1e3'),
+    empty: parseQuantity(''),
+  }));
+  assert.equal(r.integer, 15, 'a whole positive quantity must be accepted');
+  assert.equal(r.zeroAllowed, 0, 'zero is valid only in explicitly non-negative fields');
+  assert.equal(r.comma, null, 'a fraction with a comma must be rejected, not truncated');
+  assert.equal(r.dot, null, 'a fraction with a point must be rejected, not truncated');
+  assert.equal(r.letters, null, 'letters mixed with a number must be rejected');
+  assert.equal(r.negative, null, 'negative quantities must be rejected');
+  assert.equal(r.zeroDenied, null, 'movement/write-off quantity must be strictly positive');
+  assert.equal(r.exponent, null, 'scientific notation must not bypass the strict input format');
+  assert.equal(r.empty, null, 'an empty value must be rejected');
+
+  const movement = await page.evaluate(() => {
+    currentRole = 'admin';
+    const i = items.find((x) => x.stock >= 2);
+    const post = posts[0].name;
+    const stockBefore = i.stock;
+    const postBefore = i.posts[post] || 0;
+    openQuickTransfer(i.id, 'toPost', post);
+    document.getElementById('qt_qty').value = '2';
+    submitQuickTransfer(i.id, 'toPost');
+    const afterInteger = { stock: i.stock, post: i.posts[post] || 0 };
+    openQuickTransfer(i.id, 'toPost', post);
+    document.getElementById('qt_qty').value = '0,5';
+    submitQuickTransfer(i.id, 'toPost');
+    return { stockBefore, postBefore, afterInteger, afterInvalid: { stock: i.stock, post: i.posts[post] || 0 } };
+  });
+  assert.equal(movement.afterInteger.stock, movement.stockBefore - 2, 'integer issue must decrement warehouse stock exactly');
+  assert.equal(movement.afterInteger.post, movement.postBefore + 2, 'integer issue must increment post stock exactly');
+  assert.deepEqual(movement.afterInvalid, movement.afterInteger, 'a fractional issue must not mutate stock');
+  await ctx.close();
+});
+
+test('v1.3 — only an administrator can reassign a post responsible person', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    const idx = 0;
+    const before = posts[idx].curator;
+    currentRole = 'kladovshik';
+    openPost(idx);
+    const buttonForStorekeeper = [...document.querySelectorAll('#content button')].some((b) => b.textContent.includes('Переназначить ответственного'));
+    const storekeeperResult = updatePostResponsible(idx, 'НЕ ДОЛЖЕН СОХРАНИТЬСЯ');
+    const afterStorekeeper = posts[idx].curator;
+    currentRole = 'admin';
+    openPost(idx);
+    const buttonForAdmin = [...document.querySelectorAll('#content button')].some((b) => b.textContent.includes('Переназначить ответственного'));
+    const adminResult = updatePostResponsible(idx, 'Новый ответственный');
+    return { before, buttonForStorekeeper, storekeeperResult, afterStorekeeper, buttonForAdmin, adminResult, afterAdmin: posts[idx].curator };
+  });
+  assert.equal(r.buttonForStorekeeper, false, 'storekeeper must not see the reassignment control');
+  assert.equal(r.storekeeperResult, false, 'direct function invocation must also be denied for a storekeeper');
+  assert.equal(r.afterStorekeeper, r.before, 'denied reassignment must not alter stored data');
+  assert.equal(r.buttonForAdmin, true, 'administrator must see the reassignment control');
+  assert.equal(r.adminResult, true, 'administrator must be allowed to save a new responsible person');
+  assert.equal(r.afterAdmin, 'Новый ответственный');
+  await ctx.close();
+});
+
+test('review round — inventory completion creates and displays a persistent inventory act', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    currentRole = 'admin';
+    views.inventory();
+    startCycleCount();
+    items.forEach((i) => setCount(i.id, String(i.stock)));
+    finishCycleCount();
+    return {
+      cycleFinished: cycleCount === null,
+      acts: inventoryActs.length,
+      no: inventoryActs[0]?.no,
+      rendered: document.getElementById('content').textContent.includes(inventoryActs[0]?.no || 'NO-ACT'),
+    };
+  });
+  assert.equal(r.cycleFinished, true);
+  assert.equal(r.acts, 1);
+  assert.match(r.no, /^ИНВ-/);
+  assert.equal(r.rendered, true);
+  await ctx.close();
+});
+
+test('review round — catalog generates collision-free SKUs, supports ABC, receipts/write-offs and safe CRUD', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    currentRole = 'admin';
+    const tempCategory = 'Тестовая категория CRUD';
+    categoriesList.push(tempCategory); CAT_ICON[tempCategory] = '🧪';
+    const catIndex = categoriesList.indexOf(tempCategory);
+    openEditCategoryForm('top', catIndex);
+    document.getElementById('ec_name').value = tempCategory + ' 2';
+    document.getElementById('ec_icon').value = '🔬';
+    const categoryEdited = submitEditCategory('top', catIndex);
+
+    skladPath = [tempCategory + ' 2'];
+    openAddItemForm();
+    document.getElementById('ni_name').value = 'Товар CRUD 1';
+    document.getElementById('ni_stock').value = '1,5';
+    const beforeInvalid = items.length;
+    submitNewItem();
+    const fractionRejected = items.length === beforeInvalid;
+    document.getElementById('ni_stock').value = '2';
+    document.getElementById('ni_abc').value = 'A';
+    submitNewItem();
+    const first = items.find((i) => i.name === 'Товар CRUD 1');
+
+    openEditItemForm(first.id);
+    document.getElementById('ei_sku').value = 'НВ-9002';
+    document.getElementById('ei_abc').value = 'B';
+    submitEditItem(first.id);
+    skladPath = [tempCategory + ' 2'];
+    openAddItemForm();
+    document.getElementById('ni_name').value = 'Товар CRUD 2';
+    document.getElementById('ni_stock').value = '0';
+    submitNewItem();
+    const second = items.find((i) => i.name === 'Товар CRUD 2');
+
+    openStockAdjustment(first.id, 'in');
+    document.getElementById('adjustQty').value = '3'; document.getElementById('adjustReason').value = 'Накладная TEST';
+    const receipt = applyStockAdjustment(first.id, 'in', null);
+    openStockAdjustment(first.id, 'off');
+    document.getElementById('adjustQty').value = '1'; document.getElementById('adjustReason').value = 'Списание TEST';
+    const writeoff = applyStockAdjustment(first.id, 'off', null);
+
+    const secondDeleted = deleteItem(second.id);
+    const categoryDeleteBlockedWhileUsed = deleteCategory('top', categoriesList.indexOf(tempCategory + ' 2')) === false;
+    first.stock = 0; first.ext = 0; first.posts = {};
+    const firstDeleted = deleteItem(first.id);
+    const categoryDeleted = deleteCategory('top', categoriesList.indexOf(tempCategory + ' 2'));
+    return { categoryEdited, fractionRejected, firstAbc: first.abc, sku1: first.sku, sku2: second.sku, receipt, writeoff, stockAfterOps: 4, actualStock: first.stock, secondDeleted, categoryDeleteBlockedWhileUsed, firstDeleted, categoryDeleted };
+  });
+  assert.equal(r.categoryEdited, true);
+  assert.equal(r.fractionRejected, true);
+  assert.equal(r.firstAbc, 'B');
+  assert.equal(r.sku1, 'НВ-9002');
+  assert.notEqual(r.sku2, r.sku1, 'automatic SKU must scan existing values instead of reusing a manually assigned number');
+  assert.equal(r.receipt, true);
+  assert.equal(r.writeoff, true);
+  assert.equal(r.secondDeleted, true);
+  assert.equal(r.categoryDeleteBlockedWhileUsed, true);
+  assert.equal(r.firstDeleted, true);
+  assert.equal(r.categoryDeleted, true);
+  await ctx.close();
+});
+
+test('review round — post movements are listed and an over-limit return is rejected atomically', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    currentRole = 'admin';
+    const i = items.find((x) => Object.values(x.posts).some((q) => q > 0));
+    const post = Object.keys(i.posts).find((p) => i.posts[p] > 0);
+    const have = i.posts[post];
+    const stockBefore = i.stock;
+    issueDest = post; issueSelected = { [i.id]: have + 1 };
+    commitIssue('sklad');
+    const rejected = i.posts[post] === have && i.stock === stockBefore && stockTransfers.length === 0;
+    issueSelected = { [i.id]: 1 };
+    commitIssue('sklad');
+    views.ext();
+    return { rejected, returned: i.posts[post] === have - 1 && i.stock === stockBefore + 1, transferCount: stockTransfers.length, visible: document.getElementById('content').textContent.includes('Возвращено на склад') };
+  });
+  assert.equal(r.rejected, true);
+  assert.equal(r.returned, true);
+  assert.equal(r.transferCount, 1);
+  assert.equal(r.visible, true);
+  await ctx.close();
+});
+
+test('review round — administrator can edit and safely delete an unused post', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    currentRole = 'admin';
+    posts.push({ name: 'Пост CRUD', full: 'Временный', curator: 'Старый', stock: [], repairs: [] });
+    const idx = posts.length - 1;
+    openEditPostForm(idx);
+    document.getElementById('ep_name').value = 'Пост CRUD 2';
+    document.getElementById('ep_full').value = 'Обновлён';
+    document.getElementById('ep_curator').value = 'Новый ответственный';
+    const edited = submitEditPost(idx);
+    const renamed = posts[idx].name === 'Пост CRUD 2' && posts[idx].curator === 'Новый ответственный';
+    const deleted = deletePost(idx);
+    return { edited, renamed, deleted, gone: !posts.some((p) => p.name === 'Пост CRUD 2') };
+  });
+  assert.deepEqual(r, { edited: true, renamed: true, deleted: true, gone: true });
+  await ctx.close();
+});
+
+test('review round — defect validation allows no serial, links/creates a card, moves it through repair and blocks non-repairable work', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    currentRole = 'admin';
+    views.newDefekt();
+    const linked = items.find((i) => i.unit === 'шт');
+    const post = posts[0].name;
+    const linkedStockBefore = linked.stock;
+    document.getElementById('f_order').value = 'З-ROUND-DEF';
+    document.getElementById('f_itemid').value = linked.id; onDefektItemChange();
+    document.getElementById('f_serial').value = '';
+    document.getElementById('f_date').value = '32.07.2026';
+    document.getElementById('f_from').value = 'Внешнее подразделение';
+    document.getElementById('f_post').value = post;
+    document.getElementById('f_callsign').value = 'Тест';
+    document.getElementById('f_fault').value = 'Не включается';
+    document.getElementById('f_defects').value = 'Неисправность';
+    document.getElementById('f_verdict').value = 'Ремонтопригодно';
+    checkDefekt();
+    const badDateRejected = document.getElementById('defSubmit').disabled;
+    document.getElementById('f_date').value = '22.07.2026'; checkDefekt();
+    const noSerialAccepted = !document.getElementById('defSubmit').disabled;
+    submitDefekt();
+    const defect = docs.find((d) => d.orderNo === 'З-ROUND-DEF');
+    const enteredRepair = linked.posts[post] > 0 && posts[0].stock.some((s) => s.id === linked.id && s.q > 0);
+    createWorkFromDefekt(defect.no);
+    const work = docs.find((d) => d.defektDoc === defect.no);
+    work.actionTypes = ['Ремонт']; work.works = [{ type: 'Ремонт', qty: 1 }]; work.participants = [{ worker: 'Мастер', work: 'Ремонт' }]; work.otkPassed = true;
+    closeWork(work.no);
+    currentRole = 'admin';
+    approveWork(work.no);
+    const returnedToWarehouse = linked.stock === linkedStockBefore + 1 && !linked.posts[post];
+
+    views.newDefekt();
+    document.getElementById('f_order').value = 'З-CREATE-CARD';
+    document.getElementById('f_item_name').value = 'Новое изделие из дефектовки';
+    document.getElementById('f_create_card').checked = true;
+    document.getElementById('f_create_wrap').style.display = 'block';
+    document.getElementById('f_date').value = '22.07.2026';
+    document.getElementById('f_from').value = 'Внешнее подразделение';
+    document.getElementById('f_post').value = post;
+    document.getElementById('f_callsign').value = 'Тест';
+    document.getElementById('f_fault').value = 'Не включается';
+    document.getElementById('f_defects').value = 'Неисправность';
+    document.getElementById('f_verdict').value = 'Ремонтопригодно';
+    submitDefekt();
+    const createdDefect = docs.find((d) => d.orderNo === 'З-CREATE-CARD');
+    const cardCreatedFromDefect = !!createdDefect?.itemId && item(createdDefect.itemId)?.name === 'Новое изделие из дефектовки';
+
+    const bad = { ...JSON.parse(JSON.stringify(defect)), no: 'ДФ-BAD-ROUND', orderNo: 'BAD', verdict: 'Не подлежит ремонту (списание)', workDoc: null };
+    docs.push(bad); const workCount = docs.filter((d) => d.kind === 'work').length; createWorkFromDefekt(bad.no);
+    return { badDateRejected, noSerialAccepted, serial: defect.serial, linkedId: defect.itemId, enteredRepair, returnedToWarehouse, cardCreatedFromDefect, badWorkBlocked: docs.filter((d) => d.kind === 'work').length === workCount };
+  });
+  assert.equal(r.badDateRejected, true);
+  assert.equal(r.noSerialAccepted, true);
+  assert.equal(r.serial, '—');
+  assert.ok(r.linkedId);
+  assert.equal(r.enteredRepair, true);
+  assert.equal(r.returnedToWarehouse, true);
+  assert.equal(r.cardCreatedFromDefect, true);
+  assert.equal(r.badWorkBlocked, true);
+  await ctx.close();
+});
+
+test('review round — external issue validates date/stock and work-act rework becomes editable but cannot bypass mismatch approval', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    currentRole = 'admin';
+    views.issueExt();
+    const i = items.find((x) => x.stock > 0);
+    document.getElementById('ei_to').value = 'Получатель TEST';
+    document.getElementById('ei_item').value = i.id;
+    document.getElementById('ei_qty').value = String(i.stock + 1);
+    document.getElementById('ei_due').value = 'да';
+    const stockBefore = i.stock, extBefore = extIssues.length;
+    submitExtIssue();
+    const invalidRejected = i.stock === stockBefore && extIssues.length === extBefore;
+
+    const base = docs.find((d) => d.kind === 'work' && d.planQty != null);
+    const d = JSON.parse(JSON.stringify(base)); d.no = 'АВР-REWORK-ROUND'; d.status = 'Расхождение'; d.planQty = 10; d.factQty = 8; d.mismatchDecision = null;
+    d.actionTypes = ['Ремонт']; d.works = [{ type: 'Ремонт', qty: 1 }]; d.participants = [{ worker: 'Мастер', work: 'Ремонт' }]; d.otkPassed = true; d.materials = [];
+    docs.push(d); renderWorkDoc(d);
+    const participantEditorPresent = !!document.getElementById('participantName') && !!document.getElementById('participantWork');
+    const materialOptionsOnlyFromPost = [...document.querySelectorAll('#addSel option')].every((o) => (item(o.value)?.posts[d.post] || 0) > 0);
+    document.getElementById('mm_reason').value = 'Нужна повторная проверка'; document.getElementById('mm_decision').value = 'rework'; resolveMismatch(d.no);
+    const reopened = d.status === 'На доработке' && !hasUnresolvedMismatch(d);
+    currentRole = 'rabotnik'; closeWork(d.no);
+    return { invalidRejected, participantEditorPresent, materialOptionsOnlyFromPost, reopened, resubmitted: d.status === 'Расхождение' && d.status !== 'Закрыт' };
+  });
+  assert.equal(r.invalidRejected, true);
+  assert.equal(r.participantEditorPresent, true);
+  assert.equal(r.materialOptionsOnlyFromPost, true);
+  assert.equal(r.reopened, true);
+  assert.equal(r.resubmitted, true);
+  await ctx.close();
+});
+
+test('v1.3 — stock issue is atomic and rolls back every changed collection when recording fails', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    currentRole = 'admin';
+    const product = items.find((x) => x.stock >= 2);
+    const post = posts[0].name;
+    const before = { stock: product.stock, post: product.posts[post] || 0, transfers: stockTransfers.length, audit: auditLog.length, notifications: notifications.length };
+    const original = recordStockTransfer;
+    recordStockTransfer = () => { throw new Error('simulated persistence failure'); };
+    const ok = runStockTransaction('test', () => {
+      transferToPost(product, post, 1);
+      recordStockTransfer('toPost', post, [{ id: product.id, q: 1 }]);
+    });
+    recordStockTransfer = original;
+    const restored = item(product.id);
+    return { ok, before, after: { stock: restored.stock, post: restored.posts[post] || 0, transfers: stockTransfers.length, audit: auditLog.length, notifications: notifications.length } };
+  });
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.after, r.before);
+  await ctx.close();
+});
+
+test('v1.3 — admin creates a hashed worker account bound to a post and post notifications target that account', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(async () => {
+    currentRole = 'admin';
+    render({ fn: renderAccounts });
+    document.getElementById('accountLogin').value = 'worker.tech';
+    document.getElementById('accountPassword').value = 'secure-21208';
+    document.getElementById('accountRole').value = 'rabotnik';
+    document.getElementById('accountRole').dispatchEvent(new Event('change'));
+    document.getElementById('accountPost').value = posts[0].name;
+    const created = await createAccount();
+    const a = accounts.find((x) => x.login === 'worker.tech');
+    notifyPostUsers(posts[0].name, 'Поступление товара на пост', 'Тестовая поставка', 'stock', 'TEST');
+    return {
+      created,
+      noPlaintext: a && !('password' in a) && a.passwordHash !== 'secure-21208',
+      role: a?.role,
+      post: a?.post,
+      targeted: notifications.some((n) => n.recipientAccountId === a?.id && n.entityNo === 'TEST'),
+    };
+  });
+  assert.equal(r.created, true);
+  assert.equal(r.noPlaintext, true);
+  assert.equal(r.role, 'rabotnik');
+  assert.ok(r.post);
+  assert.equal(r.targeted, true);
+  await ctx.close();
+});
+
+test('v1.3 — every ordinary work act waits for admin approval; analytics stays outside printable output', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    const base = docs.find((d) => d.kind === 'defekt' && d.status === 'Закрыт' && !String(d.verdict || '').includes('Не подлежит'));
+    const source = { ...JSON.parse(JSON.stringify(base)), no: 'ДФ-APPROVAL-TEST', workDoc: null };
+    docs.push(source);
+    createWorkFromDefekt(source.no);
+    const work = docs.find((d) => d.defektDoc === source.no);
+    work.actionTypes = ['Ремонт'];
+    work.works = [{ type: 'Ремонт', qty: 1 }];
+    work.participants = [{ worker: 'Мастер', work: 'Ремонт' }];
+    work.otkPassed = true;
+    closeWork(work.no);
+    const pending = work.status === 'Ожидает согласования';
+    renderWorkDoc(work);
+    const appHasAnalytics = document.getElementById('content').textContent.includes('Аналитика: выдано на пост / фактический расход');
+    const print = buildWorkActPrintHtml(work, actFileTitle(work));
+    currentRole = 'admin';
+    approveWork(work.no);
+    return { pending, closed: work.status === 'Закрыт', appHasAnalytics, printHasAnalytics: print.includes('Аналитика: выдано') };
+  });
+  assert.equal(r.pending, true);
+  assert.equal(r.closed, true);
+  assert.equal(r.appHasAnalytics, true);
+  assert.equal(r.printHasAnalytics, false);
+  await ctx.close();
+});
+
+test('v1.4 — a compatible remote snapshot is migrated and atomically persisted without creating a sync loop', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.__remoteSaves = [];
+    window.AndroidStorage = {
+      loadState: () => 'null',
+      loadBackupState: () => 'null',
+      saveState: () => true,
+      saveRemoteState: (json, schema, revision) => {
+        window.__remoteSaves.push({ json, schema, revision });
+        return true;
+      },
+    };
+  });
+  const result = await page.evaluate(() => {
+    const remote = serializeAppState();
+    remote.items[0].stock += 7;
+    const expected = remote.items[0].stock;
+    const ok = window.onNativeRemoteState(JSON.stringify(remote), 77);
+    return {
+      ok,
+      stock: items[0].stock,
+      expected,
+      saves: window.__remoteSaves.map((x) => ({ schema: x.schema, revision: x.revision })),
+      lastPayloadMatches: _lastSavedPayload === window.__remoteSaves[0]?.json,
+    };
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.stock, result.expected);
+  assert.deepEqual(result.saves, [{ schema: 4, revision: 77 }]);
+  assert.equal(result.lastPayloadMatches, true);
+  await ctx.close();
+});
+
+test('v1.4 — a newer incompatible server schema never overwrites the local database', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.__remoteSaves = 0;
+    window.AndroidStorage = {
+      loadState: () => 'null',
+      loadBackupState: () => 'null',
+      saveState: () => true,
+      saveRemoteState: () => { window.__remoteSaves += 1; return true; },
+    };
+  });
+  const result = await page.evaluate(() => {
+    const before = JSON.stringify(serializeAppState());
+    const incompatible = JSON.parse(before);
+    incompatible.schemaVersion = APP_SCHEMA_VERSION + 1;
+    incompatible.items[0].stock = 999999;
+    const ok = window.onNativeRemoteState(JSON.stringify(incompatible), 88);
+    return {
+      ok,
+      unchanged: JSON.stringify(serializeAppState()) === before,
+      remoteSaves: window.__remoteSaves,
+      error: _nativeSyncStatus.lastError,
+    };
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.unchanged, true);
+  assert.equal(result.remoteSaves, 0);
+  assert.match(result.error, /несовместимую схему/);
+  await ctx.close();
+});
+
+test('v1.6 — a new server database starts without products while keeping posts and a compact snapshot', async () => {
+  const { ctx, page } = await newPage();
+  const result = await page.evaluate(() => {
+    items.length = 0;
+    posts.forEach((post) => { post.stock = []; });
+    stockTransfers.length = 0;
+    inventoryActs.length = 0;
+    const state = serializeAppState();
+    state.accounts = [];
+    state.currentAccountId = null;
+    return {
+      itemCount: state.items.length,
+      postCount: state.posts.length,
+      postNames: state.posts.map((post) => post.name),
+      payloadBytes: new TextEncoder().encode(JSON.stringify(state)).byteLength,
+    };
+  });
+  assert.equal(result.itemCount, 0);
+  assert.ok(result.postCount >= 11, `all prescribed posts must remain, got ${result.postCount}`);
+  assert.ok(result.postNames.includes('ТЭЧ'));
+  assert.ok(result.postNames.includes('Намотки оптоволокна'));
+  assert.ok(result.payloadBytes < 500_000, `empty-catalog snapshot is unexpectedly large: ${result.payloadBytes} bytes`);
+  await ctx.close();
+});
+
+test('v1.6 — server foundation keeps one bounded shared snapshot and durable Android outbox', () => {
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const sync = readFileSync(path.join(root, 'android', 'app', 'src', 'main', 'java', 'com', 'treshka', 'sklad', 'AppStateStore.kt'), 'utf8');
+  const api = readFileSync(path.join(root, 'app', 'api', 'state', 'route.ts'), 'utf8');
+  const browserSync = readFileSync(path.join(root, 'public', 'prototype-server.js'), 'utf8');
+  assert.match(sync, /sync_outbox/);
+  assert.match(sync, /db\.beginTransaction\(\)/);
+  assert.match(api, /warehouse_full_state/);
+  assert.match(api, /MAX_STATE_BYTES/);
+  assert.match(api, /expectedRevision/);
+  assert.match(api, /WHERE state_key = 'main' AND revision = \?/);
+  assert.match(api, /status: 409/);
+  assert.doesNotMatch(api, /DROP\s+TABLE/i);
+  assert.match(browserSync, /uploadIfChanged/);
+  assert.match(browserSync, /state\.accounts = \[\]/);
+  assert.match(browserSync, /expectedRevision: sync\.revision/);
+  assert.match(browserSync, /treshka-sync-conflict/);
+  assert.match(browserSync, /items\.length = 0/);
+});
+
+test('v1.6 — every initially rendered control is wired to an existing function and navigation target', async () => {
+  const { ctx, page, pageErrors } = await newPage();
+  const result = await page.evaluate(() => {
+    const ids = Array.from(document.querySelectorAll('[id]'), (element) => element.id);
+    const duplicateIds = ids.filter((id, index) => ids.indexOf(id) !== index);
+    const missingFunctions = [];
+    const missingPages = [];
+    const checkedHandlers = [];
+
+    for (const element of document.querySelectorAll('[onclick], [onchange], [oninput]')) {
+      for (const attribute of ['onclick', 'onchange', 'oninput']) {
+        const source = element.getAttribute(attribute);
+        if (!source) continue;
+        const functionMatch = source.trim().match(/^([A-Za-z_$][\w$]*)\s*\(/);
+        if (functionMatch) {
+          checkedHandlers.push(functionMatch[1]);
+          if (typeof window[functionMatch[1]] !== 'function') {
+            missingFunctions.push(`${attribute}:${functionMatch[1]}`);
+          }
+        }
+        for (const match of source.matchAll(/\bgo\(['"]([^'"]+)['"]/g)) {
+          if (typeof views[match[1]] !== 'function') missingPages.push(match[1]);
+        }
+      }
+    }
+
+    return {
+      duplicateIds: [...new Set(duplicateIds)],
+      missingFunctions: [...new Set(missingFunctions)],
+      missingPages: [...new Set(missingPages)],
+      checkedHandlers: [...new Set(checkedHandlers)].length,
+    };
+  });
+  assert.deepEqual(result.duplicateIds, [], `duplicate DOM ids: ${result.duplicateIds.join(', ')}`);
+  assert.deepEqual(result.missingFunctions, [], `missing event functions: ${result.missingFunctions.join(', ')}`);
+  assert.deepEqual(result.missingPages, [], `missing navigation pages: ${result.missingPages.join(', ')}`);
+  assert.ok(result.checkedHandlers >= 5, `expected the five main navigation controls, got ${result.checkedHandlers}`);
+  assert.equal(pageErrors.length, 0, `page errors: ${pageErrors.join('; ')}`);
+  await ctx.close();
+});
+
+test('security — user text cannot break out of headers or product edit fields, and unsafe photo URLs are rejected', async () => {
+  const { ctx, page, pageErrors } = await newPage();
+  const result = await page.evaluate(() => {
+    currentRole = 'admin';
+    const target = items[0];
+    target.name = '<img id="xss-header" src=x onerror="window.__xss=1">';
+    target.desc = '</textarea><img id="xss-description" src=x onerror="window.__xss=2">';
+    target.photo = 'data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+PC9zdmc+';
+    openEditItemForm(target.id);
+    const editEscaped = !document.getElementById('xss-description')
+      && document.getElementById('ei_desc').value.includes('</textarea>');
+    openItem(target.id);
+    return {
+      editEscaped,
+      headerEscaped: !document.getElementById('xss-header') && document.getElementById('hdrTitle').textContent.includes('<img'),
+      unsafePhotoHidden: !document.querySelector('.photo-box img'),
+      executed: window.__xss || 0,
+    };
+  });
+  assert.equal(result.editEscaped, true);
+  assert.equal(result.headerEscaped, true);
+  assert.equal(result.unsafePhotoHidden, true);
+  assert.equal(result.executed, 0);
+  assert.equal(pageErrors.length, 0, `page errors: ${pageErrors.join('; ')}`);
   await ctx.close();
 });

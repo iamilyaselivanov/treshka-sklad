@@ -11,11 +11,16 @@ import android.webkit.JavascriptInterface
  * что нужно прототипу: `bridge.saveState(json, version)` и `bridge.loadState()`
  * выполняются как обычные синхронные функции, без Promise/callback на JS-стороне.
  */
-class WebAppInterface(private val store: AppStateStore) {
+class WebAppInterface(
+    private val store: AppStateStore,
+    private val syncManager: ServerSyncManager,
+) {
 
     @JavascriptInterface
     fun saveState(json: String, schemaVersion: Int): Boolean {
-        return store.save(json, schemaVersion)
+        val saved = store.save(json, schemaVersion)
+        if (saved) syncManager.syncNow()
+        return saved
     }
 
     @JavascriptInterface
@@ -29,5 +34,10 @@ class WebAppInterface(private val store: AppStateStore) {
     @JavascriptInterface
     fun loadBackupState(): String {
         return store.loadBackup() ?: "null"
+    }
+
+    @JavascriptInterface
+    fun saveRemoteState(json: String, schemaVersion: Int, revision: Long): Boolean {
+        return store.saveRemote(json, schemaVersion, revision)
     }
 }
