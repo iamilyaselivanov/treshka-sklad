@@ -55,6 +55,7 @@ class ServerSyncManager(
         val body = JSONObject().put("decision", decision).toString()
         val response = requestJson("${config.baseUrl}/v1/sync/conflicts/$id/resolve", "POST", config.authToken, body)
         if (response.code !in 200..299) throw IllegalStateException("HTTP ${response.code}: ${response.body.take(300)}")
+        store.releaseConflictedMutations()
         syncNow()
         return response.body
     }
@@ -117,7 +118,7 @@ class ServerSyncManager(
             } catch (e: Exception) {
                 Log.e(TAG, "sync failed", e)
                 store.markSyncError(null, e.message ?: "Ошибка синхронизации")
-                scheduleRetry(store.nextPending()?.attempts ?: 1)
+                scheduleRetry(store.nextPendingAttempt())
             } finally {
                 running.set(false)
                 onStatus(store.syncStatusJson())
@@ -129,7 +130,10 @@ class ServerSyncManager(
         var config = store.getSyncConfig() ?: return
         if (config.baseUrl.isBlank() || config.authToken.isBlank()) return
         while (true) {
-            val pending = store.nextPending() ?: break
+            // Claim and increment attempts in one SQLite transaction. A
+            // concurrent save can no longer compact the row after we selected
+            // it but before the request starts.
+            val pending = store.claimNextPending() ?: break
             val request = JSONObject().apply {
                 put("mutationId", pending.mutationId)
                 put("deviceId", config.deviceId)
@@ -137,7 +141,6 @@ class ServerSyncManager(
                 put("schemaVersion", pending.schemaVersion)
                 put("payload", JSONObject(pending.payload))
             }
-            store.markMutationAttempted(pending.mutationId)
             val response = requestJson(
                 "${config.baseUrl}/v1/sync/push",
                 "POST",
@@ -145,18 +148,17 @@ class ServerSyncManager(
                 request.toString(),
             )
             if (response.code == 409) {
-                store.markSyncError(pending.mutationId, "Конфликт версий: локальные данные сохранены в очереди и не перезаписаны")
-                // The server keeps this mutation as a conflict snapshot. Retry
-                // with the same idempotency key: after an administrator resolves
-                // it, the server returns its applied revision and the outbox can
-                // advance instead of remaining stuck until an app restart.
-                scheduleRetry(pending.attempts + 1)
-                return
+                val message = "Конфликт версий: локальные данные сохранены отдельно и не перезаписаны"
+                store.markMutationConflicted(pending.mutationId, message)
+                // Park this mutation so it no longer blocks pull. Retry the same
+                // idempotency key later; an administrator may resolve it first.
+                scheduleRetry(pending.attempts, pending.mutationId)
+                break
             }
             if (response.code !in 200..299) {
                 store.markSyncError(pending.mutationId, "HTTP ${response.code}: ${response.body.take(300)}")
                 if (response.code == 408 || response.code == 429 || response.code >= 500) {
-                    scheduleRetry(pending.attempts + 1)
+                    scheduleRetry(pending.attempts)
                 }
                 return
             }
@@ -167,7 +169,7 @@ class ServerSyncManager(
 
         // Серверный снимок применяется только при пустом outbox. Поэтому
         // несинхронизированные локальные изменения никогда не затираются pull-ом.
-        if (store.pendingCount() == 0) {
+        if (store.sendablePendingCount() == 0) {
             config = store.getSyncConfig() ?: return
             val response = requestJson(
                 "${config.baseUrl}/v1/sync/pull?afterRevision=${config.serverRevision}",
@@ -186,12 +188,15 @@ class ServerSyncManager(
         }
     }
 
-    private fun scheduleRetry(attempt: Int) {
+    private fun scheduleRetry(attempt: Int, conflictedMutationId: String? = null) {
         if (!retryScheduled.compareAndSet(false, true)) return
         val exponent = (attempt - 1).coerceIn(0, 6)
         val delaySeconds = (5L * (1L shl exponent)).coerceAtMost(300L)
         executor.schedule({
             retryScheduled.set(false)
+            if (conflictedMutationId != null) {
+                store.releaseMutationConflict(conflictedMutationId)
+            }
             syncNow()
         }, delaySeconds, TimeUnit.SECONDS)
     }

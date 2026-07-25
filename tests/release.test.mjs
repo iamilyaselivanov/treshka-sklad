@@ -111,14 +111,42 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.match(browserSync, /noteSyncFailure/);
   assert.match(browserSync, /sync\.conflict = true;\s*sync\.pendingRemote = snapshot;/);
   assert.match(browserSync, /Серверная версия повреждена\. Локальные данные сохранены/);
+  assert.match(browserSync, /function canUploadState\(\)/);
+  assert.match(browserSync, /if \(!canUploadState\(\)\) \{\s*await pollServer\(\);\s*return;/);
+  assert.match(browserSync, /canUploadState\(\) && localPayload !== sync\.lastUploaded/);
+  assert.match(browserSync, /sync\.conflict \|\| !canUploadState\(\)/);
   assert.match(androidStore, /SyncTokenVault/);
   assert.match(androidStore, /AndroidKeyStore/);
-  assert.match(androidStore, /db\.delete\("sync_outbox", "attempts = 0"/);
-  assert.match(androidSync, /scheduleRetry\(pending\.attempts \+ 1\)/);
+  assert.match(androidStore, /DB_VERSION = 3/);
+  assert.match(androidStore, /conflict INTEGER NOT NULL DEFAULT 0/);
+  assert.match(androidStore, /fun claimNextPending\(\)/);
+  assert.match(androidStore, /UPDATE sync_outbox SET attempts=\? WHERE mutation_id=\? AND conflict=0/);
+  assert.match(androidStore, /db\.delete\("sync_outbox", "attempts = 0 AND conflict = 0"/);
+  assert.doesNotMatch(androidStore, /fun markMutationAttempted\(/);
+  assert.match(androidSync, /store\.markMutationConflicted\(pending\.mutationId, message\)/);
+  assert.match(androidSync, /store\.sendablePendingCount\(\) == 0/);
+  assert.match(androidSync, /scheduleRetry\(pending\.attempts, pending\.mutationId\)/);
   assert.match(activity, /uri\.host != APP_HOST/);
   assert.match(manifest, /android:allowBackup="false"/);
   assert.match(manifest, /android:dataExtractionRules="@xml\/data_extraction_rules"/);
   assert.match(extractionRules, /<exclude domain="root" path="\." \/>/);
+});
+
+test("build and local D1 bootstrap use the packaged Drizzle migrations", async () => {
+  const [pkg, vite, plugin, wrangler] = await Promise.all([
+    text("package.json"),
+    text("vite.config.ts"),
+    text("build/sites-vite-plugin.ts"),
+    text("dist/server/wrangler.json"),
+  ]);
+  assert.match(JSON.parse(pkg).scripts["db:migrate:local"], /wrangler d1 migrations apply DB --local/);
+  assert.match(vite, /migrations_dir: "\.\/drizzle"/);
+  assert.match(plugin, /resolve\(root, "drizzle"\)/);
+  assert.equal(JSON.parse(wrangler).d1_databases[0].migrations_dir, "../../drizzle");
+  await text("dist/.openai/drizzle/0000_unique_vampiro.sql");
+  await text("dist/.openai/drizzle/0001_famous_the_hunter.sql");
+  await text("dist/.openai/drizzle/0002_quick_bloodscream.sql");
+  await text("dist/.openai/drizzle/0003_warehouse_full_state.sql");
 });
 
 test("database migrations build a clean schema and adopt the legacy runtime state table", async () => {

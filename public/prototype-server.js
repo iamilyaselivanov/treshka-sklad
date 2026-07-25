@@ -59,6 +59,10 @@
     updateNavForRole();
   }
 
+  function canUploadState() {
+    return !!sync.user && ["owner", "admin", "storekeeper"].includes(sync.user.role);
+  }
+
   const localRenderAccounts = window.renderAccounts;
 
   async function refreshServerAccounts() {
@@ -229,7 +233,7 @@
   }
 
   async function uploadIfChanged() {
-    if (!sync.ready || sync.busy || sync.conflict) return false;
+    if (!sync.ready || sync.busy || sync.conflict || !canUploadState()) return false;
     const state = normalizedState();
     const payload = JSON.stringify(state);
     if (payload === sync.lastUploaded) return true;
@@ -268,9 +272,17 @@
     sync.busy = true;
     try {
       const snapshot = await fetchSnapshot();
-      if (Number(snapshot.revision || 0) <= sync.revision) return;
       const localPayload = JSON.stringify(normalizedState());
-      if (localPayload !== sync.lastUploaded) {
+      const remoteRevision = Number(snapshot.revision || 0);
+      if (remoteRevision <= sync.revision) {
+        // Worker is a server-authoritative read-only role. Reapply the current
+        // snapshot if local UI code changed state that it is not allowed to PUT.
+        if (!canUploadState() && localPayload !== sync.lastUploaded && snapshot.state) {
+          applyRemoteSnapshot(snapshot, false);
+        }
+        return;
+      }
+      if (canUploadState() && localPayload !== sync.lastUploaded) {
         announceConflict(snapshot);
         return;
       }
@@ -288,6 +300,10 @@
   async function synchronize() {
     if (!sync.ready || sync.busy || sync.conflict) return;
     if (Date.now() < sync.nextAttemptAt) return;
+    if (!canUploadState()) {
+      await pollServer();
+      return;
+    }
     const localPayload = JSON.stringify(normalizedState());
     if (localPayload !== sync.lastUploaded) await uploadIfChanged();
     else await pollServer();
@@ -295,6 +311,10 @@
 
   async function resolveConflict(strategy) {
     if (!sync.conflict || !sync.pendingRemote) return false;
+    if (strategy === "local" && !canUploadState()) {
+      toast("Только владелец, администратор или кладовщик может сохранить локальную версию.");
+      return false;
+    }
     const snapshot = sync.pendingRemote;
     if (strategy === "server") {
       try {
@@ -349,11 +369,11 @@
         inventoryActs.length = 0;
       }
       applyServerRole();
-      sync.lastUploaded = data.state ? JSON.stringify(normalizedState()) : "";
+      sync.lastUploaded = data.state || !canUploadState() ? JSON.stringify(normalizedState()) : "";
       sync.ready = true;
       go("sklad");
-      if (!data.state) await uploadIfChanged();
-      else void migrateEmbeddedPhotos();
+      if (!data.state && canUploadState()) await uploadIfChanged();
+      else if (canUploadState()) void migrateEmbeddedPhotos();
       sync.timer = window.setInterval(synchronize, 2500);
       window.addEventListener("beforeunload", () => { void uploadIfChanged(); });
     } catch (error) {

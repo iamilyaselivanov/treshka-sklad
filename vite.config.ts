@@ -20,6 +20,9 @@ const localBindingConfig = {
           binding: d1,
           database_name: "site-creator-d1",
           database_id: SITE_CREATOR_PLACEHOLDER_DATABASE_ID,
+          // Vinext writes the generated Wrangler file to dist/server. Keep its
+          // D1 migration path pointed at the Drizzle directory shipped by Sites.
+          migrations_dir: "./drizzle",
         },
       ]
     : [],

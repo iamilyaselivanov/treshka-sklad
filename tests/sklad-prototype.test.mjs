@@ -1410,6 +1410,10 @@ test('v1.6 — server foundation keeps one bounded shared snapshot and durable A
   assert.match(browserSync, /state\.accounts = \[\]/);
   assert.match(browserSync, /expectedRevision: sync\.revision/);
   assert.match(browserSync, /treshka-sync-conflict/);
+  assert.match(browserSync, /function canUploadState\(\)/);
+  assert.match(browserSync, /if \(!canUploadState\(\)\)/);
+  assert.match(sync, /fun claimNextPending\(\)/);
+  assert.match(sync, /conflict INTEGER NOT NULL DEFAULT 0/);
   assert.match(browserSync, /items\.length = 0/);
 });
 

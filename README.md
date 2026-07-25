@@ -91,6 +91,12 @@ actions tied to the current ChatGPT user. Leave public content anonymous.
 - `npm run build`: verify the vinext build output
 - `npm test`: build the starter and verify its rendered loading skeleton
 - `npm run db:generate`: generate Drizzle migrations after schema changes
+- `npm run db:migrate:local`: build and apply every tracked migration to a clean
+  or existing local D1 database before the first API request
+
+Sites deployments package `drizzle/**` into `dist/.openai/drizzle/**` and apply
+those tracked migrations to the hosted D1 resource. Runtime route handlers do
+not create tables, so schema history stays under migration control.
 
 ## Learn More
 

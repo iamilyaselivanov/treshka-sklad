@@ -44,7 +44,7 @@ class AppStateStore(context: Context) :
     companion object {
         private const val TAG = "AppStateStore"
         private const val DB_NAME = "sklad_state.db"
-        private const val DB_VERSION = 2
+        private const val DB_VERSION = 3
         private const val STATE_TABLE = "app_state"
         private const val ROW_ID = 1L
     }
@@ -70,6 +70,11 @@ class AppStateStore(context: Context) :
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createSyncTables(db)
+        if (oldVersion == 2 && newVersion >= 3) {
+            db.execSQL(
+                "ALTER TABLE sync_outbox ADD COLUMN conflict INTEGER NOT NULL DEFAULT 0",
+            )
+        }
     }
 
     private fun createSyncTables(db: SQLiteDatabase) {
@@ -81,6 +86,7 @@ class AppStateStore(context: Context) :
                 schema_version INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
+                conflict INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT
             )
             """.trimIndent()
@@ -151,7 +157,7 @@ class AppStateStore(context: Context) :
                 // intermediate snapshots are therefore superseded by this one.
                 // Attempted rows stay until the server confirms their idempotency
                 // key, so a lost response can never duplicate a mutation.
-                db.delete("sync_outbox", "attempts = 0", null)
+                db.delete("sync_outbox", "attempts = 0 AND conflict = 0", null)
                 val outbox = ContentValues().apply {
                     put("mutation_id", UUID.randomUUID().toString())
                     put("payload", payload)
@@ -318,17 +324,34 @@ class AppStateStore(context: Context) :
     }
 
     @Synchronized
-    fun nextPending(): PendingSnapshot? = readableDatabase.query(
-        "sync_outbox",
-        arrayOf("mutation_id", "payload", "schema_version", "attempts"),
-        null,
-        null,
-        null,
-        null,
-        "created_at ASC",
-        "1",
-    ).use { c ->
-        if (!c.moveToFirst()) null else PendingSnapshot(c.getString(0), c.getString(1), c.getInt(2), c.getInt(3))
+    fun claimNextPending(): PendingSnapshot? {
+        val db = writableDatabase
+        db.beginTransaction()
+        return try {
+            val pending = db.query(
+                "sync_outbox",
+                arrayOf("mutation_id", "payload", "schema_version", "attempts"),
+                "conflict = 0",
+                null,
+                null,
+                null,
+                "created_at ASC",
+                "1",
+            ).use { c ->
+                if (!c.moveToFirst()) null
+                else PendingSnapshot(c.getString(0), c.getString(1), c.getInt(2), c.getInt(3) + 1)
+            }
+            if (pending != null) {
+                db.execSQL(
+                    "UPDATE sync_outbox SET attempts=? WHERE mutation_id=? AND conflict=0",
+                    arrayOf(pending.attempts, pending.mutationId),
+                )
+            }
+            db.setTransactionSuccessful()
+            pending
+        } finally {
+            db.endTransaction()
+        }
     }
 
     @Synchronized
@@ -338,6 +361,18 @@ class AppStateStore(context: Context) :
         "SELECT COUNT(*) FROM sync_outbox",
         null,
     ).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+
+    @Synchronized
+    fun sendablePendingCount(): Int = readableDatabase.rawQuery(
+        "SELECT COUNT(*) FROM sync_outbox WHERE conflict = 0",
+        null,
+    ).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+
+    @Synchronized
+    fun nextPendingAttempt(): Int = readableDatabase.rawQuery(
+        "SELECT attempts FROM sync_outbox WHERE conflict = 0 ORDER BY created_at ASC LIMIT 1",
+        null,
+    ).use { c -> if (c.moveToFirst()) c.getInt(0).coerceAtLeast(1) else 1 }
 
     @Synchronized
     fun markMutationApplied(mutationId: String, revision: Long) {
@@ -356,11 +391,27 @@ class AppStateStore(context: Context) :
     }
 
     @Synchronized
-    fun markMutationAttempted(mutationId: String) {
+    fun markMutationConflicted(mutationId: String, error: String) {
+        val message = error.take(1000)
+        val db = writableDatabase
+        db.execSQL(
+            "UPDATE sync_outbox SET conflict=1, last_error=? WHERE mutation_id=?",
+            arrayOf(message, mutationId),
+        )
+        db.execSQL("UPDATE sync_config SET last_error=? WHERE id=1", arrayOf(message))
+    }
+
+    @Synchronized
+    fun releaseMutationConflict(mutationId: String) {
         writableDatabase.execSQL(
-            "UPDATE sync_outbox SET attempts=attempts+1 WHERE mutation_id=?",
+            "UPDATE sync_outbox SET conflict=0 WHERE mutation_id=?",
             arrayOf(mutationId),
         )
+    }
+
+    @Synchronized
+    fun releaseConflictedMutations() {
+        writableDatabase.execSQL("UPDATE sync_outbox SET conflict=0 WHERE conflict=1")
     }
 
     @Synchronized
@@ -384,6 +435,7 @@ class AppStateStore(context: Context) :
             put("deviceId", cfg?.deviceId ?: "")
             put("serverRevision", cfg?.serverRevision ?: 0)
             put("pending", pendingCount())
+            put("conflicts", pendingCount() - sendablePendingCount())
             readableDatabase.query(
                 "sync_config",
                 arrayOf("last_sync_at", "last_error"),
