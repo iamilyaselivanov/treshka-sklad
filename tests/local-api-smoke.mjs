@@ -211,6 +211,23 @@ try {
     method: "DELETE",
     headers: { cookie: roleCookies.admin },
   });
+  const usedProduct = await request("/api/products", {
+    method: "POST",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({
+      name: "Проверка запрета удаления остатка",
+      sku: `USED-${suffix}`,
+      category: "Тест",
+      quantity: 1,
+      unit: "шт",
+      location: "",
+      minimum: 0,
+    }),
+  }, 201);
+  await request(`/api/products?id=${encodeURIComponent(usedProduct.data.product.id)}`, {
+    method: "DELETE",
+    headers: { cookie: roleCookies.admin },
+  }, 409);
 
   const state = await request("/api/state", { headers: ownerHeaders });
   assert.equal(state.data.user.id, auth.user.id);
@@ -415,6 +432,7 @@ console.log(JSON.stringify({
   authFieldsStrippedFromState: true,
   mediaUploadReadDelete: true,
   workerStateWriteRejected: true,
+  usedProductDeletionProtected: true,
   everyStateWriteAudited: true,
   parallelLoginThrottleEnforced: true,
   crossOriginStateWriteRejected: true,
