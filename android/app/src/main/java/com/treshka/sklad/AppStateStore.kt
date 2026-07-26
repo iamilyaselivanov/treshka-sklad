@@ -35,6 +35,11 @@ data class PendingSnapshot(
     val baseRevision: Long,
 )
 
+data class PendingCounts(
+    val total: Int,
+    val sendable: Int,
+)
+
 enum class ConflictRequeueResult {
     REQUEUED,
     MISSING,
@@ -522,7 +527,20 @@ class AppStateStore(context: Context) :
     }
 
     @Synchronized
-    fun pendingCount(): Int = pendingCount(readableDatabase)
+    fun pendingCounts(): PendingCounts = readableDatabase.rawQuery(
+        """
+        SELECT COUNT(*),
+               COALESCE(SUM(CASE WHEN conflict = 0 THEN 1 ELSE 0 END), 0)
+        FROM sync_outbox
+        """.trimIndent(),
+        null,
+    ).use { cursor ->
+        if (cursor.moveToFirst()) PendingCounts(cursor.getInt(0), cursor.getInt(1))
+        else PendingCounts(0, 0)
+    }
+
+    @Synchronized
+    fun pendingCount(): Int = pendingCounts().total
 
     private fun pendingCount(db: SQLiteDatabase): Int = db.rawQuery(
         "SELECT COUNT(*) FROM sync_outbox",
@@ -530,10 +548,7 @@ class AppStateStore(context: Context) :
     ).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
 
     @Synchronized
-    fun sendablePendingCount(): Int = readableDatabase.rawQuery(
-        "SELECT COUNT(*) FROM sync_outbox WHERE conflict = 0",
-        null,
-    ).use { c -> if (c.moveToFirst()) c.getInt(0) else 0 }
+    fun sendablePendingCount(): Int = pendingCounts().sendable
 
     @Synchronized
     fun nextPendingAttempt(): Int = readableDatabase.rawQuery(
@@ -947,6 +962,7 @@ class AppStateStore(context: Context) :
     @Synchronized
     fun syncStatusJson(): String {
         val cfg = getSyncConfig()
+        val pending = pendingCounts()
         return JSONObject().apply {
             put("configured", cfg != null && cfg.baseUrl.isNotBlank() && cfg.authToken.isNotBlank())
             put("baseUrl", cfg?.baseUrl ?: "")
@@ -960,8 +976,8 @@ class AppStateStore(context: Context) :
                     && cfg.authToken.isNotBlank()
                     && cfg.serverRole.isBlank(),
             )
-            put("pending", pendingCount())
-            put("conflicts", pendingCount() - sendablePendingCount())
+            put("pending", pending.total)
+            put("conflicts", pending.total - pending.sendable)
             put("conflictBackups", conflictBackupFiles().size)
             readableDatabase.query(
                 "sync_config",

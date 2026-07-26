@@ -103,8 +103,13 @@ async function newHttpServerPage({
     }
     if (url.pathname === '/api/state' && request.method() === 'GET') {
       stateGets += 1;
-      if (stateGets === 1 || (stateGets === 2 && promoteToRole)) {
-        const responseRole = stateGets === 2 && promoteToRole ? promoteToRole : role;
+      const forcedFullFetch = !request.headers()['if-none-match'];
+      if (
+        stateGets === 1
+        || (stateGets === 2 && promoteToRole)
+        || (stateGets > 2 && promoteToRole && forcedFullFetch)
+      ) {
+        const responseRole = stateGets >= 2 && promoteToRole ? promoteToRole : role;
         await route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -1189,6 +1194,7 @@ test('review 4968fed — authorization scope updates even when the server wareho
   });
   assert.equal(result.role, 'admin');
   assert.equal(result.status.partial, false);
+  assert.equal(counts().stateGets, 3, 'scope change without state must force an unconditional refetch');
   assert.equal(counts().statePuts, 0, 'an authorization-only response must not upload the old local graph');
   await ctx.close();
 });

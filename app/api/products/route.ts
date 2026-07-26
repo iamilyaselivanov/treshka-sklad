@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { audit, requireUser } from "@/lib/auth";
 import { readJsonObject } from "@/lib/http";
+import { stateHistoryRetentionCutoff } from "@/lib/state-history";
 import {
   findWarehouseItemId,
   removeWarehouseItemFromState,
@@ -9,7 +10,6 @@ import {
 import type { WarehouseState } from "@/lib/warehouse-state";
 
 export const dynamic = "force-dynamic";
-const STATE_REVISION_RETENTION = 10;
 
 type ProductRow = {
   id: string;
@@ -141,6 +141,13 @@ export async function DELETE(request: Request) {
       const updatedAt = new Date().toISOString();
       const results = await env.DB.batch([
         env.DB.prepare(
+          `INSERT OR REPLACE INTO warehouse_state_revisions
+             (state_key, revision, payload, updated_at, updated_by)
+           SELECT state_key, revision, payload, updated_at, updated_by
+           FROM warehouse_full_state
+           WHERE state_key = 'main' AND revision = ?`,
+        ).bind(stateRow.revision),
+        env.DB.prepare(
           `UPDATE warehouse_full_state
            SET revision = ?, payload = ?, updated_at = ?, updated_by = ?
            WHERE state_key = 'main' AND revision = ?
@@ -154,22 +161,14 @@ export async function DELETE(request: Request) {
           id,
         ),
         env.DB.prepare(
-          `INSERT OR REPLACE INTO warehouse_state_revisions
-             (state_key, revision, payload, updated_at, updated_by)
-           SELECT state_key, revision, payload, updated_at, updated_by
-           FROM warehouse_full_state
-           WHERE state_key = 'main' AND revision = ?`,
-        ).bind(stateRow.revision + 1),
-        env.DB.prepare(
           `DELETE FROM warehouse_state_revisions
            WHERE state_key = 'main'
-             AND revision NOT IN (
-               SELECT revision FROM warehouse_state_revisions
+             AND updated_at < ?
+             AND revision <> (
+               SELECT MAX(revision) FROM warehouse_state_revisions
                WHERE state_key = 'main'
-               ORDER BY revision DESC
-               LIMIT ?
              )`,
-        ).bind(STATE_REVISION_RETENTION),
+        ).bind(stateHistoryRetentionCutoff()),
         env.DB.prepare(
           `DELETE FROM warehouse_state_items
            WHERE state_key = 'main' AND item_id = ?
@@ -198,7 +197,7 @@ export async function DELETE(request: Request) {
         ).bind(id, stateRow.revision + 1, warehouseItemId),
       ]);
       if (
-        Number(results[0].meta?.changes ?? 0) !== 1
+        Number(results[1].meta?.changes ?? 0) !== 1
         || Number(results[4].meta?.changes ?? 0) !== 1
       ) {
         return Response.json(

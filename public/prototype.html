@@ -2885,7 +2885,7 @@ function localDocumentNodeId(){
     localStorage.setItem(key,generated);
     return generated;
   }catch(e){
-    return (Date.now().toString(36)+Math.random().toString(36).slice(2)).slice(-6).toUpperCase();
+    return (Date.now().toString(36)+Math.random().toString(36).slice(2)).slice(0,6).toUpperCase();
   }
 }
 const documentNodeId=localDocumentNodeId();

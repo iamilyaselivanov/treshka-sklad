@@ -354,8 +354,13 @@ class ServerSyncManager(
                 if (retryable) {
                     // A push outage must not freeze native authorization. The
                     // status endpoint may still report a downgrade/revocation.
-                    val roleError = refreshServerRole(config, force = true)
-                    store.markSyncError(pending.mutationId, roleError ?: message)
+                    val roleError = refreshServerRole(config, force = pending.attempts <= 1)
+                    val combinedError = if (roleError.isNullOrBlank()) {
+                        message
+                    } else {
+                        "$message · проверка роли: $roleError"
+                    }
+                    store.markSyncError(pending.mutationId, combinedError)
                     scheduleRetry(pending.attempts)
                     return
                 }
@@ -411,13 +416,19 @@ class ServerSyncManager(
             finalError != null -> store.markSyncError(null, finalError)
             // saveRemoteState() marks success only after WebView migration and
             // SQLite persistence. Parked conflicts must remain visible too.
-            !nativePersistencePending && store.pendingCount() == 0 -> store.markSyncOk()
-            !nativePersistencePending -> store.markSyncContact(
-                clearError = SyncPolicy.shouldClearContactError(
-                    store.pendingCount(),
-                    store.sendablePendingCount(),
-                ),
-            )
+            !nativePersistencePending -> {
+                val pending = store.pendingCounts()
+                if (pending.total == 0) {
+                    store.markSyncOk()
+                } else {
+                    store.markSyncContact(
+                        clearError = SyncPolicy.shouldClearContactError(
+                            pending.total,
+                            pending.sendable,
+                        ),
+                    )
+                }
+            }
         }
     }
 

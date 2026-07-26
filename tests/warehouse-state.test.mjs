@@ -232,6 +232,63 @@ test("rolling feeds only evict the oldest tail after newer rows are prepended", 
     auditLog: [{ id: "audit-new", action: "new-event" }, ...previousAudit.slice(0, 9)],
   });
   assert.equal(warehouseHistoryMutationIssue(shortPrevious, shortReplacement, "admin")?.status, 403);
+
+  const floodedWindow = [
+    ...Array.from({ length: 1_999 }, (_, index) => ({
+      id: `fabricated-${index}`,
+      action: "noise",
+    })),
+    previousAudit[0],
+  ];
+  assert.equal(
+    warehouseHistoryMutationIssue(previous, state({ auditLog: floodedWindow }), "admin")?.status,
+    403,
+    "one write cannot erase a full audit window by fabricating 1999 rows",
+  );
+});
+
+test("notification read state is mutable without allowing notification content edits", () => {
+  const notification = {
+    id: "notification-1",
+    title: "Новый акт",
+    text: "Создан акт дефектовки",
+    read: false,
+  };
+  const previous = state({ notifications: [notification] });
+  assert.equal(
+    warehouseHistoryMutationIssue(
+      previous,
+      state({ notifications: [{ ...notification, read: true }] }),
+      "storekeeper",
+    ),
+    null,
+  );
+  assert.equal(
+    warehouseHistoryMutationIssue(
+      previous,
+      state({ notifications: [{ ...notification, text: "Подменённый текст", read: true }] }),
+      "admin",
+    )?.status,
+    403,
+  );
+  assert.equal(
+    warehouseHistoryMutationIssue(
+      previous,
+      state({
+        notifications: [
+          ...Array.from({ length: 201 }, (_, index) => ({
+            id: `notification-new-${index}`,
+            text: "noise",
+            read: false,
+          })),
+          notification,
+        ],
+      }),
+      "admin",
+    )?.status,
+    403,
+    "a single snapshot cannot prepend an unbounded notification flood",
+  );
 });
 
 test("worker state projection contains only the assigned post slice", () => {

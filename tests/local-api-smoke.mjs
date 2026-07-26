@@ -616,6 +616,34 @@ try {
   const archivedInventoryLine = stateAfterDeletion.data.state.inventoryActs
     .find((entry) => entry.no === `INV-${suffix}`).diffs[0];
   assert.equal(archivedInventoryLine.name, linkedProduct.data.product.name);
+  const firstNotification = stateAfterDeletion.data.state.notifications[0];
+  const markedReadState = {
+    ...stateAfterDeletion.data.state,
+    notifications: stateAfterDeletion.data.state.notifications.map((entry, index) =>
+      index === 0 ? { ...entry, read: true } : entry),
+  };
+  const markedRead = await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.storekeeper, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: markedReadState,
+      expectedRevision: stateAfterDeletion.data.revision,
+    }),
+  });
+  assert.equal(markedRead.data.revision, stateAfterDeletion.data.revision + 1);
+  await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.admin, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: {
+        ...markedReadState,
+        notifications: markedReadState.notifications.map((entry, index) =>
+          index === 0 ? { ...entry, text: `${String(firstNotification.text ?? "")}-tampered` } : entry),
+      },
+      expectedRevision: markedRead.data.revision,
+    }),
+  }, 403);
+  stateAfterDeletion = await request("/api/state", { headers: ownerHeaders });
   const parallelStates = [1, 2].map((marker) => ({
     ...stateAfterDeletion.data.state,
     auditLog: [{ marker }, ...(stateAfterDeletion.data.state.auditLog ?? []).slice(0, 1_999)],
@@ -629,7 +657,7 @@ try {
   const currentBeforeRestore = await request("/api/state", { headers: ownerHeaders });
   const history = await request("/api/state/history", { headers: ownerHeaders });
   assert.ok(history.data.revisions.length >= 2);
-  assert.ok(history.data.revisions.length <= 10);
+  assert.ok(history.data.revisions.length <= 500);
   const targetRevision = history.data.revisions.find(
     (entry) => entry.revision < currentBeforeRestore.data.revision,
   ).revision;

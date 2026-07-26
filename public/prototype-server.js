@@ -505,9 +505,9 @@
     if (showToast) toast("✓ Получены свежие данные склада");
   }
 
-  async function fetchSnapshot() {
+  async function fetchSnapshot({ forceFull = false } = {}) {
     const headers = {};
-    if (sync.lastServerEtag) headers["if-none-match"] = sync.lastServerEtag;
+    if (!forceFull && sync.lastServerEtag) headers["if-none-match"] = sync.lastServerEtag;
     const response = await fetchWithTimeout("/api/state", { cache: "no-store", headers });
     if (response.status === 304) {
       if (!sync.lastServerStateJson) {
@@ -617,9 +617,19 @@
         return;
       }
       if (!snapshot.state && snapshot.partialChanged) {
-        // Even an empty warehouse response carries authorization scope. Keep
-        // the upload gate/status in sync instead of waiting for a later state.
-        sync.lastUploaded = localPayload;
+        // Authorization scope changed while the response had no warehouse
+        // graph. Never bless the local (possibly projected) graph as uploaded:
+        // force one unconditional fetch before deciding what may be pushed.
+        sync.lastUploaded = "";
+        sync.lastServerStateJson = "";
+        sync.lastServerEtag = "";
+        const fullSnapshot = await fetchSnapshot({ forceFull: true });
+        if (fullSnapshot.state) {
+          applyRemoteSnapshot(fullSnapshot, false);
+          noteSyncSuccess();
+          return;
+        }
+        sync.revision = Number(fullSnapshot.revision || sync.revision);
         rerenderCurrentView();
         return;
       }

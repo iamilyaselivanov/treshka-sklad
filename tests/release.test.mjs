@@ -25,6 +25,7 @@ test("security endpoints and server-connected APK are present", async () => {
     "app/api/users/transfer-owner/route.ts",
     "app/api/audit/route.ts",
     "app/api/state/history/route.ts",
+    "lib/state-history.ts",
     "app/api/media/images/route.ts",
   ];
   await Promise.all(paths.map(text));
@@ -177,7 +178,8 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.match(androidSync, /store\.markMutationConflicted\(pending\.mutationId, message\)/);
   assert.match(androidSync, /store\.sendablePendingCount\(\) == 0/);
   assert.match(androidSync, /store\.markSyncContact\(/);
-  assert.match(androidSync, /refreshServerRole\(config, force = true\)/);
+  assert.match(androidSync, /refreshServerRole\(config, force = pending\.attempts <= 1\)/);
+  assert.match(androidSync, /val pending = store\.pendingCounts\(\)/);
   assert.match(androidSync, /store\.savePendingRemoteSnapshot\(payload, revision\)/);
   assert.match(androidSync, /store\.acceptServerSnapshot\(id, allowDiscardWithoutBackup\)/);
   assert.doesNotMatch(androidSync, /localExportConfirmed/);
@@ -426,6 +428,24 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
     "\u202fÉлектро\u202f",
   );
   adopted.close();
+});
+
+test("state revision history is sampled, time-retained and shared by every writer", async () => {
+  const [policy, stateRoute, productRoute, historyRoute] = await Promise.all([
+    text("lib/state-history.ts"),
+    text("app/api/state/route.ts"),
+    text("app/api/products/route.ts"),
+    text("app/api/state/history/route.ts"),
+  ]);
+  assert.match(policy, /STATE_HISTORY_RETENTION_DAYS = 30/);
+  assert.match(policy, /STATE_HISTORY_SAMPLE_INTERVAL_MS = 5 \* 60 \* 1_000/);
+  assert.match(policy, /STATE_HISTORY_LIST_LIMIT = 500/);
+  assert.match(stateRoute, /stateHistorySampleCutoff\(\)/);
+  assert.match(stateRoute, /stateHistoryRetentionCutoff\(\)/);
+  assert.match(productRoute, /stateHistoryRetentionCutoff\(\)/);
+  assert.match(historyRoute, /STATE_HISTORY_LIST_LIMIT/);
+  assert.match(historyRoute, /status: 507/);
+  assert.match(historyRoute, /item_id NOT IN \(SELECT id FROM products\)/);
 });
 
 test("push notifications are server-addressed, durable and connected to Android FCM", async () => {

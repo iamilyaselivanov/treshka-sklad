@@ -1,10 +1,12 @@
 import { env } from "cloudflare:workers";
 import { audit, requireUser } from "@/lib/auth";
 import { readJsonObject, RequestBodyTooLargeError } from "@/lib/http";
+import {
+  STATE_HISTORY_LIST_LIMIT,
+  stateHistoryRetentionCutoff,
+} from "@/lib/state-history";
 
 export const dynamic = "force-dynamic";
-
-const HISTORY_LIMIT = 10;
 
 type RevisionRow = {
   revision: number;
@@ -46,7 +48,7 @@ export async function GET(request: Request) {
      WHERE state_key = 'main'
      ORDER BY revision DESC
      LIMIT ?`,
-  ).bind(HISTORY_LIMIT).all();
+  ).bind(STATE_HISTORY_LIST_LIMIT).all();
   return Response.json({ revisions: result.results ?? [] });
 }
 
@@ -99,49 +101,77 @@ export async function POST(request: Request) {
   }
   const revision = expectedRevision + 1;
   const updatedAt = new Date().toISOString();
-  const results = await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE warehouse_full_state
-       SET revision = ?, payload = ?, updated_at = ?, updated_by = ?
-       WHERE state_key = 'main' AND revision = ?`,
-    ).bind(revision, archived.payload, updatedAt, auth.user.callsign, expectedRevision),
-    env.DB.prepare(
-      `INSERT OR REPLACE INTO warehouse_state_revisions
-         (state_key, revision, payload, updated_at, updated_by)
-       SELECT state_key, revision, payload, updated_at, updated_by
-       FROM warehouse_full_state
-       WHERE state_key = 'main' AND revision = ?`,
-    ).bind(revision),
-    env.DB.prepare(
-      `DELETE FROM warehouse_state_revisions
-       WHERE state_key = 'main'
-         AND revision NOT IN (
-           SELECT revision FROM warehouse_state_revisions
-           WHERE state_key = 'main'
-           ORDER BY revision DESC
-           LIMIT ?
-         )`,
-    ).bind(HISTORY_LIMIT),
-    env.DB.prepare(
-      `DELETE FROM warehouse_state_items
-       WHERE state_key = 'main'
-         AND EXISTS (
-           SELECT 1 FROM warehouse_full_state
-           WHERE state_key = 'main' AND revision = ?
-         )`,
-    ).bind(revision),
-    env.DB.prepare(
-      `INSERT OR IGNORE INTO warehouse_state_items (state_key, item_id)
-       SELECT warehouse_full_state.state_key,
-              TRIM(CAST(json_extract(value, '$.id') AS TEXT))
-       FROM warehouse_full_state,
-            json_each(warehouse_full_state.payload, '$.items')
-       WHERE warehouse_full_state.state_key = 'main'
-         AND warehouse_full_state.revision = ?
-         AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''`,
-    ).bind(revision),
-  ]);
-  if (Number(results[0].meta?.changes ?? 0) !== 1) {
+  let results;
+  try {
+    results = await env.DB.batch([
+      // Always preserve the state being replaced. A restore is destructive and
+      // must itself be reversible even when the regular five-minute sampler
+      // has not captured the latest revision yet.
+      env.DB.prepare(
+        `INSERT OR REPLACE INTO warehouse_state_revisions
+           (state_key, revision, payload, updated_at, updated_by)
+         SELECT state_key, revision, payload, updated_at, updated_by
+         FROM warehouse_full_state
+         WHERE state_key = 'main' AND revision = ?`,
+      ).bind(expectedRevision),
+      env.DB.prepare(
+        `UPDATE warehouse_full_state
+         SET revision = ?, payload = ?, updated_at = ?, updated_by = ?
+         WHERE state_key = 'main' AND revision = ?`,
+      ).bind(revision, archived.payload, updatedAt, auth.user.callsign, expectedRevision),
+      env.DB.prepare(
+        `DELETE FROM warehouse_state_revisions
+         WHERE state_key = 'main'
+           AND updated_at < ?
+           AND revision <> (
+             SELECT MAX(revision) FROM warehouse_state_revisions
+             WHERE state_key = 'main'
+           )`,
+      ).bind(stateHistoryRetentionCutoff()),
+      env.DB.prepare(
+        `DELETE FROM warehouse_state_items
+         WHERE state_key = 'main'
+           AND EXISTS (
+             SELECT 1 FROM warehouse_full_state
+             WHERE state_key = 'main' AND revision = ?
+           )`,
+      ).bind(revision),
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO warehouse_state_items (state_key, item_id)
+         SELECT warehouse_full_state.state_key,
+                TRIM(CAST(json_extract(value, '$.id') AS TEXT))
+         FROM warehouse_full_state,
+              json_each(warehouse_full_state.payload, '$.items')
+         WHERE warehouse_full_state.state_key = 'main'
+           AND warehouse_full_state.revision = ?
+           AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''`,
+      ).bind(revision),
+      // Old snapshots may reference a product card that was deliberately
+      // deleted after the snapshot was captured. Never recreate a dangling
+      // deletion-guard index for such a card.
+      env.DB.prepare(
+        `DELETE FROM warehouse_state_items
+         WHERE state_key = 'main'
+           AND item_id NOT IN (SELECT id FROM products)
+           AND EXISTS (
+             SELECT 1 FROM warehouse_full_state
+             WHERE state_key = 'main' AND revision = ?
+           )`,
+      ).bind(revision),
+    ]);
+  } catch (error) {
+    console.error("warehouse state restore failed", error);
+    await audit(
+      auth.user,
+      "state_restore_failed",
+      `Архивная ревизия ${targetRevision} · текущая ревизия ${expectedRevision}`,
+    ).catch((auditError) => console.error("warehouse restore failure audit failed", auditError));
+    return Response.json(
+      { error: "Сервер не смог восстановить ревизию. Данные не изменены" },
+      { status: 507 },
+    );
+  }
+  if (Number(results[1].meta?.changes ?? 0) !== 1) {
     const latest = await env.DB.prepare(
       "SELECT revision FROM warehouse_full_state WHERE state_key = 'main'",
     ).first<{ revision: number }>();
@@ -150,10 +180,19 @@ export async function POST(request: Request) {
       { status: 409, headers: { "cache-control": "no-store" } },
     );
   }
+  const discardedItemReferences = Number(results[5].meta?.changes ?? 0);
   await audit(
     auth.user,
     "state_restored",
-    `Архивная ревизия ${targetRevision} восстановлена как ревизия ${revision}`,
+    `Архивная ревизия ${targetRevision} восстановлена как ревизия ${revision}`
+      + (discardedItemReferences > 0
+        ? ` · отброшено ссылок на удалённые карточки: ${discardedItemReferences}`
+        : ""),
   ).catch((error) => console.error("warehouse state restore audit failed", error));
-  return Response.json({ revision, restoredFrom: targetRevision, updatedAt });
+  return Response.json({
+    revision,
+    restoredFrom: targetRevision,
+    updatedAt,
+    discardedItemReferences,
+  });
 }

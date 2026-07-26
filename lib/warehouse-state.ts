@@ -287,27 +287,61 @@ function immutableHistoryPreserved(previousValue: unknown, nextValue: unknown) {
   return true;
 }
 
-function rollingHistoryPreserved(previousValue: unknown, nextValue: unknown, windowLimit: number) {
-  const previousRows = rows(previousValue).map(canonicalHistoryJson);
-  const nextRows = rows(nextValue).map(canonicalHistoryJson);
+const MAX_FEED_ROWS_PER_WRITE = 200;
+const NO_MUTABLE_FEED_FIELDS = new Set<string>();
+const MUTABLE_NOTIFICATION_FIELDS = new Set(["read"]);
+
+function feedRowPreserved(
+  previousValue: unknown,
+  nextValue: unknown,
+  mutableFields: ReadonlySet<string>,
+) {
+  const previous = record(previousValue);
+  const next = record(nextValue);
+  if (!previous || !next) {
+    return canonicalHistoryJson(previousValue) === canonicalHistoryJson(nextValue);
+  }
+  const keys = new Set([...Object.keys(previous), ...Object.keys(next)]);
+  for (const key of keys) {
+    if (mutableFields.has(key)) continue;
+    if (canonicalHistoryJson(previous[key]) !== canonicalHistoryJson(next[key])) return false;
+  }
+  return true;
+}
+
+function rollingHistoryPreserved(
+  previousValue: unknown,
+  nextValue: unknown,
+  windowLimit: number,
+  mutableFields: ReadonlySet<string>,
+) {
+  const previousRows = rows(previousValue);
+  const nextRows = rows(nextValue);
   if (nextRows.length < previousRows.length) return false;
+  if (nextRows.length > windowLimit) return false;
   if (previousRows.length < windowLimit) {
     // New feed rows are prepended. Before the window is full, every previous
     // row must remain as an unchanged suffix.
+    if (nextRows.length - previousRows.length > MAX_FEED_ROWS_PER_WRITE) return false;
     const suffix = nextRows.slice(nextRows.length - previousRows.length);
-    return suffix.every((value, index) => value === previousRows[index]);
+    return suffix.every(
+      (value, index) => feedRowPreserved(previousRows[index], value, mutableFields),
+    );
   }
   // Once the rolling window is full, only an unchanged prefix of the previous
   // window may remain after newly prepended rows push the oldest tail out.
-  // Arbitrary one-for-one replacement in the middle is therefore rejected.
-  for (let added = 0; added < nextRows.length; added += 1) {
+  // Cap a single write so a client cannot erase the entire feed by fabricating
+  // a full replacement window.
+  for (let added = 0; added <= MAX_FEED_ROWS_PER_WRITE; added += 1) {
     const retained = nextRows.length - added;
     if (retained <= 0) break;
-    if (nextRows.slice(added).every((value, index) => value === previousRows[index])) {
+    if (nextRows.slice(added).every(
+      (value, index) => feedRowPreserved(previousRows[index], value, mutableFields),
+    )) {
       return true;
     }
   }
-  return nextRows.every((value, index) => value === previousRows[index]);
+  return false;
 }
 
 /**
@@ -326,8 +360,13 @@ export function warehouseHistoryMutationIssue(
     || !mutableHistoryPreserved(previous.extIssues, next.extIssues)
     || !immutableHistoryPreserved(previous.stockTransfers, next.stockTransfers)
     || !immutableHistoryPreserved(previous.inventoryActs, next.inventoryActs)
-    || !rollingHistoryPreserved(previous.auditLog, next.auditLog, 2_000)
-    || !rollingHistoryPreserved(previous.notifications, next.notifications, 2_000)
+    || !rollingHistoryPreserved(previous.auditLog, next.auditLog, 2_000, NO_MUTABLE_FEED_FIELDS)
+    || !rollingHistoryPreserved(
+      previous.notifications,
+      next.notifications,
+      2_000,
+      MUTABLE_NOTIFICATION_FIELDS,
+    )
   ) {
     return {
       status: 403 as const,
