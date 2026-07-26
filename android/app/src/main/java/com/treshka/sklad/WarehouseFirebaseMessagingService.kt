@@ -17,7 +17,7 @@ class WarehouseFirebaseMessagingService : FirebaseMessagingService() {
     }
 
     override fun onDeletedMessages() {
-        val store = AppStateStore(this)
+        val store = (application as WarehouseApplication).appStateStore
         ServerSyncManager(store, {}, { _, _ -> }).syncNow()
     }
 

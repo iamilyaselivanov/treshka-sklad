@@ -414,6 +414,26 @@ class AppStateStore(context: Context) :
         getSyncConfig()?.serverRole in setOf("owner", "admin")
 
     @Synchronized
+    fun updateServerRole(serverRole: String) {
+        val normalizedRole = serverRole.trim()
+        require(normalizedRole in setOf("owner", "admin", "storekeeper", "worker")) {
+            "Некорректная роль сервера"
+        }
+        writableDatabase.execSQL(
+            "UPDATE sync_config SET server_role=?, last_error=NULL WHERE id=1",
+            arrayOf(normalizedRole),
+        )
+    }
+
+    @Synchronized
+    fun clearServerRole(reason: String) {
+        writableDatabase.execSQL(
+            "UPDATE sync_config SET server_role='', last_error=? WHERE id=1",
+            arrayOf(reason.take(1000)),
+        )
+    }
+
+    @Synchronized
     fun claimNextPending(): PendingSnapshot? {
         val db = writableDatabase
         db.beginTransaction()
@@ -825,6 +845,14 @@ class AppStateStore(context: Context) :
             put("baseUrl", cfg?.baseUrl ?: "")
             put("deviceId", cfg?.deviceId ?: "")
             put("serverRevision", cfg?.serverRevision ?: 0)
+            put("serverRole", cfg?.serverRole ?: "")
+            put(
+                "serverRoleUnknown",
+                cfg != null
+                    && cfg.baseUrl.isNotBlank()
+                    && cfg.authToken.isNotBlank()
+                    && cfg.serverRole.isBlank(),
+            )
             put("pending", pendingCount())
             put("conflicts", pendingCount() - sendablePendingCount())
             put("conflictBackups", conflictBackupFiles().size)

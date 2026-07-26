@@ -27,6 +27,8 @@ type PushRecipient = {
 
 export const PUSH_RECIPIENT_PAGE_SIZE = 500;
 export const PUSH_RECIPIENT_MAX_PAGES = 100;
+const POST_ASSIGNMENT_WHITESPACE = /[\t\n\v\f\r \u00a0]+/g;
+const POST_ASSIGNMENT_EDGE_WHITESPACE = /^[\t\n\v\f\r \u00a0]+|[\t\n\v\f\r \u00a0]+$/g;
 
 const definitions: Record<PushEventType, PushEventDefinition> = {
   post_stock_issued: {
@@ -88,13 +90,16 @@ export function pushPresentation(
 }
 
 export function normalizePostAssignment(value: string) {
-  // Keep this explicit whitespace set in sync with the SQLite migration and
-  // triggers. It covers every whitespace character accepted by our forms and
-  // avoids relying on SQLite trim()/lower() Unicode behavior.
+  // Keep this explicit whitespace set and case table in sync with the SQLite
+  // migration and triggers. Deliberately do not use trim()/toLocaleLowerCase():
+  // they transform additional Unicode characters that SQLite leaves untouched.
   return value
-    .replace(/[\t\n\v\f\r \u00a0]+/g, " ")
-    .trim()
-    .toLocaleLowerCase("ru-RU");
+    .replace(POST_ASSIGNMENT_WHITESPACE, " ")
+    .replace(POST_ASSIGNMENT_EDGE_WHITESPACE, "")
+    .replace(/[A-ZА-ЯЁ]/g, (character) => {
+      if (character === "Ё") return "ё";
+      return String.fromCodePoint(character.codePointAt(0)! + 32);
+    });
 }
 
 export function pushRecipientQuery(
@@ -146,6 +151,7 @@ export async function collectPushRecipients<T extends PushRecipient>(
     throw new Error("Invalid push recipient page size");
   }
   const recipients: T[] = [];
+  let lastPageWasFull = false;
   for (let pageIndex = 0; pageIndex < PUSH_RECIPIENT_MAX_PAGES; pageIndex += 1) {
     const offset = pageIndex * pageSize;
     const page = await fetchPage(pageSize, offset);
@@ -153,10 +159,15 @@ export async function collectPushRecipients<T extends PushRecipient>(
       throw new Error("Push recipient page exceeded the requested limit");
     }
     recipients.push(...page);
-    if (page.length < pageSize) break;
-    if (pageIndex === PUSH_RECIPIENT_MAX_PAGES - 1) {
-      throw new Error("Push recipient pagination limit exceeded");
+    lastPageWasFull = page.length === pageSize;
+    if (!lastPageWasFull) break;
+  }
+  if (lastPageWasFull) {
+    const overflow = await fetchPage(1, PUSH_RECIPIENT_MAX_PAGES * pageSize);
+    if (overflow.length > 1) {
+      throw new Error("Push recipient page exceeded the requested limit");
     }
+    if (overflow.length) throw new Error("Push recipient pagination limit exceeded");
   }
   return recipients;
 }

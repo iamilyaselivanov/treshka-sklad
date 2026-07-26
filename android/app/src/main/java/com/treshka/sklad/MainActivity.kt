@@ -185,7 +185,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        appStateStore = AppStateStore(this)
+        appStateStore = (application as WarehouseApplication).appStateStore
         pushRegistrationStore = PushRegistrationStore(this)
         createNotificationChannel()
 

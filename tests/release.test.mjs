@@ -104,13 +104,28 @@ test("security hardening keeps state writes privileged and recovery throttling g
 });
 
 test("sync hardening keeps conflicts recoverable and Android secrets protected", async () => {
-  const [browserSync, androidStore, androidSync, activity, manifest, extractionRules] = await Promise.all([
+  const [
+    browserSync,
+    androidStore,
+    androidSync,
+    activity,
+    manifest,
+    extractionRules,
+    application,
+    messagingService,
+    serverContract,
+    prototype,
+  ] = await Promise.all([
     text("public/prototype-server.js"),
     text("android/app/src/main/java/com/treshka/sklad/AppStateStore.kt"),
     text("android/app/src/main/java/com/treshka/sklad/ServerSyncManager.kt"),
     text("android/app/src/main/java/com/treshka/sklad/MainActivity.kt"),
     text("android/app/src/main/AndroidManifest.xml"),
     text("android/app/src/main/res/xml/data_extraction_rules.xml"),
+    text("android/app/src/main/java/com/treshka/sklad/WarehouseApplication.kt"),
+    text("android/app/src/main/java/com/treshka/sklad/WarehouseFirebaseMessagingService.kt"),
+    text("android/SERVER_API_CONTRACT.md"),
+    text("public/prototype.html"),
   ]);
   assert.match(browserSync, /fetchWithTimeout/);
   assert.match(browserSync, /noteSyncFailure/);
@@ -142,7 +157,22 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.match(activity, /fun exportLatestConflictBackup\(\)/);
   assert.match(activity, /source\.inputStream\(\)\.use/);
   assert.match(activity, /syncRoleCanAdminister/);
+  assert.match(activity, /\(application as WarehouseApplication\)\.appStateStore/);
   assert.match(activity, /conflictDiscardConfirmationVisible/);
+  assert.match(application, /val appStateStore: AppStateStore by lazy/);
+  assert.match(messagingService, /\(application as WarehouseApplication\)\.appStateStore/);
+  assert.doesNotMatch(messagingService, /AppStateStore\(this\)/);
+  assert.match(manifest, /android:name="\.WarehouseApplication"/);
+  assert.match(androidSync, /\/v1\/auth\/status/);
+  assert.match(androidSync, /Сервер входа не вернул обязательное поле user\.role/);
+  assert.match(androidSync, /store\.updateServerRole\(role\)/);
+  assert.match(androidSync, /store\.clearServerRole\("Сессия сервера истекла/);
+  assert.match(androidStore, /"serverRoleUnknown"/);
+  assert.match(prototype, /Не удалось подтвердить роль этого аккаунта/);
+  assert.match(prototype, /conflictLoadError/);
+  assert.match(prototype, /window\.onTreshkaServerRoleChanged/);
+  assert.match(browserSync, /window\.onTreshkaServerRoleChanged\(sync\.user\.role\)/);
+  assert.match(serverContract, /`user\.role` is mandatory/);
   assert.match(androidSync, /store\.requeueConflictedMutation\(id, authoritative\.second\)/);
   assert.match(androidSync, /ConflictRequeueResult\.SERVER_ADVANCED/);
   assert.match(androidSync, /pending\.baseRevision/);
@@ -295,6 +325,23 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   assert.equal(
     adopted.prepare("SELECT assignment_key AS key FROM users WHERE id='whitespace-worker'").get().key,
     "тэч 1",
+  );
+  adopted.prepare(
+    `INSERT INTO users
+       (id, callsign, login, password_hash, role, assignment, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'active', ?)`,
+  ).run(
+    "unicode-worker",
+    "Юникод",
+    "unicode-worker",
+    "hash",
+    "worker",
+    "\u202fÉЛЕКТРО\u202f",
+    "2026-07-26",
+  );
+  assert.equal(
+    adopted.prepare("SELECT assignment_key AS key FROM users WHERE id='unicode-worker'").get().key,
+    "\u202fÉлектро\u202f",
   );
   adopted.close();
 });

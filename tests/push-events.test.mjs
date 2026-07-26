@@ -166,13 +166,32 @@ test("recipient pagination fails closed if a page source never terminates", asyn
     }, 1),
     /pagination limit exceeded/,
   );
-  assert.equal(calls, PUSH_RECIPIENT_MAX_PAGES);
+  assert.equal(calls, PUSH_RECIPIENT_MAX_PAGES + 1);
+});
+
+test("recipient pagination accepts exactly the configured maximum", async () => {
+  let calls = 0;
+  const expected = Array.from(
+    { length: PUSH_RECIPIENT_MAX_PAGES },
+    (_, index) => ({ deviceId: `device-${index}` }),
+  );
+  const recipients = await collectPushRecipients((limit, offset) => {
+    calls += 1;
+    return expected.slice(offset, offset + limit);
+  }, 1);
+  assert.deepEqual(recipients, expected);
+  assert.equal(calls, PUSH_RECIPIENT_MAX_PAGES + 1);
 });
 
 test("assignment normalization matches migration whitespace rules", () => {
   assert.equal(
     normalizePostAssignment(`\tТЭЧ\u00a0${" ".repeat(40)}1\r\n`),
     "тэч 1",
+  );
+  assert.equal(
+    normalizePostAssignment("\u202fÉЛЕКТРО\u202f"),
+    "\u202fÉлектро\u202f",
+    "characters SQLite does not transform must also remain untouched in JavaScript",
   );
 });
 

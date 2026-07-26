@@ -1279,6 +1279,32 @@ test('server UI never falls back to a client admin role while server identity is
   await ctx.close();
 });
 
+test('server settings explain an unknown migrated native role instead of hiding conflicts silently', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.treshkaServerRole = () => 'owner';
+    window.AndroidSync = {
+      status: () => JSON.stringify({
+        configured: true,
+        serverRevision: 9,
+        pending: 1,
+        conflictBackups: 0,
+        serverRole: '',
+        serverRoleUnknown: true,
+      }),
+      listConflicts: () => JSON.stringify({
+        error: 'Требуется повторный вход для подтверждения роли',
+      }),
+    };
+  });
+  const text = await page.evaluate(() => {
+    renderServerSettings();
+    return document.getElementById('content').textContent;
+  });
+  assert.match(text, /Не удалось подтвердить роль этого аккаунта/);
+  assert.match(text, /Требуется повторный вход для подтверждения роли/);
+  await ctx.close();
+});
+
 test('review round — post movements are listed and an over-limit return is rejected atomically', async () => {
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => {

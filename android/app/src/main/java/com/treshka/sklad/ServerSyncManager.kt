@@ -18,10 +18,15 @@ class ServerSyncManager(
     private val onStatus: (String) -> Unit,
     private val onRemoteState: (String, Long) -> Unit,
 ) {
-    companion object { private const val TAG = "ServerSync" }
+    companion object {
+        private const val TAG = "ServerSync"
+        private const val ROLE_REFRESH_INTERVAL_MS = 5 * 60 * 1_000L
+        private val SERVER_ROLES = setOf("owner", "admin", "storekeeper", "worker")
+    }
     private val executor = Executors.newSingleThreadScheduledExecutor()
     private val running = AtomicBoolean(false)
     private val retryScheduled = AtomicBoolean(false)
+    @Volatile private var lastRoleRefreshAt = 0L
 
     fun login(baseUrl: String, login: String, password: String): String {
         val normalized = baseUrl.trim().trimEnd('/')
@@ -31,10 +36,69 @@ class ServerSyncManager(
         if (response.code !in 200..299) throw IllegalStateException("HTTP ${response.code}: ${response.body.take(300)}")
         val responseJson = JSONObject(response.body)
         val token = responseJson.getString("token")
-        val serverRole = responseJson.optJSONObject("user")?.optString("role").orEmpty()
+        val serverRole = responseServerRole(responseJson)
+            ?: throw IllegalStateException(
+                "Сервер входа не вернул обязательное поле user.role. Обновите сервер API",
+            )
         store.configureSync(normalized, token, serverRole)
+        lastRoleRefreshAt = System.currentTimeMillis()
         syncNow()
         return response.body
+    }
+
+    /**
+     * Refreshes the native authorization boundary without requiring another
+     * password entry. The external API contract is documented in
+     * android/SERVER_API_CONTRACT.md. Older servers may answer 404/405; in that
+     * case an already known role stays usable, while a migrated blank role is
+     * surfaced explicitly by syncStatusJson().
+     */
+    private fun refreshServerRole(config: SyncConfig, force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (!force && now - lastRoleRefreshAt < ROLE_REFRESH_INTERVAL_MS) return
+        lastRoleRefreshAt = now
+        val response = runCatching {
+            requestJson(
+                "${config.baseUrl}/v1/auth/status",
+                "GET",
+                config.authToken,
+                null,
+            )
+        }.getOrElse {
+            Log.w(TAG, "server role refresh failed", it)
+            return
+        }
+        if (response.code == 404 || response.code == 405) return
+        if (response.code == 401 || response.code == 403) {
+            store.clearServerRole("Сессия сервера истекла. Войдите снова для подтверждения прав")
+            return
+        }
+        if (response.code !in 200..299) {
+            Log.w(TAG, "server role refresh HTTP ${response.code}")
+            return
+        }
+        val responseJson = runCatching { JSONObject(response.body) }.getOrElse {
+            Log.w(TAG, "server role refresh returned invalid JSON", it)
+            return
+        }
+        val role = responseServerRole(responseJson)
+        if (role == null) {
+            Log.w(TAG, "server role refresh omitted user.role")
+            store.clearServerRole("Сервер не подтвердил роль аккаунта. Войдите снова")
+            return
+        }
+        store.updateServerRole(role)
+    }
+
+    private fun adoptServerRole(responseBody: String) {
+        val role = runCatching { responseServerRole(JSONObject(responseBody)) }.getOrNull() ?: return
+        store.updateServerRole(role)
+    }
+
+    private fun responseServerRole(responseJson: JSONObject): String? {
+        val user = responseJson.optJSONObject("user") ?: return null
+        val role = user.optString("role").trim()
+        return role.takeIf { it in SERVER_ROLES }
     }
 
     fun createUser(json: String): String {
@@ -200,6 +264,8 @@ class ServerSyncManager(
     private fun syncLoop() {
         var config = store.getSyncConfig() ?: return
         if (config.baseUrl.isBlank() || config.authToken.isBlank()) return
+        refreshServerRole(config)
+        config = store.getSyncConfig() ?: return
         while (true) {
             // Claim and increment attempts in one SQLite transaction. A
             // concurrent save can no longer compact the row after we selected
@@ -244,6 +310,7 @@ class ServerSyncManager(
                 if (response.code == 401 || response.code == 403) break
                 continue
             }
+            adoptServerRole(response.body)
             val revision = JSONObject(response.body).getLong("revision")
             store.markMutationApplied(pending.mutationId, revision)
             config = store.getSyncConfig() ?: return
@@ -261,6 +328,7 @@ class ServerSyncManager(
                 null,
             )
             if (response.code == 200) {
+                adoptServerRole(response.body)
                 val json = JSONObject(response.body)
                 if (!json.optBoolean("unchanged", false) && json.has("payload")) {
                     val payload = json.getJSONObject("payload").toString()

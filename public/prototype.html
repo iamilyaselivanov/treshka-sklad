@@ -3247,7 +3247,7 @@ let _saveIsHealthy = true;
 // нельзя — это единственный шанс администратора вручную восстановить "сырой"
 // повреждённый JSON из SQLite/localStorage для форензики.
 let _autosaveSuspended = false;
-let _nativeSyncStatus = {configured:false,pending:0,serverRevision:0,lastError:null};
+let _nativeSyncStatus = {configured:false,pending:0,serverRevision:0,serverRole:'',serverRoleUnknown:false,lastError:null};
 function nativeSyncBridge(){
   return typeof window!=='undefined'&&window.AndroidSync?window.AndroidSync:null;
 }
@@ -4135,15 +4135,18 @@ function renderNotifications(){
 function renderServerSettings(){
   const s=refreshNativeSyncStatus();
   let conflicts=[];
+  let conflictLoadError='';
   const bridge=nativeSyncBridge();
   if(s.configured&&canAdminister()&&bridge&&typeof bridge.listConflicts==='function'){
-    try{const loaded=JSON.parse(bridge.listConflicts());if(Array.isArray(loaded))conflicts=loaded;}catch(e){console.warn(e);}
+    try{const loaded=JSON.parse(bridge.listConflicts());if(Array.isArray(loaded))conflicts=loaded;else if(loaded&&loaded.error)conflictLoadError=String(loaded.error);}catch(e){conflictLoadError='Не удалось прочитать список конфликтов';console.warn(e);}
   }
   setHdr('Сервер и синхронизация','Offline-first: локальная база работает всегда',true,false);
   $('content').innerHTML=`
     <div class="progress-note ${s.lastError?'bad':s.configured?'ok':''}">${s.configured
       ? (s.lastError?`⚠ ${esc(s.lastError)}. Неотправленные изменения остаются в защищённой очереди.`:`✓ Сервер подключён. Ревизия ${s.serverRevision||0}, в очереди ${s.pending||0}.`)
       :'Сейчас данные сохраняются только на устройстве. Подключение не очищает локальную базу: первый снимок загружается на пустой сервер.'}</div>
+    ${s.configured&&s.serverRoleUnknown?`<div class="progress-note bad">⚠ Не удалось подтвердить роль этого аккаунта после обновления приложения. Войдите в сервер ещё раз: до подтверждения роли разрешение конфликтов и экспорт резервных копий заблокированы.</div>`:''}
+    ${conflictLoadError?`<div class="progress-note bad">⚠ ${esc(conflictLoadError)}</div>`:''}
     <div class="card static">
       <div class="fld"><label>Адрес API (только HTTPS)</label><input id="serverUrl" value="${esc(s.baseUrl||'')}" placeholder="https://sklad.example.ru"></div>
       <div class="fld"><label>Логин</label><input id="serverLogin" autocomplete="username"></div>
@@ -4155,6 +4158,9 @@ function renderServerSettings(){
     <div class="sec">Защита данных</div>
     <div class="card static"><div class="s" style="color:var(--ink);line-height:1.55">Каждое изменение сначала атомарно записывается в SQLite вместе с durable outbox. Сервер принимает mutationId только один раз. Перед принятием серверной версии приложение сохраняет фактически удаляемые локальные снимки в приватной резервной копии на устройстве. В «Загрузки» она попадает только по отдельной команде экспорта.</div></div>`;
 }
+window.onTreshkaServerRoleChanged=function(){
+  if($('serverUrl'))renderServerSettings();
+};
 function resolveServerConflict(id,decision){
   if(!canAdminister()){toast('Решение конфликтов доступно только владельцу или администратору');return false;}
   if(!confirm(decision==='local'?'Повторить локальную версию можно только при отсутствии более новых серверных ревизий. Продолжить?':'Оставить серверную версию? Фактически удаляемые несинхронизированные снимки будут сохранены в приватной резервной копии приложения, затем будет применена серверная копия.'))return false;

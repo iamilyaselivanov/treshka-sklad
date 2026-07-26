@@ -283,6 +283,9 @@
         : "rabotnik";
     if (sync.user.assignment) currentUserPost = sync.user.assignment;
     updateNavForRole();
+    if (typeof window.onTreshkaServerRoleChanged === "function") {
+      window.onTreshkaServerRoleChanged(sync.user.role);
+    }
   }
 
   function canUploadState() {
