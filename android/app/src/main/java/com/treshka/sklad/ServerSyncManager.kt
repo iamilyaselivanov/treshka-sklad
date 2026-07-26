@@ -409,6 +409,7 @@ class ServerSyncManager(
             // saveRemoteState() marks success only after WebView migration and
             // SQLite persistence. Parked conflicts must remain visible too.
             !nativePersistencePending && store.pendingCount() == 0 -> store.markSyncOk()
+            !nativePersistencePending -> store.markSyncContact()
         }
     }
 

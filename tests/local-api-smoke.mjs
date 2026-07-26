@@ -91,6 +91,17 @@ try {
     roleCookies[definition.role] = login.response.headers.get("set-cookie").split(";")[0];
     timings[`login_${definition.role}`] = login.elapsedMs;
   }
+  await request("/api/users", {
+    method: "POST",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({
+      callsign: "Работник без поста",
+      login: `worker-unassigned-${suffix}`,
+      password: "WorkerPass-1600",
+      role: "worker",
+      assignment: "   ",
+    }),
+  }, 400);
 
   const fifthAttemptTarget = definitions.find((definition) => definition.role === "admin");
   for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -287,6 +298,7 @@ try {
   const state = await request("/api/state", { headers: ownerHeaders });
   assert.equal(state.data.user.id, auth.user.id);
   assert.ok(Number.isInteger(state.data.revision));
+  assert.equal(state.data.partial, false);
   timings.stateBootstrap = state.elapsedMs;
 
   const sharedState = state.data.state ?? {
@@ -336,6 +348,16 @@ try {
     body: JSON.stringify({ state: collectionOverflow, expectedRevision: state.data.revision }),
   }, 413);
   assert.match(rejectedCollectionOverflow.data.error, /не были усечены/);
+  const rejectedPartialSnapshot = await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.admin, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: sharedState,
+      expectedRevision: state.data.revision,
+      partial: true,
+    }),
+  }, 409);
+  assert.equal(rejectedPartialSnapshot.data.recover, "server");
   await request("/api/state", {
     method: "PUT",
     headers: { cookie: roleCookies.worker, "content-type": "application/json" },
@@ -396,6 +418,7 @@ try {
   });
   assert.equal(wrongAuthorizationScope.status, 200, "a role/account change must never reuse another identity's 304");
   const workerSnapshot = await request("/api/state", { headers: { cookie: roleCookies.worker } });
+  assert.equal(workerSnapshot.data.partial, true);
   assert.ok(workerSnapshot.data.state.posts.every((post) => post.name === "ТЭЧ"));
   assert.deepEqual(workerSnapshot.data.state.inventoryActs, []);
   assert.deepEqual(workerSnapshot.data.state.auditLog, []);

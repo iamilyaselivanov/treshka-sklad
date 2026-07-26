@@ -5,12 +5,6 @@ export class RequestBodyTooLargeError extends Error {
   }
 }
 
-async function drainReader(reader: ReadableStreamDefaultReader<Uint8Array>) {
-  while (!(await reader.read()).done) {
-    // Drain without retaining chunks so the connection remains reusable.
-  }
-}
-
 export async function readJsonObject(
   request: Request,
   maxBytes?: number,
@@ -38,7 +32,7 @@ export async function readJsonObject(
         if (result.done) break;
         received += result.value.byteLength;
         if (received > maxBytes) {
-          await drainReader(reader);
+          await reader.cancel("request body exceeds size limit").catch(() => undefined);
           throw new RequestBodyTooLargeError();
         }
         chunks.push(decoder.decode(result.value, { stream: true }));

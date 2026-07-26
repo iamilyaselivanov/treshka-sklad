@@ -339,22 +339,16 @@ class MainActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun listConflicts(): String = try {
-            if (!appStateStore.syncRoleCanAdminister()) {
-                JSONObject()
-                    .put("error", "Конфликты доступны только владельцу или администратору")
-                    .toString()
-            } else {
-                serverSyncManager.listConflicts()
-            }
+            serverSyncManager.listConflicts()
         } catch (e: Exception) {
             JSONObject().put("error", e.message ?: "Ошибка загрузки конфликтов").toString()
         }
 
         @JavascriptInterface
         fun resolveConflict(id: Long, decision: String): String = try {
-            if (!appStateStore.syncRoleCanAdminister()) {
+            if (decision == "local" && !appStateStore.syncRoleCanAdminister()) {
                 JSONObject()
-                    .put("error", "Решение конфликтов доступно только владельцу или администратору")
+                    .put("error", "Локальную версию может повторить только владелец или администратор")
                     .toString()
             } else {
                 val result = serverSyncManager.resolveConflict(id, decision)

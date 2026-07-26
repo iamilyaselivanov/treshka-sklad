@@ -89,7 +89,7 @@ export async function GET(request: Request) {
   ).first<StateRow>();
   if (!row) {
     return Response.json(
-      { revision: 0, state: null, user: auth.user },
+      { revision: 0, state: null, user: auth.user, partial: auth.user.role === "worker" },
       { headers: { "cache-control": "no-store" } },
     );
   }
@@ -109,6 +109,7 @@ export async function GET(request: Request) {
         revision: row.revision,
         state: projectedState,
         user: auth.user,
+        partial: auth.user.role === "worker",
         updatedAt: row.updated_at,
         updatedBy: row.updated_by,
         sizeBytes: new TextEncoder().encode(projectedPayload).byteLength,
@@ -127,7 +128,7 @@ export async function GET(request: Request) {
 export async function PUT(request: Request) {
   const auth = await requireUser(request, ["owner", "admin", "storekeeper"]);
   if (auth.response || !auth.user) return auth.response;
-  let body: { state?: unknown; expectedRevision?: unknown };
+  let body: { state?: unknown; expectedRevision?: unknown; partial?: unknown };
   try {
     const parsed = await readJsonObject(request, MAX_STATE_REQUEST_BYTES);
     if (!parsed) {
@@ -139,6 +140,16 @@ export async function PUT(request: Request) {
       return Response.json({ error: "Данные склада превышают безопасный размер 1,5 МБ" }, { status: 413 });
     }
     return Response.json({ error: "Некорректный JSON" }, { status: 400 });
+  }
+  if (body.partial === true) {
+    return Response.json(
+      {
+        error: "Частичный снимок нельзя отправить как полный склад. Сначала загрузите данные для текущей роли",
+        terminal: true,
+        recover: "server",
+      },
+      { status: 409 },
+    );
   }
   const limitError = collectionLimitError(body.state);
   if (limitError) {
@@ -207,7 +218,7 @@ export async function PUT(request: Request) {
     const previousItemIds = (indexedItems.results ?? []).map((row) => row.itemId);
     const needsDeletionPolicyCheck = previousItemIds.length === 0
       || previousItemIds.some((itemId) => !nextItemIds.has(itemId));
-    const needsHistoryPolicyCheck = auth.user.role === "storekeeper";
+    const needsHistoryPolicyCheck = auth.user.role !== "owner";
     if (!needsDeletionPolicyCheck && !needsHistoryPolicyCheck) {
       // Normal writes avoid reading and parsing the potentially 4 MB snapshot.
       // warehouse_state_items is maintained atomically with payload below.

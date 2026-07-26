@@ -12,6 +12,7 @@ class SyncPolicyTest {
         assertNull(SyncPolicy.normalizeServerRole(null))
         assertNull(SyncPolicy.normalizeServerRole("  "))
         assertEquals("owner", SyncPolicy.normalizeServerRole(" owner "))
+        assertEquals("owner", SyncPolicy.normalizeServerRole("Owner"))
         assertEquals("storekeeper", SyncPolicy.normalizeServerRole("storekeeper"))
         assertEquals("worker", SyncPolicy.normalizeServerRole("future-super-admin"))
         assertFalse(SyncPolicy.isKnownServerRole("future-super-admin"))
@@ -25,6 +26,7 @@ class SyncPolicyTest {
         assertTrue(SyncPolicy.isRetryableHttp(425))
         assertTrue(SyncPolicy.isRetryableHttp(429))
         assertTrue(SyncPolicy.isRetryableHttp(503))
+        assertTrue(SyncPolicy.isRetryableHttp(-1))
     }
 
     @Test

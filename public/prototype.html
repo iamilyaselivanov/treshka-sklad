@@ -2867,6 +2867,32 @@ const accounts = [];
 const notifications = [];
 let accountSeq = 0;
 let notificationSeq = 0;
+function maxRecordNumber(rows, kind){
+  return (rows||[]).reduce((max,row)=>{
+    if(kind && row.kind!==kind) return max;
+    const match=String(row.no||'').match(/(\d+)\s*$/);
+    return match ? Math.max(max,Number(match[1])) : max;
+  },0);
+}
+let documentSeq = {
+  defekt: Math.max(99 + docs.filter(d=>d.kind==='defekt').length, maxRecordNumber(docs,'defekt')),
+  work: Math.max(199 + docs.filter(d=>d.kind==='work').length, maxRecordNumber(docs,'work')),
+};
+let externalIssueSeq = Math.max(19 + extIssues.length, maxRecordNumber(extIssues));
+function nextDocumentNo(kind){
+  const prefix=kind==='work'?'АВР-':'ДФ-';
+  const floor=kind==='work'?199:99;
+  documentSeq[kind]=Math.max(floor,Number(documentSeq[kind])||0,maxRecordNumber(docs,kind))+1;
+  return prefix+documentSeq[kind];
+}
+function nextExternalIssueNo(){
+  externalIssueSeq=Math.max(19,Number(externalIssueSeq)||0,maxRecordNumber(extIssues))+1;
+  return 'ВН-'+String(externalIssueSeq).padStart(3,'0');
+}
+function newBusinessRecordId(prefix){
+  if(globalThis.crypto&&typeof globalThis.crypto.randomUUID==='function') return prefix+'-'+globalThis.crypto.randomUUID();
+  return prefix+'-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
+}
 let currentAccountId = null;
 
 /* ================= РОЛИ И АУДИТ ================= */
@@ -3064,7 +3090,7 @@ function serializeAppState(){
     schemaVersion: APP_SCHEMA_VERSION,
     savedAt: nowTimeStr(),
     itemSeq, categoriesList, componentSubcats, currentRole, currentUserPost, currentAccountId,
-    accountSeq, notificationSeq, accounts, notifications,
+    accountSeq, notificationSeq, documentSeq, externalIssueSeq, accounts, notifications,
     items, posts, docs, extIssues, stockTransfers, inventoryActs, auditLog,
   };
 }
@@ -3170,6 +3196,11 @@ function applyAppState(saved){
       : (s.currentRole && ROLES[s.currentRole]) ? s.currentRole : currentRole;
     const currentUserPostNext = s.currentUserPost ? s.currentUserPost : currentUserPost;
     const currentAccountIdNext=typeof s.currentAccountId==='string'?s.currentAccountId:null;
+    const documentSeqNext={
+      defekt:Math.max(99+s.docs.filter(d=>d.kind==='defekt').length,maxRecordNumber(s.docs,'defekt'),Number(s.documentSeq?.defekt)||0),
+      work:Math.max(199+s.docs.filter(d=>d.kind==='work').length,maxRecordNumber(s.docs,'work'),Number(s.documentSeq?.work)||0),
+    };
+    const externalIssueSeqNext=Math.max(19+extIssuesNext.length,maxRecordNumber(extIssuesNext),Number(s.externalIssueSeq)||0);
 
     // Точка применения — все поля выше уже провалидированы, здесь только
     // присваивание/push в уже гарантированно корректные массивы.
@@ -3190,6 +3221,8 @@ function applyAppState(saved){
     currentAccountId=currentAccountIdNext;
     accountSeq=typeof s.accountSeq==='number'?s.accountSeq:0;
     notificationSeq=typeof s.notificationSeq==='number'?s.notificationSeq:0;
+    documentSeq=documentSeqNext;
+    externalIssueSeq=externalIssueSeqNext;
     return true;
   }catch(e){
     console.error('applyAppState: сохранённые данные повреждены, in-memory демо-данные НЕ затёрты:', e);
@@ -3217,6 +3250,10 @@ function refreshNativeSyncStatus(){
   const bridge=nativeSyncBridge();if(!bridge||typeof bridge.status!=='function')return _nativeSyncStatus;
   try{_nativeSyncStatus=JSON.parse(bridge.status());}catch(e){console.warn('Не удалось прочитать статус sync',e);}
   return _nativeSyncStatus;
+}
+function nativeRoleCanAdminister(status){
+  const s=status||refreshNativeSyncStatus();
+  return ['owner','admin'].includes(String(s&&s.serverRole||''));
 }
 window.onNativeSyncStatus=function(raw){
   try{_nativeSyncStatus=JSON.parse(raw);if(currentTab==='more'&&$('content'))views.more();}catch(e){console.error('Некорректный статус sync',e);}
@@ -4107,10 +4144,11 @@ function renderNotifications(){
 }
 function renderServerSettings(){
   const s=refreshNativeSyncStatus();
+  const nativeAdmin=nativeRoleCanAdminister(s);
   let conflicts=[];
   let conflictLoadError='';
   const bridge=nativeSyncBridge();
-  if(s.configured&&canAdminister()&&bridge&&typeof bridge.listConflicts==='function'){
+  if(s.configured&&bridge&&typeof bridge.listConflicts==='function'){
     try{const loaded=JSON.parse(bridge.listConflicts());if(Array.isArray(loaded))conflicts=loaded;else conflictLoadError=String(loaded&&loaded.error||'Сервер вернул некорректный список конфликтов');}catch(e){conflictLoadError='Не удалось прочитать список конфликтов';console.warn(e);}
   }
   setHdr('Сервер и синхронизация','Offline-first: локальная база работает всегда',true,false);
@@ -4119,6 +4157,7 @@ function renderServerSettings(){
       ? (s.lastError?`⚠ ${esc(s.lastError)}. Неотправленные изменения остаются в защищённой очереди.`:`✓ Сервер подключён. Ревизия ${s.serverRevision||0}, в очереди ${s.pending||0}.`)
       :'Сейчас данные сохраняются только на устройстве. Подключение не очищает локальную базу: первый снимок загружается на пустой сервер.'}</div>
     ${s.configured&&s.serverRoleUnknown?`<div class="progress-note bad">⚠ Не удалось подтвердить роль этого аккаунта после обновления приложения. Войдите в сервер ещё раз: до подтверждения роли разрешение конфликтов и экспорт резервных копий заблокированы.</div>`:''}
+    ${s.configured&&!nativeAdmin&&Number(s.conflicts||0)>0?`<div class="progress-note bad">⚠ Обнаружено конфликтов: ${Number(s.conflicts||0)}. Вы можете безопасно принять серверную версию; повтор локальной версии и экспорт доступны владельцу или администратору.</div>`:''}
     ${conflictLoadError?`<div class="progress-note bad">⚠ ${esc(conflictLoadError)}</div>`:''}
     <div class="card static">
       <div class="fld"><label>Адрес API (только HTTPS)</label><input id="serverUrl" value="${esc(s.baseUrl||'')}" placeholder="https://sklad.example.ru"></div>
@@ -4126,8 +4165,8 @@ function renderServerSettings(){
       <div class="fld"><label>Пароль</label><input id="serverPassword" type="password" autocomplete="current-password"></div>
       <button class="btn primary" onclick="connectServer()">Подключить и синхронизировать</button>
     </div>
-    ${s.configured?`<button class="btn green" onclick="nativeSyncBridge().syncNow();toast('Синхронизация запущена')">⟳ Синхронизировать сейчас</button>${['owner','admin'].includes(String(s.serverRole||''))&&Number(s.conflictBackups||0)>0?`<button class="btn ghost" onclick="exportLatestConflictBackup()">⤓ Экспорт последней резервной копии конфликта</button>`:''}<button class="btn ghost" onclick="disconnectServer()">Отключить сервер на этом устройстве</button>`:''}
-    ${conflicts.length?`<div class="sec">Конфликты без потери данных</div>${conflicts.map(c=>{const skipped=Math.max(0,Number(c.serverChanges||0));const localSafe=Boolean(c.canKeepLocal);return `<div class="card static"><div class="t">Устройство ${esc(c.deviceId)}</div><div class="s">Локальная ревизия ${Number(c.baseRevision||0)}, серверная ${Number(c.serverRevision||0)}. ${skipped?`На сервере уже ${skipped} новых ревизий — старый полный снимок не будет отправлен поверх них.`:'Обе копии сохранены.'}</div><button class="fbtn" style="width:100%;margin-top:8px" onclick="resolveServerConflict(${c.id},'server')">Оставить серверную версию</button><button class="fbtn" style="width:100%;margin-top:6px" ${localSafe?`onclick="resolveServerConflict(${c.id},'local')"`:'disabled'}>${localSafe?'Повторить локальную версию':'Локальная версия защищена от опасной перезаписи'}</button></div>`;}).join('')}`:''}
+    ${s.configured?`<button class="btn green" onclick="nativeSyncBridge().syncNow();toast('Синхронизация запущена')">⟳ Синхронизировать сейчас</button>${nativeAdmin&&Number(s.conflictBackups||0)>0?`<button class="btn ghost" onclick="exportLatestConflictBackup()">⤓ Экспорт последней резервной копии конфликта</button>`:''}<button class="btn ghost" onclick="disconnectServer()">Отключить сервер на этом устройстве</button>`:''}
+    ${conflicts.length?`<div class="sec">Конфликты без потери данных</div>${conflicts.map(c=>{const skipped=Math.max(0,Number(c.serverChanges||0));const localSafe=nativeAdmin&&Boolean(c.canKeepLocal);return `<div class="card static"><div class="t">Устройство ${esc(c.deviceId)}</div><div class="s">Локальная ревизия ${Number(c.baseRevision||0)}, серверная ${Number(c.serverRevision||0)}. ${skipped?`На сервере уже ${skipped} новых ревизий — старый полный снимок не будет отправлен поверх них.`:'Обе копии сохранены.'}</div><button class="fbtn" style="width:100%;margin-top:8px" onclick="resolveServerConflict(${c.id},'server')">Оставить серверную версию</button>${nativeAdmin?`<button class="fbtn" style="width:100%;margin-top:6px" ${localSafe?`onclick="resolveServerConflict(${c.id},'local')"`:'disabled'}>${localSafe?'Повторить локальную версию':'Локальная версия защищена от опасной перезаписи'}</button>`:''}</div>`;}).join('')}`:''}
     <div class="sec">Защита данных</div>
     <div class="card static"><div class="s" style="color:var(--ink);line-height:1.55">Каждое изменение сначала атомарно записывается в SQLite вместе с durable outbox. Сервер принимает mutationId только один раз. Перед принятием серверной версии приложение сохраняет фактически удаляемые локальные снимки в приватной резервной копии на устройстве. В «Загрузки» она попадает только по отдельной команде экспорта.</div></div>`;
 }
@@ -4135,7 +4174,7 @@ window.onTreshkaServerRoleChanged=function(){
   if($('serverUrl'))renderServerSettings();
 };
 function resolveServerConflict(id,decision){
-  if(!canAdminister()){toast('Решение конфликтов доступно только владельцу или администратору');return false;}
+  if(decision==='local'&&!nativeRoleCanAdminister()){toast('Локальную версию может повторить только владелец или администратор');return false;}
   if(!confirm(decision==='local'?'Повторить локальную версию можно только при отсутствии более новых серверных ревизий. Продолжить?':'Оставить серверную версию? Фактически удаляемые несинхронизированные снимки будут сохранены в приватной резервной копии приложения, затем будет применена серверная копия.'))return false;
   const bridge=nativeSyncBridge();
   try{const result=JSON.parse(bridge.resolveConflict(id,decision));if(result.confirmationRequired){toast(result.error||'Требуется подтверждение на устройстве');return false;}if(result.error){toast(result.error);return false;}toast(result.backupSaved===false?'✓ Конфликт решён без резервной копии':'✓ Конфликт решён, приватная резервная копия сохранена');renderServerSettings();return true;}
@@ -4147,7 +4186,7 @@ function onNativeConflictResolutionCompleted(raw){
 }
 window.onNativeConflictResolutionCompleted=onNativeConflictResolutionCompleted;
 function exportLatestConflictBackup(){
-  if(!canAdminister()){toast('Экспорт доступен только владельцу или администратору');return false;}
+  if(!nativeRoleCanAdminister()){toast('Экспорт доступен только владельцу или администратору');return false;}
   const bridge=nativeSyncBridge();
   if(!bridge||typeof bridge.exportLatestConflictBackup!=='function'){toast('Экспорт доступен только в Android-приложении');return false;}
   try{
@@ -4890,7 +4929,7 @@ function submitExtIssue(){
   const dueRaw=$('ei_due').value.trim();
   if(dueRaw && !parseRuDate(dueRaw)){ toast('Срок возврата укажите реальной датой в формате ДД.ММ.ГГГГ'); return; }
   if(!extDraftLines.length && !addExtLine()) return;
-  const finalLines=[],no='ВН-0'+(20+extIssues.length);
+  const finalLines=[],no=nextExternalIssueNo();
   if(!runStockTransaction('Выдача на сторону',()=>{
     extDraftLines.forEach(l=>{
       const i=item(l.id),q=l.q;
@@ -4899,7 +4938,7 @@ function submitExtIssue(){
       i.history.push({d:todayStr(),type:'out',text:`Выдача на сторону · ${to}`,q:`−${q} ${i.unit}`});finalLines.push({id:l.id,q});
     });
     if(!finalLines.length)throw new Error('Нет позиций');
-    extIssues.unshift({no,to,date:todayStr(),createdAt:Date.now(),status:'Выдано',due:dueRaw||'—',items:finalLines,note:$('ei_note').value||''});
+    extIssues.unshift({id:newBusinessRecordId('external-issue'),no,to,date:todayStr(),createdAt:Date.now(),status:'Выдано',due:dueRaw||'—',items:finalLines,note:$('ei_note').value||''});
     logAction('Выдача на сторону оформлена',`${no}: ${to}`);
   }))return;
   toast('✓ Выдача '+no+' оформлена');
@@ -5694,10 +5733,10 @@ function submitDefekt(){
     items.push(newItem);itemId=newItem.id;
     logAction('Создана карточка товара из дефектовки',`${newItem.name} (${newItem.sku})`,null,newItem.id);
   }
-  const newNo='ДФ-'+(100+docs.filter(d=>d.kind==='defekt').length);
+  const newNo=nextDocumentNo('defekt');
   let postName = $('f_post').value;
   if(isRabotnikRestrictedToPost()) postName = currentUserPost;
-  docs.unshift({no:newNo, kind:'defekt', status:'Закрыт', date, createdAt:Date.now(),
+  docs.unshift({id:newBusinessRecordId('defect-act'), no:newNo, kind:'defekt', status:'Закрыт', date, createdAt:Date.now(),
     orderNo:$('f_order').value,
     serial:serial, item:itemLabel, itemId,
     from:$('f_from').value, callsign:$('f_callsign').value, post:postName,
@@ -5738,10 +5777,10 @@ function createWorkFromDefekt(defektNo){
   if(!d||d.kind!=='defekt'||d.status!=='Закрыт'){toast('Сначала завершите акт дефектовки');return;}
   if(String(d.verdict||'').includes('Не подлежит')){toast('Для неремонтопригодного изделия акт ремонта создать нельзя — оформите списание');return;}
   if(d.workDoc){ toast('Акт выполненных работ уже создан: '+d.workDoc); setTimeout(()=>openDoc(docs.indexOf(docs.find(x=>x.no===d.workDoc))), 300); return; }
-  const newNo = 'АВР-'+(200+docs.filter(x=>x.kind==='work').length);
+  const newNo = nextDocumentNo('work');
   const createdAt=Date.now();
   const issuedSnapshot=items.filter(i=>i.id!==d.itemId&&(i.posts[d.post]||0)>0).map(i=>({id:i.id,q:i.posts[d.post]}));
-  docs.unshift({no:newNo, kind:'work', status:'Черновик', date:todayStr(), createdAt, orderNo:d.orderNo,
+  docs.unshift({id:newBusinessRecordId('work-act'), no:newNo, kind:'work', status:'Черновик', date:todayStr(), createdAt, orderNo:d.orderNo,
     serial:d.serial, item:d.item, itemId:d.itemId, defektDoc:defektNo, applicationPhotoSource:defektNo, post:d.post, planQty:null, factQty:null,
     participants:[], works:[], materials:[], issuedSnapshot, actionTypes:[], resultText:'', otkPassed:false});
   d.workDoc = newNo;

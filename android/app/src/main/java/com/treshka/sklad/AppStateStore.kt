@@ -136,8 +136,13 @@ class AppStateStore(context: Context) :
                 } else {
                     "conflict=0 AND base_revision=0"
                 }
+                val resetBaseRevision = if (migration == LegacyOutboxMigration.ALL_PENDING_ROWS) {
+                    ", base_revision=0"
+                } else {
+                    ""
+                }
                 db.execSQL(
-                    "UPDATE sync_outbox SET conflict=1, last_error=? WHERE $selection",
+                    "UPDATE sync_outbox SET conflict=1$resetBaseRevision, last_error=? WHERE $selection",
                     arrayOf(reason),
                 )
                 db.execSQL(
@@ -922,6 +927,14 @@ class AppStateStore(context: Context) :
     fun markSyncOk() {
         writableDatabase.execSQL(
             "UPDATE sync_config SET last_sync_at=?, last_error=NULL WHERE id=1",
+            arrayOf(System.currentTimeMillis()),
+        )
+    }
+
+    @Synchronized
+    fun markSyncContact() {
+        writableDatabase.execSQL(
+            "UPDATE sync_config SET last_sync_at=? WHERE id=1",
             arrayOf(System.currentTimeMillis()),
         )
     }

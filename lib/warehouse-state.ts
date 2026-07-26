@@ -107,7 +107,8 @@ function normalizedAssignment(value: unknown) {
 
 function belongsToAssignment(value: unknown, assignment: string) {
   const entry = record(value);
-  return normalizedAssignment(entry?.post ?? entry?.name) === assignment;
+  return Boolean(assignment)
+    && normalizedAssignment(entry?.post ?? entry?.name) === assignment;
 }
 
 /**
@@ -158,33 +159,127 @@ export function projectWarehouseStateForUser(
 function stableRecordKey(value: unknown) {
   const entry = record(value);
   if (!entry) return "";
-  for (const key of ["id", "no", "number", "eventId"]) {
+  for (const key of ["id", "eventId"]) {
     const candidate = String(entry[key] ?? "").trim();
     if (candidate) return `${key}:${candidate}`;
+  }
+  const number = String(entry.no ?? entry.number ?? "").trim();
+  if (number) {
+    // Legacy records did not have immutable ids. A document number alone is
+    // positional and used to be reusable after deletion, so include immutable
+    // creation attributes in the compatibility key.
+    const discriminator = [
+      entry.kind,
+      Number(entry.createdAt) > 0 ? entry.createdAt : entry.date,
+      entry.itemId ?? entry.item,
+      entry.orderNo,
+      entry.serial,
+      entry.to,
+    ].map((part) => String(part ?? "").trim()).join("|");
+    return `number:${number}|${discriminator}`;
   }
   return "";
 }
 
+const MUTABLE_HISTORY_FIELDS = new Set([
+  "status",
+  "materials",
+  "participants",
+  "works",
+  "issuedSnapshot",
+  "actionTypes",
+  "resultText",
+  "otkPassed",
+  "planQty",
+  "factQty",
+  "mismatchDecision",
+  "mismatchReason",
+  "reworkReason",
+  "approvalNote",
+  "approvalReason",
+  "approvedBy",
+  "approvedAt",
+  "submittedAt",
+  "warehouseAcceptedAt",
+  "warehouseAcceptedBy",
+  "returnedAt",
+  "acceptedAt",
+  "workDoc",
+  "applicationPhoto",
+  "applicationPhotoMedia",
+  "photo",
+  "photoMedia",
+  "updatedAt",
+]);
+
+function canonicalHistoryValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalHistoryValue);
+  const entry = record(value);
+  if (!entry) return value;
+  return Object.fromEntries(
+    Object.keys(entry)
+      .sort()
+      .filter((key) => !(key === "createdAt" && Number(entry[key]) === 0))
+      .map((key) => [key, canonicalHistoryValue(entry[key])]),
+  );
+}
+
+function canonicalHistoryJson(value: unknown) {
+  return JSON.stringify(canonicalHistoryValue(value));
+}
+
+function mutableRecordPreserved(previousValue: unknown, nextValue: unknown) {
+  const previous = record(previousValue);
+  const next = record(nextValue);
+  if (!previous || !next) return canonicalHistoryJson(previousValue) === canonicalHistoryJson(nextValue);
+  for (const key of Object.keys(previous)) {
+    if (!(key in next)) return false;
+    if (
+      !MUTABLE_HISTORY_FIELDS.has(key)
+      && canonicalHistoryJson(previous[key]) !== canonicalHistoryJson(next[key])
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function mutableHistoryPreserved(previousValue: unknown, nextValue: unknown) {
   const nextRows = rows(nextValue);
-  const nextKeys = new Set(nextRows.map(stableRecordKey).filter(Boolean));
-  const nextUnkeyed = new Set(
-    nextRows.filter((value) => !stableRecordKey(value)).map((value) => JSON.stringify(value)),
-  );
+  const nextByKey = new Map<string, unknown>();
+  for (const value of nextRows) {
+    const key = stableRecordKey(value);
+    if (!key) continue;
+    if (nextByKey.has(key)) return false;
+    nextByKey.set(key, value);
+  }
+  const nextUnkeyed = new Map<string, number>();
+  for (const value of nextRows.filter((entry) => !stableRecordKey(entry))) {
+    const serialized = canonicalHistoryJson(value);
+    nextUnkeyed.set(serialized, (nextUnkeyed.get(serialized) ?? 0) + 1);
+  }
   return rows(previousValue).every((value) => {
     const key = stableRecordKey(value);
-    return key ? nextKeys.has(key) : nextUnkeyed.has(JSON.stringify(value));
+    if (key) {
+      const next = nextByKey.get(key);
+      return next != null && mutableRecordPreserved(value, next);
+    }
+    const serialized = canonicalHistoryJson(value);
+    const count = nextUnkeyed.get(serialized) ?? 0;
+    if (count <= 0) return false;
+    nextUnkeyed.set(serialized, count - 1);
+    return true;
   });
 }
 
 function immutableHistoryPreserved(previousValue: unknown, nextValue: unknown) {
   const counts = new Map<string, number>();
   for (const value of rows(nextValue)) {
-    const serialized = JSON.stringify(value);
+    const serialized = canonicalHistoryJson(value);
     counts.set(serialized, (counts.get(serialized) ?? 0) + 1);
   }
   for (const value of rows(previousValue)) {
-    const serialized = JSON.stringify(value);
+    const serialized = canonicalHistoryJson(value);
     const count = counts.get(serialized) ?? 0;
     if (count <= 0) return false;
     counts.set(serialized, count - 1);
@@ -192,27 +287,53 @@ function immutableHistoryPreserved(previousValue: unknown, nextValue: unknown) {
   return true;
 }
 
+function rollingHistoryPreserved(previousValue: unknown, nextValue: unknown) {
+  const previousRows = rows(previousValue);
+  const nextRows = rows(nextValue);
+  if (nextRows.length < previousRows.length) return false;
+  const previousCounts = new Map<string, number>();
+  const nextCounts = new Map<string, number>();
+  for (const value of previousRows) {
+    const serialized = canonicalHistoryJson(value);
+    previousCounts.set(serialized, (previousCounts.get(serialized) ?? 0) + 1);
+  }
+  for (const value of nextRows) {
+    const serialized = canonicalHistoryJson(value);
+    nextCounts.set(serialized, (nextCounts.get(serialized) ?? 0) + 1);
+  }
+  let missing = 0;
+  let added = 0;
+  for (const [serialized, count] of previousCounts) {
+    missing += Math.max(0, count - (nextCounts.get(serialized) ?? 0));
+  }
+  for (const [serialized, count] of nextCounts) {
+    added += Math.max(0, count - (previousCounts.get(serialized) ?? 0));
+  }
+  return missing <= added;
+}
+
 /**
- * Storekeepers may append warehouse history and advance document statuses, but
- * cannot erase already recorded documents, movements, inventory acts or audit
- * rows by submitting a handcrafted full snapshot.
+ * Every writer except the owner may append warehouse history and advance
+ * document statuses, but cannot erase or replace already recorded business
+ * history by submitting a handcrafted full snapshot.
  */
 export function warehouseHistoryMutationIssue(
   previous: WarehouseState,
   next: WarehouseState,
   role: string,
 ) {
-  if (role !== "storekeeper") return null;
+  if (role === "owner") return null;
   if (
     !mutableHistoryPreserved(previous.docs, next.docs)
     || !mutableHistoryPreserved(previous.extIssues, next.extIssues)
     || !immutableHistoryPreserved(previous.stockTransfers, next.stockTransfers)
     || !immutableHistoryPreserved(previous.inventoryActs, next.inventoryActs)
-    || !immutableHistoryPreserved(previous.auditLog, next.auditLog)
+    || !rollingHistoryPreserved(previous.auditLog, next.auditLog)
+    || !rollingHistoryPreserved(previous.notifications, next.notifications)
   ) {
     return {
       status: 403 as const,
-      error: "Кладовщик не может удалять документы и историю складских операций",
+      error: "Эта роль не может удалять или подменять документы и историю складских операций",
     };
   }
   return null;

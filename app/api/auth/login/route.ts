@@ -62,7 +62,7 @@ export async function POST(request: Request) {
     await Promise.all([
       new Promise((resolve) => setTimeout(resolve, 350)),
       thresholdCrossed
-        ? audit(null, "login_blocked", "Превышен порог неудачных попыток входа")
+        ? audit(null, "login_blocked", "Превышен порог неудачных попыток входа").catch(() => undefined)
         : Promise.resolve(),
     ]);
     const blocked = reservation.blocked || globalFailure.blocked;
@@ -76,10 +76,13 @@ export async function POST(request: Request) {
   await env.DB.prepare("UPDATE users SET last_login_at = ? WHERE id = ?")
     .bind(new Date().toISOString(), row.id)
     .run();
-  await clearThrottle(throttleKey);
+  await Promise.all([
+    clearThrottle(throttleKey),
+    clearThrottle(globalThrottleKey),
+  ]);
   const [session] = await Promise.all([
     createSession(row.id),
-    audit(user, "login", "Вход в систему"),
+    audit(user, "login", "Вход в систему").catch(() => undefined),
   ]);
   return Response.json({ user }, { headers: { "set-cookie": session.cookie } });
 }

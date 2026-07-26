@@ -171,7 +171,40 @@ test("storekeeper may advance documents but cannot erase warehouse history", () 
   });
   assert.equal(warehouseHistoryMutationIssue(previous, advanced, "storekeeper"), null);
   assert.equal(warehouseHistoryMutationIssue(previous, state(), "storekeeper")?.status, 403);
-  assert.equal(warehouseHistoryMutationIssue(previous, state(), "admin"), null);
+  assert.equal(warehouseHistoryMutationIssue(previous, state(), "admin")?.status, 403);
+  assert.equal(warehouseHistoryMutationIssue(previous, state(), "owner"), null);
+});
+
+test("history comparison accepts schema defaults but rejects same-number replacement and field stripping", () => {
+  const previous = state({
+    docs: [{
+      no: "АВР-7",
+      kind: "work",
+      status: "Черновик",
+      post: "ТЭЧ",
+      itemId: "item-7",
+      materials: [{ id: "material-1", q: 1 }],
+    }],
+    stockTransfers: [{ no: "ПМ-7", post: "ТЭЧ", items: [] }],
+  });
+  const migrated = state({
+    docs: [{ ...previous.docs[0], createdAt: 0, status: "Ожидает согласования" }],
+    stockTransfers: [{ createdAt: 0, items: [], post: "ТЭЧ", no: "ПМ-7" }],
+  });
+  assert.equal(warehouseHistoryMutationIssue(previous, migrated, "storekeeper"), null);
+  assert.equal(
+    warehouseHistoryMutationIssue(previous, state({ docs: [{ no: "АВР-7" }], stockTransfers: previous.stockTransfers }), "storekeeper")?.status,
+    403,
+  );
+  const reusedNumber = state({
+    docs: [{
+      ...previous.docs[0],
+      post: "НРТК",
+      itemId: "different-item",
+    }],
+    stockTransfers: previous.stockTransfers,
+  });
+  assert.equal(warehouseHistoryMutationIssue(previous, reusedNumber, "admin")?.status, 403);
 });
 
 test("worker state projection contains only the assigned post slice", () => {
@@ -203,4 +236,10 @@ test("worker state projection contains only the assigned post slice", () => {
   assert.equal(projected.items[0].stock, 0);
   assert.deepEqual(projected.items[0].posts, { "ТЭЧ": 2 });
   assert.equal(full.items[0].stock, 100, "projection must not mutate server truth");
+
+  const unassigned = projectWarehouseStateForUser(full, { role: "worker", assignment: "   " });
+  assert.deepEqual(unassigned.posts, []);
+  assert.deepEqual(unassigned.docs, []);
+  assert.deepEqual(unassigned.auditLog, []);
+  assert.deepEqual(unassigned.items[0].posts, {});
 });

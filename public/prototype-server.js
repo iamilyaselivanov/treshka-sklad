@@ -17,6 +17,8 @@
     nextAttemptAt: 0,
     lastServerStateJson: "",
     lastServerEtag: "",
+    partial: false,
+    mediaMigrationPromise: null,
   };
   const push = {
     registering: false,
@@ -281,6 +283,11 @@
 
   function normalizedState() {
     const state = serializeAppState();
+    // Keep the complete local journal available for the UI/export, but upload
+    // a rolling server window. These arrays are operational feeds, unlike
+    // inventoryActs, and replacing them here does not mutate application data.
+    state.auditLog = Array.isArray(state.auditLog) ? state.auditLog.slice(0, 2_000) : [];
+    state.notifications = Array.isArray(state.notifications) ? state.notifications.slice(0, 2_000) : [];
     // Аккаунты и пароли хранятся отдельной серверной системой авторизации.
     state.accounts = [];
     state.currentAccountId = null;
@@ -305,10 +312,19 @@
   }
 
   function canUploadState() {
-    return !!sync.user && ["owner", "admin", "storekeeper"].includes(sync.user.role);
+    return !!sync.user
+      && !sync.partial
+      && ["owner", "admin", "storekeeper"].includes(sync.user.role);
   }
 
   function adoptServerUser(user) {
+    const previousAuthorization = sync.user
+      ? `${sync.user.id}|${sync.user.role}|${sync.user.assignment || ""}`
+      : "";
+    const nextAuthorization = user
+      ? `${user.id}|${user.role}|${user.assignment || ""}`
+      : "";
+    const authorizationChanged = previousAuthorization !== nextAuthorization;
     const changed = !sync.user || sync.user.id !== user.id;
     sync.user = user;
     applyServerRole();
@@ -317,6 +333,7 @@
       loadPushQueue();
       installServerAccountControls();
     }
+    return authorizationChanged;
   }
 
   const localRenderAccounts = window.renderAccounts;
@@ -423,31 +440,41 @@
   }
 
   async function migrateEmbeddedPhotos() {
-    const targets = [];
-    for (const entry of items) {
-      if (typeof entry.photo === "string" && entry.photo.startsWith("data:image/")) {
-        targets.push({ entry, photoKey: "photo", mediaKey: "photoMedia" });
-      }
-    }
-    for (const documentEntry of docs) {
-      if (documentEntry.kind === "defekt"
-        && typeof documentEntry.applicationPhoto === "string"
-        && documentEntry.applicationPhoto.startsWith("data:image/")) {
-        targets.push({ entry: documentEntry, photoKey: "applicationPhoto", mediaKey: "applicationPhotoMedia" });
-      }
-    }
-    for (const target of targets) {
-      const original = target.entry[target.photoKey];
-      try {
-        const stored = await window.treshkaStorePhoto(original);
-        if (target.entry[target.photoKey] === original) {
-          target.entry[target.photoKey] = stored.url;
-          target.entry[target.mediaKey] = stored;
+    if (sync.mediaMigrationPromise) return sync.mediaMigrationPromise;
+    sync.mediaMigrationPromise = (async () => {
+      const targets = [];
+      for (const entry of items) {
+        if (typeof entry.photo === "string" && entry.photo.startsWith("data:image/")) {
+          targets.push({ entry, photoKey: "photo", mediaKey: "photoMedia" });
         }
-      } catch (error) {
-        console.warn("embedded photo migration deferred", error);
-        break;
       }
+      for (const documentEntry of docs) {
+        if (documentEntry.kind === "defekt"
+          && typeof documentEntry.applicationPhoto === "string"
+          && documentEntry.applicationPhoto.startsWith("data:image/")) {
+          targets.push({ entry: documentEntry, photoKey: "applicationPhoto", mediaKey: "applicationPhotoMedia" });
+        }
+      }
+      for (const target of targets) {
+        const original = target.entry[target.photoKey];
+        try {
+          const stored = await window.treshkaStorePhoto(original);
+          if (target.entry[target.photoKey] === original) {
+            target.entry[target.photoKey] = stored.url;
+            target.entry[target.mediaKey] = stored;
+          } else if (stored.key) {
+            sync.pendingMediaDeletes.add(stored.key);
+          }
+        } catch (error) {
+          console.warn("embedded photo migration deferred", error);
+          break;
+        }
+      }
+    })();
+    try {
+      return await sync.mediaMigrationPromise;
+    } finally {
+      sync.mediaMigrationPromise = null;
     }
   }
 
@@ -467,6 +494,7 @@
       throw new Error("Сервер вернул несовместимые данные");
     }
     sync.revision = Number(snapshot.revision || 0);
+    sync.partial = Boolean(snapshot.partial);
     // Never retain references to the live application graph. applyAppState()
     // intentionally reuses nested objects, so a reference cache would be
     // mutated by later local edits and could no longer represent server truth.
@@ -490,6 +518,8 @@
         revision: sync.revision,
         state: JSON.parse(sync.lastServerStateJson),
         user: sync.user,
+        partial: sync.partial,
+        authorizationChanged: false,
         unchanged: true,
       };
     }
@@ -503,7 +533,7 @@
     // every later successful fetch before deciding whether local changes may be
     // uploaded; otherwise an owner is misclassified as read-only and poll can
     // overwrite their offline work.
-    adoptServerUser(data.user);
+    data.authorizationChanged = adoptServerUser(data.user);
     sync.lastServerStateJson = data.state == null ? "" : JSON.stringify(data.state);
     sync.lastServerEtag = response.headers.get("etag") || "";
     noteSyncSuccess();
@@ -520,7 +550,7 @@
       const response = await fetchWithTimeout("/api/state", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ state, expectedRevision: sync.revision }),
+        body: JSON.stringify({ state, expectedRevision: sync.revision, partial: sync.partial }),
       });
       const data = await response.json();
       if (response.status === 409 && data.conflict) {
@@ -575,6 +605,14 @@
       const snapshot = await fetchSnapshot();
       const localPayload = JSON.stringify(normalizedState());
       const remoteRevision = Number(snapshot.revision || 0);
+      if (
+        snapshot.state
+        && (snapshot.authorizationChanged || Boolean(snapshot.partial) !== sync.partial)
+      ) {
+        applyRemoteSnapshot(snapshot, false);
+        noteSyncSuccess();
+        return;
+      }
       if (remoteRevision <= sync.revision) {
         // Worker is a server-authoritative read-only role. Reapply the current
         // snapshot if local UI code changed state that it is not allowed to PUT.
@@ -662,6 +700,7 @@
     try {
       const data = await fetchSnapshot();
       sync.revision = data.revision || 0;
+      sync.partial = Boolean(data.partial);
       if (data.state) {
         if (!applyAppState(data.state)) throw new Error("Сервер вернул несовместимые данные");
       } else {
@@ -704,6 +743,7 @@
       revision: sync.revision,
       payloadBytes: sync.lastUploaded.length,
       conflict: sync.conflict,
+      partial: sync.partial,
       lastError: sync.lastError,
       consecutiveFailures: sync.consecutiveFailures,
       nextAttemptAt: sync.nextAttemptAt,

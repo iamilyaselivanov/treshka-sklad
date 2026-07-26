@@ -106,6 +106,8 @@ test("security hardening keeps state writes privileged and recovery throttling g
   assert.match(stateRoute, /warehouseDeletionPolicy\(previous, state, auth\.user\.role\)/);
   assert.match(stateRoute, /warehouseHistoryMutationIssue\(previous, state, auth\.user\.role\)/);
   assert.match(stateRoute, /projectWarehouseStateForUser\(parsedState, auth\.user\)/);
+  assert.match(stateRoute, /partial: auth\.user\.role === "worker"/);
+  assert.match(stateRoute, /if \(body\.partial === true\)/);
   assert.match(stateRoute, /readJsonObject\(request, MAX_STATE_REQUEST_BYTES\)/);
   assert.match(stateRoute, /terminal: true, recover: "server"/);
   assert.match(stateRoute, /SELECT item_id AS itemId FROM warehouse_state_items/);
@@ -165,12 +167,14 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.match(androidStore, /UPDATE sync_outbox SET attempts=\? WHERE mutation_id=\? AND conflict=0/);
   assert.doesNotMatch(androidStore, /SET attempts=\?, base_revision=\?/);
   assert.match(androidStore, /LegacyOutboxMigration\.ALL_PENDING_ROWS/);
-  assert.match(androidStore, /UPDATE sync_outbox SET conflict=1, last_error=\?/);
+  assert.match(androidStore, /resetBaseRevision/);
+  assert.match(androidStore, /", base_revision=0"/);
   assert.doesNotMatch(androidStore, /SET base_revision = COALESCE/);
   assert.match(androidStore, /db\.delete\("sync_outbox", "attempts = 0 AND conflict = 0"/);
   assert.doesNotMatch(androidStore, /fun markMutationAttempted\(/);
   assert.match(androidSync, /store\.markMutationConflicted\(pending\.mutationId, message\)/);
   assert.match(androidSync, /store\.sendablePendingCount\(\) == 0/);
+  assert.match(androidSync, /store\.markSyncContact\(\)/);
   assert.match(androidSync, /store\.savePendingRemoteSnapshot\(payload, revision\)/);
   assert.match(androidSync, /store\.acceptServerSnapshot\(id, allowDiscardWithoutBackup\)/);
   assert.doesNotMatch(androidSync, /localExportConfirmed/);
@@ -215,6 +219,11 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.match(androidStore, /"serverRoleUnknown"/);
   assert.match(prototype, /Не удалось подтвердить роль этого аккаунта/);
   assert.match(prototype, /conflictLoadError/);
+  assert.match(prototype, /nativeRoleCanAdminister/);
+  assert.match(browserSync, /state\.auditLog = Array\.isArray\(state\.auditLog\).*slice\(0, 2_000\)/);
+  assert.match(browserSync, /!sync\.partial/);
+  assert.match(browserSync, /authorizationChanged/);
+  assert.match(browserSync, /mediaMigrationPromise/);
   assert.match(prototype, /window\.onTreshkaServerRoleChanged/);
   assert.match(browserSync, /window\.onTreshkaServerRoleChanged\(sync\.user\.role\)/);
   assert.match(serverContract, /`user\.role` is mandatory/);

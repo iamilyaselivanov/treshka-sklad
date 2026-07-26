@@ -33,6 +33,7 @@ export async function POST(request: Request) {
     || password.length < 8 || password.length > 256
     || assignment.length > 160
     || !allowedRoles.includes(role)
+    || (role === "worker" && !assignmentKey)
   ) {
     return Response.json({ error: "Проверьте позывной, логин, пароль и роль" }, { status: 400 });
   }

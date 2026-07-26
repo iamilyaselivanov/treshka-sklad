@@ -72,11 +72,23 @@ function serverStateFixture() {
   };
 }
 
-async function newHttpServerPage({ role = 'worker', putStatus = 200 } = {}) {
+async function newHttpServerPage({
+  role = 'worker',
+  putStatus = 200,
+  promoteToRole = null,
+  embeddedPhoto = false,
+  mediaDelayMs = 0,
+} = {}) {
   const ctx = await browser.newContext();
   const state = serverStateFixture();
+  if (embeddedPhoto) {
+    state.items[0].photo = 'data:image/png;base64,aGVsbG8=';
+    state.items[0].photoMedia = null;
+  }
   let stateGets = 0;
   let statePuts = 0;
+  let mediaPosts = 0;
+  const putBodies = [];
   await ctx.route('http://treshka.test/**', async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -90,20 +102,22 @@ async function newHttpServerPage({ role = 'worker', putStatus = 200 } = {}) {
     }
     if (url.pathname === '/api/state' && request.method() === 'GET') {
       stateGets += 1;
-      if (stateGets === 1) {
+      if (stateGets === 1 || (stateGets === 2 && promoteToRole)) {
+        const responseRole = stateGets === 2 && promoteToRole ? promoteToRole : role;
         await route.fulfill({
           status: 200,
           contentType: 'application/json',
-          headers: { etag: 'W/"warehouse-main-7-test-scope"' },
+          headers: { etag: `W/"warehouse-main-7-test-${responseRole}"` },
           body: JSON.stringify({
             revision: 7,
             state,
+            partial: responseRole === 'worker',
             user: {
-              id: `test-${role}`,
-              callsign: `Тест ${role}`,
-              login: `test-${role}`,
-              role,
-              assignment: role === 'worker' ? 'ТЭЧ' : '',
+              id: 'test-promotable-user',
+              callsign: `Тест ${responseRole}`,
+              login: 'test-promotable-user',
+              role: responseRole,
+              assignment: responseRole === 'worker' ? 'ТЭЧ' : '',
             },
           }),
         });
@@ -118,12 +132,26 @@ async function newHttpServerPage({ role = 'worker', putStatus = 200 } = {}) {
     }
     if (url.pathname === '/api/state' && request.method() === 'PUT') {
       statePuts += 1;
+      putBodies.push(JSON.parse(request.postData() || '{}'));
       await route.fulfill({
         status: putStatus,
         contentType: 'application/json',
         body: putStatus === 413
           ? JSON.stringify({ error: 'Данные склада превышают безопасный размер 1,5 МБ' })
           : JSON.stringify({ revision: 8 }),
+      });
+      return;
+    }
+    if (url.pathname === '/api/media/images' && request.method() === 'POST') {
+      mediaPosts += 1;
+      if (mediaDelayMs) await new Promise((resolve) => setTimeout(resolve, mediaDelayMs));
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          key: `images/${String(mediaPosts).padStart(8, '0')}-0000-4000-8000-000000000000.png`,
+          url: `/api/media/images?key=images%2F${String(mediaPosts).padStart(8, '0')}-0000-4000-8000-000000000000.png`,
+        }),
       });
       return;
     }
@@ -135,7 +163,8 @@ async function newHttpServerPage({ role = 'worker', putStatus = 200 } = {}) {
   return {
     ctx,
     page,
-    counts: () => ({ stateGets, statePuts }),
+    counts: () => ({ stateGets, statePuts, mediaPosts }),
+    putBodies,
   };
 }
 
@@ -306,6 +335,40 @@ test('#7 — schema migration refuses newer-than-known or unmigratable-older dat
     assert.equal(r.okOlderWithMigration, true, 'must successfully migrate older data when a migration step is registered for it');
   }
   assert.equal(r.okExact, true, 'exact schema version match must still apply normally');
+  await ctx.close();
+});
+
+test('business record ids are immutable and document numbers remain monotonic after deletion', async () => {
+  const { ctx, page } = await newPage();
+  const result = await page.evaluate(() => {
+    const firstDefect = nextDocumentNo('defekt');
+    docs.push({ id: newBusinessRecordId('defect-act'), no: firstDefect, kind: 'defekt' });
+    docs.pop();
+    const secondDefect = nextDocumentNo('defekt');
+
+    const firstExternal = nextExternalIssueNo();
+    extIssues.push({ id: newBusinessRecordId('external-issue'), no: firstExternal });
+    extIssues.pop();
+    const secondExternal = nextExternalIssueNo();
+
+    const ids = [newBusinessRecordId('work-act'), newBusinessRecordId('work-act')];
+    const saved = serializeAppState();
+    return {
+      firstDefect,
+      secondDefect,
+      firstExternal,
+      secondExternal,
+      uniqueIds: ids[0] !== ids[1] && ids.every((id) => id.startsWith('work-act-')),
+      persistedDefectSeq: saved.documentSeq.defekt,
+      persistedExternalSeq: saved.externalIssueSeq,
+    };
+  });
+  const suffix = (value) => Number(value.match(/(\d+)$/)?.[1] ?? 0);
+  assert.equal(suffix(result.secondDefect), suffix(result.firstDefect) + 1);
+  assert.equal(suffix(result.secondExternal), suffix(result.firstExternal) + 1);
+  assert.equal(result.uniqueIds, true);
+  assert.equal(result.persistedDefectSeq, suffix(result.secondDefect));
+  assert.equal(result.persistedExternalSeq, suffix(result.secondExternal));
   await ctx.close();
 });
 
@@ -1060,6 +1123,69 @@ test('review 800c0c9 — a 413 response enters backoff instead of uploading ever
   await ctx.close();
 });
 
+test('review 1c9e809 — the complete local audit remains exportable while the uploaded window stays bounded', async () => {
+  const { ctx, page, counts, putBodies } = await newHttpServerPage({ role: 'owner' });
+  const localCount = await page.evaluate(async () => {
+    auditLog.length = 0;
+    for (let index = 0; index < 2_105; index += 1) {
+      auditLog.push({ id: `audit-${index}`, action: 'Проверка границы' });
+    }
+    await window.treshkaServerSync.flush();
+    return auditLog.length;
+  });
+  assert.equal(localCount, 2_105, 'bounded upload must not delete the local exportable journal');
+  assert.equal(counts().statePuts, 1);
+  assert.equal(putBodies[0].state.auditLog.length, 2_000);
+  assert.equal(putBodies[0].partial, false);
+  await ctx.close();
+});
+
+test('review 1c9e809 — worker projection is replaced before a promoted administrator may upload', async () => {
+  const { ctx, page, counts, putBodies } = await newHttpServerPage({
+    role: 'worker',
+    promoteToRole: 'admin',
+  });
+  const result = await page.evaluate(async () => {
+    items[0].stock = 0;
+    await window.treshkaServerSync.flush();
+    const afterPromotion = {
+      stock: items[0].stock,
+      partial: window.treshkaServerSync.status().partial,
+      role: window.treshkaServerRole(),
+    };
+    items[0].stock = 6;
+    await window.treshkaServerSync.flush();
+    return afterPromotion;
+  });
+  assert.equal(result.role, 'admin');
+  assert.equal(result.partial, false);
+  assert.equal(result.stock, 5, 'full server truth must replace the old worker projection');
+  assert.equal(counts().statePuts, 1, 'the partial graph itself must never be uploaded');
+  assert.equal(putBodies[0].partial, false);
+  assert.equal(putBodies[0].state.items[0].stock, 6);
+  await ctx.close();
+});
+
+test('review 1c9e809 — overlapping 413 recovery reuses one embedded-photo migration', async () => {
+  const { ctx, page, counts } = await newHttpServerPage({
+    role: 'owner',
+    putStatus: 413,
+    embeddedPhoto: true,
+    mediaDelayMs: 500,
+  });
+  for (let attempt = 0; attempt < 20 && counts().mediaPosts === 0; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(counts().mediaPosts, 1, 'startup migration must be in flight');
+  await page.evaluate(async () => {
+    auditLog.unshift({ id: 'force-413-during-photo', action: 'Проверка' });
+    await window.treshkaServerSync.flush();
+  });
+  await new Promise((resolve) => setTimeout(resolve, 650));
+  assert.equal(counts().mediaPosts, 1, '413 recovery must join the in-flight migration');
+  await ctx.close();
+});
+
 test('v1.3 — quantity input accepts only whole numbers and rejects fractions, letters, negatives, zero and exponent notation', async () => {
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => ({
@@ -1333,7 +1459,7 @@ test('closed documents and returned external issues remain renderable after prod
   await ctx.close();
 });
 
-test('server conflict resolution delegates native private backup without trusting a WebView flag', async () => {
+test('server conflict resolution lets every role accept server truth but keeps local replay privileged', async () => {
   const { ctx, page } = await newPage(() => {
     window.confirm = () => true;
     window.__resolvedConflict = null;
@@ -1341,7 +1467,14 @@ test('server conflict resolution delegates native private backup without trustin
       saveExportedFile: () => { throw new Error('automatic public export must not run'); },
     };
     window.AndroidSync = {
-      status: () => JSON.stringify({ configured: true, serverRevision: 4, pending: 1, conflictBackups: 1 }),
+      status: () => JSON.stringify({
+        configured: true,
+        serverRevision: 4,
+        pending: 1,
+        conflicts: 1,
+        conflictBackups: 1,
+        serverRole: 'worker',
+      }),
       listConflicts: () => '[]',
       resolveConflict: (...args) => {
         window.__resolvedConflict = args;
@@ -1350,14 +1483,17 @@ test('server conflict resolution delegates native private backup without trustin
     };
   });
   const result = await page.evaluate(() => {
-    currentRole = 'admin';
+    currentRole = 'rabotnik';
+    const localDenied = resolveServerConflict(42, 'local');
     const ok = resolveServerConflict(42, 'server');
     return {
       ok,
+      localDenied,
       resolved: window.__resolvedConflict,
     };
   });
   assert.equal(result.ok, true);
+  assert.equal(result.localDenied, false);
   assert.deepEqual(result.resolved, [42, 'server']);
   await ctx.close();
 });
@@ -1365,12 +1501,14 @@ test('server conflict resolution delegates native private backup without trustin
 test('conflict backup export is admin-only and delegates streaming to the native bridge', async () => {
   const { ctx, page } = await newPage(() => {
     window.__backupExports = 0;
+    window.__nativeRole = 'worker';
     window.AndroidSync = {
       status: () => JSON.stringify({
         configured: true,
         serverRevision: 4,
         pending: 0,
         conflictBackups: 1,
+        serverRole: window.__nativeRole,
       }),
       exportLatestConflictBackup: () => {
         window.__backupExports += 1;
@@ -1379,9 +1517,8 @@ test('conflict backup export is admin-only and delegates streaming to the native
     };
   });
   const result = await page.evaluate(() => {
-    currentRole = 'rabotnik';
     const worker = exportLatestConflictBackup();
-    currentRole = 'admin';
+    window.__nativeRole = 'owner';
     const admin = exportLatestConflictBackup();
     return { worker, admin, exports: window.__backupExports };
   });
