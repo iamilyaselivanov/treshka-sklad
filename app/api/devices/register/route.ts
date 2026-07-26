@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { audit, requireUser } from "@/lib/auth";
 import { readJsonObject } from "@/lib/http";
 import { isFirebasePushConfigured } from "@/lib/fcm";
-import { runPushMaintenance, shouldRunPushMaintenance } from "@/lib/push-maintenance";
+import { maybeRunPushMaintenance } from "@/lib/push-maintenance";
 
 export const dynamic = "force-dynamic";
 
@@ -78,7 +78,7 @@ export async function POST(request: Request) {
   if (!existing || existing.userId !== auth.user.id || existing.token !== token) {
     await audit(auth.user, "push_device_registered", `${platform} · ${deviceId.slice(0, 8)}`);
   }
-  if (shouldRunPushMaintenance()) await runPushMaintenance(env.DB);
+  await maybeRunPushMaintenance(env.DB);
   return Response.json({ ok: true, pushConfigured: isFirebasePushConfigured(), evictedOldest });
 }
 

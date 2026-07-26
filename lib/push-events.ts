@@ -21,7 +21,8 @@ type PushEventDefinition = {
 };
 
 type PushRecipient = {
-  assignment?: string;
+  userId?: string;
+  deviceId?: string;
 };
 
 export const PUSH_RECIPIENT_PAGE_SIZE = 500;
@@ -89,7 +90,11 @@ export function normalizePostAssignment(value: string) {
   return value.trim().replace(/\s+/g, " ").toLocaleLowerCase("ru-RU");
 }
 
-export function pushRecipientQuery(type: PushEventType) {
+export function pushRecipientQuery(
+  type: PushEventType,
+  post = "",
+  actorUserId = "",
+) {
   const audience = definitions[type].audience;
   const select = `SELECT push_devices.user_id AS userId,
                          push_devices.device_id AS deviceId,
@@ -101,10 +106,11 @@ export function pushRecipientQuery(type: PushEventType) {
     return {
       sql: `${select}
             WHERE users.status = 'active'
-              AND TRIM(users.assignment) <> ''
+              AND users.assignment_key = ?
+              AND push_devices.user_id <> ?
             ORDER BY push_devices.device_id
             LIMIT ? OFFSET ?`,
-      filterPost: true,
+      bindings: [normalizePostAssignment(post), actorUserId],
     };
   }
   const roles = audience === "management"
@@ -112,32 +118,36 @@ export function pushRecipientQuery(type: PushEventType) {
     : "'owner', 'admin', 'storekeeper'";
   return {
     sql: `${select}
-          WHERE users.status = 'active' AND users.role IN (${roles})
+          WHERE users.status = 'active'
+            AND users.role IN (${roles})
+            AND push_devices.user_id <> ?
           ORDER BY push_devices.device_id
           LIMIT ? OFFSET ?`,
-    filterPost: false,
+    bindings: [actorUserId],
   };
 }
 
 /**
- * D1/SQLite cannot lowercase Cyrillic reliably, so post assignment is still
- * normalized in application code. Pagination guarantees that the SQL LIMIT
- * never silently drops matching recipients that happen to be on a later page.
+ * Recipient queries filter by the normalized assignment key in SQL. Pagination
+ * remains a safety net for posts or management groups with many devices.
  */
 export async function collectPushRecipients<T extends PushRecipient>(
   fetchPage: (limit: number, offset: number) => Promise<T[]> | T[],
-  filterPost: boolean,
-  post: string,
   pageSize = PUSH_RECIPIENT_PAGE_SIZE,
 ) {
   const recipients: T[] = [];
-  const normalizedPost = normalizePostAssignment(post);
   for (let offset = 0; ; offset += pageSize) {
     const page = await fetchPage(pageSize, offset);
-    recipients.push(...page.filter((device) =>
-      !filterPost
-      || normalizePostAssignment(String(device.assignment ?? "")) === normalizedPost));
+    recipients.push(...page);
     if (page.length < pageSize) break;
   }
   return recipients;
+}
+
+export function excludePreviouslyNotifiedDevices<T extends PushRecipient>(
+  recipients: T[],
+  priorDeviceIds: Iterable<string>,
+) {
+  const excluded = new Set(priorDeviceIds);
+  return recipients.filter((recipient) => !excluded.has(String(recipient.deviceId ?? "")));
 }

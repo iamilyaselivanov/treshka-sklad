@@ -46,21 +46,36 @@ class ServerSyncManager(
         return store.conflictedMutationsJson()
     }
 
-    fun resolveConflict(id: Long, decision: String, localExportConfirmed: Boolean): String {
+    fun resolveConflict(
+        id: Long,
+        decision: String,
+        allowDiscardWithoutBackup: Boolean = false,
+    ): String {
         require(decision == "local" || decision == "server")
         val config = store.getSyncConfig() ?: error("Сервер не настроен")
+        var backupSaved = true
         if (decision == "server") {
-            require(localExportConfirmed) {
-                "Сначала сохраните локальные изменения в файл. Серверная версия не применена"
-            }
             val authoritative = loadAuthoritativeSnapshot(config)
-            when (store.acceptServerSnapshot(id)) {
+            when (store.acceptServerSnapshot(id, allowDiscardWithoutBackup)) {
                 ServerConflictResolutionResult.APPLIED ->
                     onRemoteState(authoritative.first, authoritative.second)
+                ServerConflictResolutionResult.APPLIED_WITHOUT_BACKUP -> {
+                    backupSaved = false
+                    onRemoteState(authoritative.first, authoritative.second)
+                }
                 ServerConflictResolutionResult.MISSING_CONFLICT ->
                     throw IllegalStateException("Локальный конфликт не найден")
                 ServerConflictResolutionResult.MISSING_REMOTE ->
                     throw IllegalStateException("Серверный снимок недоступен. Локальные данные не изменены")
+                ServerConflictResolutionResult.BACKUP_FAILED ->
+                    return JSONObject()
+                        .put("ok", false)
+                        .put("confirmationRequired", true)
+                        .put(
+                            "error",
+                            "Не удалось создать приватную резервную копию. Серверная версия пока не применена",
+                        )
+                        .toString()
             }
         } else {
             val authoritative = loadAuthoritativeSnapshot(config)
@@ -80,7 +95,11 @@ class ServerSyncManager(
             }
         }
         syncNow()
-        return JSONObject().put("ok", true).put("decision", decision).toString()
+        return JSONObject()
+            .put("ok", true)
+            .put("decision", decision)
+            .put("backupSaved", backupSaved)
+            .toString()
     }
 
     private fun loadAuthoritativeSnapshot(config: SyncConfig): Pair<String, Long> {

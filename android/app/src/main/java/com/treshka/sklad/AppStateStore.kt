@@ -10,6 +10,8 @@ import android.util.Base64
 import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.io.FileOutputStream
 import java.security.KeyStore
 import java.util.UUID
 import javax.crypto.Cipher
@@ -41,8 +43,10 @@ enum class ConflictRequeueResult {
 
 enum class ServerConflictResolutionResult {
     APPLIED,
+    APPLIED_WITHOUT_BACKUP,
     MISSING_CONFLICT,
     MISSING_REMOTE,
+    BACKUP_FAILED,
 }
 
 /**
@@ -62,9 +66,14 @@ class AppStateStore(context: Context) :
         private const val DB_VERSION = 5
         private const val STATE_TABLE = "app_state"
         private const val ROW_ID = 1L
+        private const val MAX_CONFLICT_BACKUPS = 10
+        private const val CONFLICT_BACKUP_RETENTION_MS = 30L * 24 * 60 * 60 * 1_000
     }
 
-    private val tokenVault = SyncTokenVault(context.applicationContext)
+    private val appContext = context.applicationContext
+    private val tokenVault = SyncTokenVault(appContext)
+    private val conflictBackupDirectory =
+        File(appContext.noBackupFilesDir, "sync-conflict-backups")
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -505,7 +514,10 @@ class AppStateStore(context: Context) :
      * mergeable deltas.
      */
     @Synchronized
-    fun acceptServerSnapshot(localId: Long): ServerConflictResolutionResult {
+    fun acceptServerSnapshot(
+        localId: Long,
+        allowDiscardWithoutBackup: Boolean = false,
+    ): ServerConflictResolutionResult {
         val db = writableDatabase
         db.beginTransaction()
         return try {
@@ -529,6 +541,10 @@ class AppStateStore(context: Context) :
             val authoritative = payload ?: return ServerConflictResolutionResult.MISSING_REMOTE
             val schemaVersion = JSONObject(authoritative).optInt("schemaVersion", 0)
             if (schemaVersion < 1) return ServerConflictResolutionResult.MISSING_REMOTE
+            val backupSaved = saveConflictBackup(db, localId, revision)
+            if (!backupSaved && !allowDiscardWithoutBackup) {
+                return ServerConflictResolutionResult.BACKUP_FAILED
+            }
             if (!writeState(db, authoritative, schemaVersion)) {
                 return ServerConflictResolutionResult.MISSING_REMOTE
             }
@@ -539,9 +555,118 @@ class AppStateStore(context: Context) :
             )
             db.delete("sync_remote_pending", "id=1", null)
             db.setTransactionSuccessful()
-            ServerConflictResolutionResult.APPLIED
+            if (backupSaved) {
+                ServerConflictResolutionResult.APPLIED
+            } else {
+                ServerConflictResolutionResult.APPLIED_WITHOUT_BACKUP
+            }
         } finally {
             db.endTransaction()
+        }
+    }
+
+    /**
+     * Preserve exactly the full-snapshot mutations that accepting the server
+     * copy will remove. Backups live in noBackupFilesDir, so they are private
+     * to the app and are not uploaded by Android's automatic backup service.
+     */
+    private fun saveConflictBackup(
+        db: SQLiteDatabase,
+        selectedConflictId: Long,
+        serverRevision: Long,
+    ): Boolean = runCatching {
+        if (!conflictBackupDirectory.exists() && !conflictBackupDirectory.mkdirs()) {
+            error("Cannot create private conflict backup directory")
+        }
+        val mutations = JSONArray()
+        db.rawQuery(
+            """
+            SELECT rowid, mutation_id, payload, schema_version, created_at,
+                   attempts, base_revision, conflict, COALESCE(last_error, '')
+            FROM sync_outbox
+            ORDER BY created_at ASC, rowid ASC
+            """.trimIndent(),
+            null,
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val rawPayload = cursor.getString(2)
+                val parsedPayload: Any = runCatching { JSONObject(rawPayload) }
+                    .getOrElse { rawPayload }
+                mutations.put(JSONObject().apply {
+                    put("localId", cursor.getLong(0))
+                    put("mutationId", cursor.getString(1))
+                    put("payload", parsedPayload)
+                    put("schemaVersion", cursor.getInt(3))
+                    put("createdAt", cursor.getLong(4))
+                    put("attempts", cursor.getInt(5))
+                    put("baseRevision", cursor.getLong(6))
+                    put("conflict", cursor.getInt(7) == 1)
+                    put("lastError", cursor.getString(8))
+                })
+            }
+        }
+        if (mutations.length() == 0) error("No outbox mutations to preserve")
+        val createdAt = System.currentTimeMillis()
+        val backup = JSONObject().apply {
+            put("type", "treshka-native-conflict-backup")
+            put("createdAt", createdAt)
+            put("selectedConflictId", selectedConflictId)
+            put("serverRevision", serverRevision)
+            put("discardedMutations", mutations)
+        }
+        val filename = "treshka_conflict_${createdAt}_${UUID.randomUUID()}.json"
+        val target = File(conflictBackupDirectory, filename)
+        val pending = File.createTempFile(".pending-", ".json", conflictBackupDirectory)
+        try {
+            FileOutputStream(pending).use { stream ->
+                stream.write(backup.toString(2).toByteArray(Charsets.UTF_8))
+                stream.fd.sync()
+            }
+            if (!pending.renameTo(target)) {
+                pending.copyTo(target, overwrite = false)
+                if (!pending.delete()) Log.w(TAG, "Could not remove temporary conflict backup")
+            }
+        } finally {
+            if (pending.exists() && !pending.delete()) {
+                Log.w(TAG, "Could not clean temporary conflict backup")
+            }
+        }
+        pruneConflictBackups(createdAt)
+        true
+    }.onFailure {
+        Log.e(TAG, "Could not create private conflict backup", it)
+    }.getOrDefault(false)
+
+    private fun conflictBackupFiles(): List<File> =
+        conflictBackupDirectory.listFiles()
+            ?.filter { it.isFile && it.name.endsWith(".json") }
+            ?.sortedByDescending { it.lastModified() }
+            ?: emptyList()
+
+    private fun pruneConflictBackups(now: Long = System.currentTimeMillis()) {
+        conflictBackupFiles().forEachIndexed { index, file ->
+            if (
+                index >= MAX_CONFLICT_BACKUPS
+                || now - file.lastModified() > CONFLICT_BACKUP_RETENTION_MS
+            ) {
+                if (!file.delete()) Log.w(TAG, "Could not prune conflict backup ${file.name}")
+            }
+        }
+    }
+
+    @Synchronized
+    fun latestConflictBackupJson(): String {
+        pruneConflictBackups()
+        val file = conflictBackupFiles().firstOrNull()
+            ?: return JSONObject().put("error", "Резервных копий конфликтов пока нет").toString()
+        return runCatching {
+            JSONObject().apply {
+                put("filename", file.name)
+                put("mimeType", "application/json")
+                put("base64", Base64.encodeToString(file.readBytes(), Base64.NO_WRAP))
+            }.toString()
+        }.getOrElse {
+            JSONObject().put("error", "Не удалось прочитать резервную копию").toString()
         }
     }
 
@@ -640,6 +765,7 @@ class AppStateStore(context: Context) :
             put("serverRevision", cfg?.serverRevision ?: 0)
             put("pending", pendingCount())
             put("conflicts", pendingCount() - sendablePendingCount())
+            put("conflictBackups", conflictBackupFiles().size)
             readableDatabase.query(
                 "sync_config",
                 arrayOf("last_sync_at", "last_error"),

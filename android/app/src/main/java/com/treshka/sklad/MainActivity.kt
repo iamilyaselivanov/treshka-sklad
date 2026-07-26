@@ -340,11 +340,18 @@ class MainActivity : AppCompatActivity() {
         }
 
         @JavascriptInterface
-        fun resolveConflict(id: Long, decision: String, localExportConfirmed: Boolean): String = try {
-            serverSyncManager.resolveConflict(id, decision, localExportConfirmed)
+        fun resolveConflict(id: Long, decision: String): String = try {
+            val result = serverSyncManager.resolveConflict(id, decision)
+            if (decision == "server" && JSONObject(result).optBoolean("confirmationRequired")) {
+                requestNativeConflictDiscardConfirmation(id)
+            }
+            result
         } catch (e: Exception) {
             JSONObject().put("error", e.message ?: "Ошибка решения конфликта").toString()
         }
+
+        @JavascriptInterface
+        fun latestConflictBackup(): String = appStateStore.latestConflictBackupJson()
 
         @JavascriptInterface
         fun uploadImage(dataUrl: String): String = try {
@@ -361,6 +368,42 @@ class MainActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun disconnect() = appStateStore.clearSyncAuth()
+    }
+
+    private fun requestNativeConflictDiscardConfirmation(id: Long) {
+        runOnUiThread {
+            AlertDialog.Builder(this)
+                .setTitle("Резервная копия не создана")
+                .setMessage(
+                    "Хранилище устройства не позволило сохранить локальные изменения. " +
+                        "Если продолжить, несинхронизированные данные будут потеряны. " +
+                        "Оставить серверную версию без резервной копии?",
+                )
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Продолжить") { _, _ ->
+                    Thread {
+                        val result = runCatching {
+                            serverSyncManager.resolveConflict(
+                                id,
+                                "server",
+                                allowDiscardWithoutBackup = true,
+                            )
+                        }.getOrElse {
+                            JSONObject()
+                                .put("error", it.message ?: "Ошибка решения конфликта")
+                                .toString()
+                        }
+                        runOnUiThread {
+                            webView.evaluateJavascript(
+                                "window.onNativeConflictResolutionCompleted && " +
+                                    "window.onNativeConflictResolutionCompleted(${jsStringLiteral(result)});",
+                                null,
+                            )
+                        }
+                    }.start()
+                }
+                .show()
+        }
     }
 
     inner class PushBridge {

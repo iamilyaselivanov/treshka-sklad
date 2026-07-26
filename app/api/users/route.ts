@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { audit, hashPassword, requireUser, Role } from "@/lib/auth";
 import { readJsonObject } from "@/lib/http";
+import { normalizePostAssignment } from "@/lib/push-events";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +26,7 @@ export async function POST(request: Request) {
   const password = String(body.password ?? "");
   const role = String(body.role ?? "") as Role;
   const assignment = String(body.assignment ?? "").trim();
+  const assignmentKey = normalizePostAssignment(assignment);
   if (
     callsign.length < 2 || callsign.length > 80
     || login.length < 3 || login.length > 120
@@ -40,8 +42,8 @@ export async function POST(request: Request) {
   const id = crypto.randomUUID();
   try {
     await env.DB.prepare(
-      "INSERT INTO users (id, callsign, login, password_hash, role, assignment, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'active', ?)",
-    ).bind(id, callsign, login, await hashPassword(password), role, assignment, new Date().toISOString()).run();
+      "INSERT INTO users (id, callsign, login, password_hash, role, assignment, assignment_key, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+    ).bind(id, callsign, login, await hashPassword(password), role, assignment, assignmentKey, new Date().toISOString()).run();
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : "";
     if (message.includes("UNIQUE")) return Response.json({ error: "Такой логин уже занят" }, { status: 409 });

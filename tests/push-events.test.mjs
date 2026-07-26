@@ -4,22 +4,22 @@ import test from "node:test";
 import {
   PUSH_EVENT_TYPES,
   collectPushRecipients,
+  excludePreviouslyNotifiedDevices,
+  normalizePostAssignment,
   pushActorAllowed,
   pushPresentation,
   pushRecipientQuery,
 } from "../lib/push-events.ts";
 import {
-  PUSH_MAINTENANCE_SAMPLE_RATE,
-  shouldRunPushMaintenance,
+  PUSH_MAINTENANCE_INTERVAL_MS,
+  claimPushMaintenance,
 } from "../lib/push-maintenance.ts";
 
-async function recipientDevices(database, type, post = "ТЭЧ", pageSize = 500) {
-  const query = pushRecipientQuery(type);
+async function recipientDevices(database, type, post = "ТЭЧ", pageSize = 500, actorUserId = "actor") {
+  const query = pushRecipientQuery(type, post, actorUserId);
   const statement = database.prepare(query.sql);
   const rows = await collectPushRecipients(
-    (limit, offset) => statement.all(limit, offset),
-    query.filterPost,
-    post,
+    (limit, offset) => statement.all(...query.bindings, limit, offset),
     pageSize,
   );
   return rows.map((row) => row.deviceId)
@@ -33,6 +33,7 @@ function createRoutingDatabase() {
       id TEXT PRIMARY KEY,
       role TEXT NOT NULL,
       assignment TEXT NOT NULL,
+      assignment_key TEXT NOT NULL,
       status TEXT NOT NULL
     );
     CREATE TABLE push_devices (
@@ -53,13 +54,13 @@ function createRoutingDatabase() {
     ["worker-inactive", "worker", "ТЭЧ", "disabled"],
   ];
   const insertUser = database.prepare(
-    "INSERT INTO users (id, role, assignment, status) VALUES (?, ?, ?, ?)",
+    "INSERT INTO users (id, role, assignment, assignment_key, status) VALUES (?, ?, ?, ?, ?)",
   );
   const insertDevice = database.prepare(
     "INSERT INTO push_devices (user_id, device_id, token) VALUES (?, ?, ?)",
   );
   for (const user of users) {
-    insertUser.run(...user);
+    insertUser.run(user[0], user[1], user[2], normalizePostAssignment(user[2]), user[3]);
     insertDevice.run(user[0], `device-${user[0]}`, `token-${user[0]}`);
   }
   insertDevice.run("owner", "device-owner-2", "token-owner-2");
@@ -75,6 +76,29 @@ test("post stock notifications reach every active member of any role on that pos
     "device-worker-2",
   ]);
   database.close();
+});
+
+test("the actor never receives a duplicate push for their own action", async () => {
+  const database = createRoutingDatabase();
+  assert.deepEqual(
+    await recipientDevices(database, "post_stock_issued", "ТЭЧ", 500, "store-post"),
+    ["device-admin-post", "device-worker-1", "device-worker-2"],
+  );
+  assert.deepEqual(
+    await recipientDevices(database, "storekeeper_post_issue_completed", "ТЭЧ", 500, "admin-post"),
+    ["device-admin-1", "device-owner", "device-owner-2"],
+  );
+  database.close();
+});
+
+test("the management event does not duplicate a post notification on the same device", () => {
+  assert.deepEqual(
+    excludePreviouslyNotifiedDevices(
+      [{ deviceId: "admin-post" }, { deviceId: "owner" }],
+      ["admin-post"],
+    ),
+    [{ deviceId: "owner" }],
+  );
 });
 
 test("acts, returns and warehouse acceptance reach owner, every admin and every storekeeper", async () => {
@@ -113,28 +137,52 @@ test("storekeeper issue completion reaches owner and all administrators", async 
 test("recipient pagination cannot drop post members after the former 2000-row boundary", async () => {
   const database = createRoutingDatabase();
   const insertUser = database.prepare(
-    "INSERT INTO users (id, role, assignment, status) VALUES (?, 'worker', ?, 'active')",
+    "INSERT INTO users (id, role, assignment, assignment_key, status) VALUES (?, 'worker', ?, ?, 'active')",
   );
   const insertDevice = database.prepare(
     "INSERT INTO push_devices (user_id, device_id, token) VALUES (?, ?, ?)",
   );
   for (let index = 0; index < 2_050; index += 1) {
     const id = `bulk-${String(index).padStart(4, "0")}`;
-    insertUser.run(id, index === 2_049 ? "ТЭЧ" : "Другой пост");
+    insertUser.run(id, "ТЭЧ", normalizePostAssignment("ТЭЧ"));
     insertDevice.run(id, `device-${id}`, `token-${id}`);
   }
   const recipients = await recipientDevices(database, "post_stock_issued", "  тЭч ", 137);
   assert.ok(recipients.includes("device-bulk-2049"));
+  assert.ok(recipients.includes("device-bulk-2048"));
   assert.ok(recipients.includes("device-worker-1"));
-  assert.ok(!recipients.includes("device-bulk-2048"));
+  assert.equal(recipients.filter((device) => device.startsWith("device-bulk-")).length, 2_050);
   database.close();
 });
 
-test("heavy push retention runs probabilistically instead of on every request", () => {
-  assert.equal(PUSH_MAINTENANCE_SAMPLE_RATE, 64);
-  assert.equal(shouldRunPushMaintenance(0), true);
-  assert.equal(shouldRunPushMaintenance(64), true);
-  assert.equal(shouldRunPushMaintenance(1), false);
+test("heavy push retention is claimed predictably once per day", async () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("CREATE TABLE push_maintenance_state (id INTEGER PRIMARY KEY, last_run_at TEXT NOT NULL)");
+  const d1 = {
+    prepare(sql) {
+      const statement = database.prepare(sql);
+      let values = [];
+      return {
+        bind(...args) {
+          values = args;
+          return this;
+        },
+        async run() {
+          const result = statement.run(...values);
+          return { meta: { changes: Number(result.changes) } };
+        },
+      };
+    },
+  };
+  const first = new Date("2026-07-26T00:00:00.000Z");
+  assert.equal(PUSH_MAINTENANCE_INTERVAL_MS, 86_400_000);
+  assert.equal(await claimPushMaintenance(d1, first), true);
+  assert.equal(await claimPushMaintenance(d1, new Date(first.getTime() + 60_000)), false);
+  assert.equal(
+    await claimPushMaintenance(d1, new Date(first.getTime() + PUSH_MAINTENANCE_INTERVAL_MS + 1)),
+    true,
+  );
+  database.close();
 });
 
 test("event actors and user-facing titles match the warehouse workflow", () => {

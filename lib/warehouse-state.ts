@@ -68,21 +68,19 @@ function historicalReferences(state: WarehouseState, itemId: string) {
   ].filter((value) => identifier(value) === itemId);
 }
 
-function historyReferencesAreArchived(
+function historyArchiveIssue(
   previous: WarehouseState,
   next: WarehouseState,
   itemId: string,
 ) {
   const previousReferences = historicalReferences(previous, itemId);
   const references = historicalReferences(next, itemId);
-  if (references.length < previousReferences.length) return false;
-  return references.every((value) => {
+  if (references.length < previousReferences.length) return "history_removed";
+  const metadataMissing = references.some((value) => {
     const entry = record(value);
-    return Boolean(
-      String(entry?.name ?? "").trim()
-      && String(entry?.sku ?? "").trim(),
-    );
+    return !String(entry?.name ?? "").trim() || !String(entry?.sku ?? "").trim();
   });
+  return metadataMissing ? "metadata_missing" : null;
 }
 
 export function warehouseItemIds(state: WarehouseState) {
@@ -207,7 +205,14 @@ export function warehouseDeletionPolicy(
         error: `Нельзя удалить карточку: ${issue}`,
       };
     }
-    if (!historyReferencesAreArchived(previous, next, itemId)) {
+    const historyIssue = historyArchiveIssue(previous, next, itemId);
+    if (historyIssue === "history_removed") {
+      return {
+        status: 409,
+        error: "Нельзя удалить карточку одновременно с удалением связанной истории документов или движений",
+      };
+    }
+    if (historyIssue === "metadata_missing") {
       return {
         status: 409,
         error: "Нельзя удалить карточку: в истории документов или движений отсутствует архивное название товара",

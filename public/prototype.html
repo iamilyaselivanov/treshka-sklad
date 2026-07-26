@@ -3397,7 +3397,10 @@ function safePhotoSource(value){
   return safePhotoDataUrl(value)
     || (typeof value==='string' && /^\/api\/media\/images\?key=images%2F[0-9a-f-]{36}\.(?:jpg|png|webp)$/.test(value));
 }
-function canAdminister(){ return currentRole==='admin'; }
+function canAdminister(){
+  const serverRole=typeof window!=='undefined'&&typeof window.treshkaServerRole==='function'?window.treshkaServerRole():'';
+  return serverRole ? serverRole==='owner'||serverRole==='admin' : currentRole==='admin';
+}
 function canManageCatalog(){ return canAdminister() || currentRole==='kladovshik'; }
 function canDeleteCatalogItem(){ return canAdminister(); }
 const item = id => items.find(i=>i.id===id);
@@ -4143,30 +4146,33 @@ function renderServerSettings(){
       <div class="fld"><label>Пароль</label><input id="serverPassword" type="password" autocomplete="current-password"></div>
       <button class="btn primary" onclick="connectServer()">Подключить и синхронизировать</button>
     </div>
-    ${s.configured?`<button class="btn green" onclick="nativeSyncBridge().syncNow();toast('Синхронизация запущена')">⟳ Синхронизировать сейчас</button><button class="btn ghost" onclick="disconnectServer()">Отключить сервер на этом устройстве</button>`:''}
+    ${s.configured?`<button class="btn green" onclick="nativeSyncBridge().syncNow();toast('Синхронизация запущена')">⟳ Синхронизировать сейчас</button>${Number(s.conflictBackups||0)>0?`<button class="btn ghost" onclick="exportLatestConflictBackup()">⤓ Экспорт последней резервной копии конфликта</button>`:''}<button class="btn ghost" onclick="disconnectServer()">Отключить сервер на этом устройстве</button>`:''}
     ${conflicts.length?`<div class="sec">Конфликты без потери данных</div>${conflicts.map(c=>{const skipped=Math.max(0,Number(c.serverChanges||0));const localSafe=Boolean(c.canKeepLocal);return `<div class="card static"><div class="t">Устройство ${esc(c.deviceId)}</div><div class="s">Локальная ревизия ${Number(c.baseRevision||0)}, серверная ${Number(c.serverRevision||0)}. ${skipped?`На сервере уже ${skipped} новых ревизий — старый полный снимок не будет отправлен поверх них.`:'Обе копии сохранены.'}</div><button class="fbtn" style="width:100%;margin-top:8px" onclick="resolveServerConflict(${c.id},'server')">Оставить серверную версию</button><button class="fbtn" style="width:100%;margin-top:6px" ${localSafe?`onclick="resolveServerConflict(${c.id},'local')"`:'disabled'}>${localSafe?'Повторить локальную версию':'Локальная версия защищена от опасной перезаписи'}</button></div>`;}).join('')}`:''}
     <div class="sec">Защита данных</div>
-    <div class="card static"><div class="s" style="color:var(--ink);line-height:1.55">Каждое изменение сначала атомарно записывается в SQLite вместе с durable outbox. Сервер принимает mutationId только один раз. При конфликте ни одна версия не перезаписывается: локальный снимок остаётся в очереди, а копия сохраняется на сервере для разбора.</div></div>`;
+    <div class="card static"><div class="s" style="color:var(--ink);line-height:1.55">Каждое изменение сначала атомарно записывается в SQLite вместе с durable outbox. Сервер принимает mutationId только один раз. Перед принятием серверной версии приложение сохраняет фактически удаляемые локальные снимки в приватной резервной копии на устройстве. В «Загрузки» она попадает только по отдельной команде экспорта.</div></div>`;
 }
 function resolveServerConflict(id,decision){
   if(currentRole!=='admin'){toast('Решение конфликтов доступно только администратору');return false;}
-  if(!confirm(decision==='local'?'Повторить локальную версию можно только при отсутствии более новых серверных ревизий. Продолжить?':'Оставить серверную версию? Все несинхронизированные локальные изменения будут выгружены JSON-файлом в «Загрузки», затем приложение применит серверную копию.'))return false;
+  if(!confirm(decision==='local'?'Повторить локальную версию можно только при отсутствии более новых серверных ревизий. Продолжить?':'Оставить серверную версию? Фактически удаляемые несинхронизированные снимки будут сохранены в приватной резервной копии приложения, затем будет применена серверная копия.'))return false;
   const bridge=nativeSyncBridge();
-  let localExportConfirmed=false;
-  if(decision==='server'){
-    const exportedAt=new Date().toISOString();
-    const exportPayload=JSON.stringify({type:'treshka-offline-conflict-backup',exportedAt,state:serializeAppState()},null,2);
-    const fileBridge=nativeFileBridge();
-    const filename=`treshka_conflict_${exportedAt.replace(/[:.]/g,'-')}.json`;
-    if(!fileBridge||!fileBridge.saveExportedFile(arrayBufferToBase64(new TextEncoder().encode(exportPayload)),filename,'application/json')){
-      toast('⚠ Не удалось сохранить локальную копию. Серверная версия не применена');
-      return false;
-    }
-    localExportConfirmed=true;
-    toast('✓ Локальная копия выгружена в «Загрузки»');
-  }
-  try{const result=JSON.parse(bridge.resolveConflict(id,decision,localExportConfirmed));if(result.error){toast(result.error);return false;}toast('✓ Конфликт решён, данные сохранены');renderServerSettings();return true;}
+  try{const result=JSON.parse(bridge.resolveConflict(id,decision));if(result.confirmationRequired){toast(result.error||'Требуется подтверждение на устройстве');return false;}if(result.error){toast(result.error);return false;}toast(result.backupSaved===false?'✓ Конфликт решён без резервной копии':'✓ Конфликт решён, приватная резервная копия сохранена');renderServerSettings();return true;}
   catch(e){toast('Ошибка: '+e.message);return false;}
+}
+function onNativeConflictResolutionCompleted(raw){
+  try{const result=typeof raw==='string'?JSON.parse(raw):raw;if(result?.error){toast(result.error);return false;}toast(result?.backupSaved===false?'✓ Серверная версия применена без резервной копии':'✓ Конфликт решён');renderServerSettings();return true;}
+  catch(e){toast('Ошибка решения конфликта: '+e.message);return false;}
+}
+window.onNativeConflictResolutionCompleted=onNativeConflictResolutionCompleted;
+function exportLatestConflictBackup(){
+  const bridge=nativeSyncBridge(),fileBridge=nativeFileBridge();
+  if(!bridge||typeof bridge.latestConflictBackup!=='function'||!fileBridge){toast('Экспорт доступен только в Android-приложении');return false;}
+  try{
+    const backup=JSON.parse(bridge.latestConflictBackup());
+    if(backup.error){toast(backup.error);return false;}
+    const saved=!!fileBridge.saveExportedFile(backup.base64,backup.filename,backup.mimeType||'application/json');
+    toast(saved?'✓ Резервная копия сохранена в «Загрузки»':'⚠ Не удалось экспортировать резервную копию');
+    return saved;
+  }catch(e){toast('Ошибка экспорта: '+e.message);return false;}
 }
 function connectServer(){
   const bridge=nativeSyncBridge();if(!bridge||typeof bridge.login!=='function'){toast('Подключение сервера доступно в Android-приложении');return false;}
@@ -5359,9 +5365,9 @@ function buildWorkActPrintHtml(d, title){
   const workRows = (d.works||[]).map((w,i)=>`<tr><td class="colnum">${i+1}</td><td>${esc(w.type)}</td><td class="colqty">${esc(String(w.qty))}</td></tr>`).join('')
     || '<tr><td class="colnum"></td><td>— не указаны —</td><td class="colqty"></td></tr>';
   const matRows = (d.materials||[]).map((m,i)=>{
-    const it=item(m.id);
-    const name = it ? `${esc(it.name)}${it.sku?` (арт. ${esc(it.sku)})`:''}` : esc(m.id);
-    const qty = it ? `${m.q} ${esc(it.unit)}` : esc(String(m.q));
+    const it=item(m.id)||{name:m.name||m.id,sku:m.sku||'',unit:m.unit||''};
+    const name = `${esc(it.name)}${it.sku?` (арт. ${esc(it.sku)})`:''}`;
+    const qty = `${m.q}${it.unit?` ${esc(it.unit)}`:''}`;
     return `<tr><td class="colnum">${i+1}</td><td>${name}</td><td class="colqty">${qty}</td></tr>`;
   }).join('') || '<tr><td class="colnum"></td><td>— не использовались —</td><td class="colqty"></td></tr>';
   const mergedInfo = [
@@ -6222,9 +6228,9 @@ function buildWorkActDocumentXml(d){
     wRow([wCell(mergedInfo,{bold:true,align:'center',span:3})]),
   ];
   (d.materials||[]).forEach((m,i)=>{
-    const it = item(m.id);
-    const name = it ? `${it.name}${it.sku?` (арт. ${it.sku})`:''}` : m.id;
-    matRows.push(wRow([wCell(String(i+1),{align:'center'}), wCell(name), wCell(it?`${m.q} ${it.unit}`:String(m.q),{align:'center'})]));
+    const it = item(m.id)||{name:m.name||m.id,sku:m.sku||'',unit:m.unit||''};
+    const name = `${it.name}${it.sku?` (арт. ${it.sku})`:''}`;
+    matRows.push(wRow([wCell(String(i+1),{align:'center'}), wCell(name), wCell(`${m.q}${it.unit?` ${it.unit}`:''}`,{align:'center'})]));
   });
   if(!(d.materials||[]).length) matRows.push(wRow([wCell('',{align:'center'}), wCell('— не использовались —'), wCell('',{align:'center'})]));
   body.push(wPara('Израсходованные материалы', {bold:true, spacingAfter:60}));

@@ -4,12 +4,13 @@ import { isFirebasePushConfigured, sendDevicePush } from "@/lib/fcm";
 import { readJsonObject } from "@/lib/http";
 import {
   collectPushRecipients,
+  excludePreviouslyNotifiedDevices,
   isPushEventType,
   pushActorAllowed,
   pushPresentation,
   pushRecipientQuery,
 } from "@/lib/push-events";
-import { runPushMaintenance, shouldRunPushMaintenance } from "@/lib/push-maintenance";
+import { maybeRunPushMaintenance } from "@/lib/push-maintenance";
 import type { PushEventType } from "@/lib/push-events";
 
 export const dynamic = "force-dynamic";
@@ -90,17 +91,29 @@ export async function POST(request: Request) {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(eventId, auth.user.id, type, post, entityNo, summary, title, body, now).run();
 
-  const recipientQuery = pushRecipientQuery(type);
-  const rows = await collectPushRecipients<DeviceRow>(
+  const recipientQuery = pushRecipientQuery(type, post, auth.user.id);
+  let rows = await collectPushRecipients<DeviceRow>(
     async (limit, offset) => {
       const devices = await env.DB.prepare(recipientQuery.sql)
-        .bind(limit, offset)
+        .bind(...recipientQuery.bindings, limit, offset)
         .all<DeviceRow>();
       return devices.results ?? [];
     },
-    recipientQuery.filterPost,
-    post,
   );
+  if (type === "storekeeper_post_issue_completed" && entityNo) {
+    const prior = await env.DB.prepare(
+      `SELECT DISTINCT push_deliveries.device_id AS deviceId
+       FROM push_deliveries
+       JOIN push_events ON push_events.id = push_deliveries.event_id
+       WHERE push_events.actor_user_id = ?
+         AND push_events.entity_no = ?
+         AND push_events.event_type = 'post_stock_issued'`,
+    ).bind(auth.user.id, entityNo).all<{ deviceId: string }>();
+    rows = excludePreviouslyNotifiedDevices(
+      rows,
+      (prior.results ?? []).map((entry) => entry.deviceId),
+    );
+  }
   if (rows.length) {
     await env.DB.batch(rows.map((device) => env.DB.prepare(
       `INSERT OR IGNORE INTO push_deliveries
@@ -193,7 +206,7 @@ export async function POST(request: Request) {
   if (inserted.meta.changes > 0) {
     await audit(auth.user, "push_event", `${type} · ${entityNo || post}`);
   }
-  if (shouldRunPushMaintenance()) await runPushMaintenance(env.DB);
+  await maybeRunPushMaintenance(env.DB);
   const responseBody = {
     ok: true,
     pushConfigured: isFirebasePushConfigured(),

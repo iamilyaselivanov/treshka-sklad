@@ -50,6 +50,13 @@
       "when": 1784997076072,
       "tag": "0006_special_peter_quill",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1785045631341,
+      "tag": "0007_cold_khan",
+      "breakpoints": true
     }
   ]
 }

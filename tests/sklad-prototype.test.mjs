@@ -1177,11 +1177,15 @@ test('closed documents and returned external issues remain renderable after prod
     renderWorkDoc(work);
     const workText = document.getElementById('content').textContent;
     const printHtml = buildDefektPrintHtml(work, work.no);
+    const workPrintHtml = buildWorkActPrintHtml(work, work.no);
+    const workDocXml = buildWorkActDocumentXml(work);
     return {
       deleted,
       externalText,
       workText,
       printHtml,
+      workPrintHtml,
+      workDocXml,
       archivedDoc: work.materials[0],
       archivedIssue: extIssues.find((entry) => entry.no === 'ВН-ARCHIVE-1').items[0],
     };
@@ -1191,28 +1195,30 @@ test('closed documents and returned external issues remain renderable after prod
   assert.match(result.externalText, /Архивный аттенюатор/);
   assert.match(result.workText, /Архивный аттенюатор/);
   assert.match(result.printHtml, /Архивный аттенюатор/);
+  assert.match(result.workPrintHtml, /Архивный аттенюатор/);
+  assert.match(result.workPrintHtml, /ARCHIVE-ATT-10/);
+  assert.match(result.workPrintHtml, /2 шт/);
+  assert.match(result.workDocXml, /Архивный аттенюатор/);
+  assert.match(result.workDocXml, /ARCHIVE-ATT-10/);
+  assert.match(result.workDocXml, /2 шт/);
   assert.equal(result.archivedDoc.sku, 'ARCHIVE-ATT-10');
   assert.equal(result.archivedIssue.unit, 'шт');
   await ctx.close();
 });
 
-test('server conflict resolution exports local work before allowing destructive server choice', async () => {
+test('server conflict resolution delegates native private backup without trusting a WebView flag', async () => {
   const { ctx, page } = await newPage(() => {
     window.confirm = () => true;
-    window.__savedConflict = null;
     window.__resolvedConflict = null;
     window.AndroidFiles = {
-      saveExportedFile: (base64, filename, mimeType) => {
-        window.__savedConflict = { base64, filename, mimeType };
-        return true;
-      },
+      saveExportedFile: () => { throw new Error('automatic public export must not run'); },
     };
     window.AndroidSync = {
-      status: () => JSON.stringify({ configured: true, serverRevision: 4, pending: 1 }),
+      status: () => JSON.stringify({ configured: true, serverRevision: 4, pending: 1, conflictBackups: 1 }),
       listConflicts: () => '[]',
-      resolveConflict: (id, decision, exportConfirmed) => {
-        window.__resolvedConflict = { id, decision, exportConfirmed };
-        return JSON.stringify({ ok: true });
+      resolveConflict: (...args) => {
+        window.__resolvedConflict = args;
+        return JSON.stringify({ ok: true, backupSaved: true });
       },
     };
   });
@@ -1221,16 +1227,11 @@ test('server conflict resolution exports local work before allowing destructive 
     const ok = resolveServerConflict(42, 'server');
     return {
       ok,
-      saved: window.__savedConflict,
       resolved: window.__resolvedConflict,
-      decoded: decodeURIComponent(escape(atob(window.__savedConflict.base64))),
     };
   });
   assert.equal(result.ok, true);
-  assert.equal(result.saved.mimeType, 'application/json');
-  assert.match(result.saved.filename, /^treshka_conflict_/);
-  assert.match(result.decoded, /treshka-offline-conflict-backup/);
-  assert.deepEqual(result.resolved, { id: 42, decision: 'server', exportConfirmed: true });
+  assert.deepEqual(result.resolved, [42, 'server']);
   await ctx.close();
 });
 

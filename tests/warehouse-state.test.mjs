@@ -127,3 +127,23 @@ test("historical transfers and inventory acts retain product labels after card d
   assert.equal(archived.extIssues[0].items[0].name, unusedItem.name);
   assert.equal(archived.items.length, 0);
 });
+
+test("history removal and missing archive metadata return distinct deletion errors", () => {
+  const previous = state({
+    items: [unusedItem],
+    stockTransfers: [{ no: "ПМ-OLD", items: [{ id: unusedItem.id, q: 1 }] }],
+  });
+  const removedHistory = state({ items: [] });
+  assert.match(
+    warehouseDeletionPolicy(previous, removedHistory, "admin")?.error ?? "",
+    /удалением связанной истории/,
+  );
+  const metadataMissing = state({
+    items: [],
+    stockTransfers: [{ no: "ПМ-OLD", items: [{ id: unusedItem.id, q: 1 }] }],
+  });
+  assert.match(
+    warehouseDeletionPolicy(previous, metadataMissing, "admin")?.error ?? "",
+    /отсутствует архивное название/,
+  );
+});

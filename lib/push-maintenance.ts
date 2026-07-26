@@ -1,8 +1,19 @@
-export const PUSH_MAINTENANCE_SAMPLE_RATE = 64;
+export const PUSH_MAINTENANCE_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 
-export function shouldRunPushMaintenance(sample?: number) {
-  const value = sample ?? crypto.getRandomValues(new Uint32Array(1))[0];
-  return value % PUSH_MAINTENANCE_SAMPLE_RATE === 0;
+export async function claimPushMaintenance(
+  database: D1Database,
+  now = new Date(),
+) {
+  const nowIso = now.toISOString();
+  const cutoff = new Date(now.getTime() - PUSH_MAINTENANCE_INTERVAL_MS).toISOString();
+  const inserted = await database.prepare(
+    "INSERT OR IGNORE INTO push_maintenance_state (id, last_run_at) VALUES (1, ?)",
+  ).bind(nowIso).run();
+  if (Number(inserted.meta.changes ?? 0) > 0) return true;
+  const updated = await database.prepare(
+    "UPDATE push_maintenance_state SET last_run_at = ? WHERE id = 1 AND last_run_at <= ?",
+  ).bind(nowIso, cutoff).run();
+  return Number(updated.meta.changes ?? 0) > 0;
 }
 
 export async function runPushMaintenance(database: D1Database) {
@@ -27,4 +38,13 @@ export async function runPushMaintenance(database: D1Database) {
       "DELETE FROM push_delivery_attempts WHERE NOT EXISTS (SELECT 1 FROM push_deliveries WHERE push_deliveries.id = push_delivery_attempts.delivery_id)",
     ),
   ]);
+}
+
+export async function maybeRunPushMaintenance(
+  database: D1Database,
+  now = new Date(),
+) {
+  if (!await claimPushMaintenance(database, now)) return false;
+  await runPushMaintenance(database);
+  return true;
 }

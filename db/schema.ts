@@ -26,12 +26,14 @@ export const users = sqliteTable(
     passwordHash: text("password_hash").notNull(),
     role: text("role", { enum: ["owner", "admin", "storekeeper", "worker"] }).notNull(),
     assignment: text("assignment").notNull().default(""),
+    assignmentKey: text("assignment_key").notNull().default(""),
     status: text("status", { enum: ["active", "blocked"] }).notNull().default("active"),
     createdAt: text("created_at").notNull(),
     lastLoginAt: text("last_login_at"),
   },
   (table) => [
     index("users_role_idx").on(table.role),
+    index("users_assignment_key_idx").on(table.assignmentKey),
     uniqueIndex("single_owner_idx").on(table.role).where(sql`${table.role} = 'owner'`),
   ],
 );
@@ -151,4 +153,9 @@ export const pushDeliveries = sqliteTable(
 export const pushDeliveryAttempts = sqliteTable("push_delivery_attempts", {
   deliveryId: text("delivery_id").primaryKey(),
   attempts: integer("attempts").notNull().default(0),
+});
+
+export const pushMaintenanceState = sqliteTable("push_maintenance_state", {
+  id: integer("id").primaryKey(),
+  lastRunAt: text("last_run_at").notNull(),
 });

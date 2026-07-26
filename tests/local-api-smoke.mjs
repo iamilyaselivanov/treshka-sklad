@@ -129,12 +129,12 @@ try {
 
   const pushCases = [
     { actor: "owner", type: "post_stock_issued", targets: 1 },
-    { actor: "storekeeper", type: "post_stock_returned", targets: 3 },
+    { actor: "storekeeper", type: "post_stock_returned", targets: 2 },
     { actor: "worker", type: "defect_act_created", targets: 3 },
     { actor: "worker", type: "work_act_created", targets: 3 },
-    { actor: "admin", type: "work_awaiting_warehouse", targets: 3 },
+    { actor: "admin", type: "work_awaiting_warehouse", targets: 2 },
     { actor: "storekeeper", type: "storekeeper_post_issue_completed", targets: 2 },
-    { actor: "storekeeper", type: "storekeeper_warehouse_return_accepted", targets: 3 },
+    { actor: "storekeeper", type: "storekeeper_warehouse_return_accepted", targets: 2 },
   ];
   for (const pushCase of pushCases) {
     const payload = {
