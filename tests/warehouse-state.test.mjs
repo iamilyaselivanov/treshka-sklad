@@ -207,6 +207,33 @@ test("history comparison accepts schema defaults but rejects same-number replace
   assert.equal(warehouseHistoryMutationIssue(previous, reusedNumber, "admin")?.status, 403);
 });
 
+test("rolling feeds only evict the oldest tail after newer rows are prepended", () => {
+  const previousAudit = Array.from({ length: 2_000 }, (_, index) => ({
+    id: `audit-${index}`,
+    action: `event-${index}`,
+  }));
+  const previous = state({ auditLog: previousAudit });
+  const validWindow = state({
+    auditLog: [{ id: "audit-new", action: "new-event" }, ...previousAudit.slice(0, 1_999)],
+  });
+  assert.equal(warehouseHistoryMutationIssue(previous, validWindow, "admin"), null);
+
+  const replacedMiddle = previousAudit.slice();
+  replacedMiddle.splice(400, 1);
+  replacedMiddle.unshift({ id: "audit-fabricated", action: "replacement" });
+  assert.equal(warehouseHistoryMutationIssue(
+    previous,
+    state({ auditLog: replacedMiddle.slice(0, 2_000) }),
+    "admin",
+  )?.status, 403);
+
+  const shortPrevious = state({ auditLog: previousAudit.slice(0, 10) });
+  const shortReplacement = state({
+    auditLog: [{ id: "audit-new", action: "new-event" }, ...previousAudit.slice(0, 9)],
+  });
+  assert.equal(warehouseHistoryMutationIssue(shortPrevious, shortReplacement, "admin")?.status, 403);
+});
+
 test("worker state projection contains only the assigned post slice", () => {
   const full = state({
     items: [{

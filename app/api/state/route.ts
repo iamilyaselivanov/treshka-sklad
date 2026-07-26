@@ -27,6 +27,7 @@ const MAX_COLLECTION_ITEMS = 50_000;
 const MAX_AUDIT_LOG_ITEMS = 2_000;
 const MAX_NOTIFICATION_ITEMS = 2_000;
 const MAX_INVENTORY_ACT_ITEMS = 5_000;
+const STATE_REVISION_RETENTION = 10;
 const REQUIRED_COLLECTIONS = ["items", "posts", "docs"] as const;
 const OPTIONAL_COLLECTIONS = [
   "extIssues",
@@ -271,6 +272,23 @@ export async function PUT(request: Request) {
   try {
     const results = await env.DB.batch([
       stateWrite,
+      env.DB.prepare(
+        `INSERT OR REPLACE INTO warehouse_state_revisions
+           (state_key, revision, payload, updated_at, updated_by)
+         SELECT state_key, revision, payload, updated_at, updated_by
+         FROM warehouse_full_state
+         WHERE state_key = 'main' AND revision = ?`,
+      ).bind(revision),
+      env.DB.prepare(
+        `DELETE FROM warehouse_state_revisions
+         WHERE state_key = 'main'
+           AND revision NOT IN (
+             SELECT revision FROM warehouse_state_revisions
+             WHERE state_key = 'main'
+             ORDER BY revision DESC
+             LIMIT ?
+           )`,
+      ).bind(STATE_REVISION_RETENTION),
       env.DB.prepare(
          `DELETE FROM warehouse_state_items
          WHERE state_key = 'main'

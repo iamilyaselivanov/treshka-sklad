@@ -5,6 +5,35 @@ export class RequestBodyTooLargeError extends Error {
   }
 }
 
+const OVERSIZE_DRAIN_LIMIT_BYTES = 4_000_000;
+const OVERSIZE_DRAIN_TIMEOUT_MS = 2_000;
+
+async function drainReaderBounded(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  byteLimit = OVERSIZE_DRAIN_LIMIT_BYTES,
+  timeoutMs = OVERSIZE_DRAIN_TIMEOUT_MS,
+) {
+  let drained = 0;
+  const deadline = Date.now() + timeoutMs;
+  while (drained <= byteLimit) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) break;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      reader.read().then((result) => ({ kind: "read" as const, result })),
+      new Promise<{ kind: "timeout" }>((resolve) => {
+        timeout = setTimeout(() => resolve({ kind: "timeout" }), remainingMs);
+      }),
+    ]);
+    if (timeout) clearTimeout(timeout);
+    if (outcome.kind === "timeout") break;
+    if (outcome.result.done) return true;
+    drained += outcome.result.value.byteLength;
+  }
+  await reader.cancel("request body drain budget exceeded").catch(() => undefined);
+  return false;
+}
+
 export async function readJsonObject(
   request: Request,
   maxBytes?: number,
@@ -18,12 +47,16 @@ export async function readJsonObject(
     if (maxBytes == null) {
       value = await request.json();
     } else {
-      const declaredLength = Number(request.headers.get("content-length"));
-      if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
-        throw new RequestBodyTooLargeError();
-      }
       const reader = request.body?.getReader();
       if (!reader) return null;
+      const declaredLength = Number(request.headers.get("content-length"));
+      if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+        // Workerd must see the body consumed before the 413 response or it may
+        // tear down the keep-alive connection. Bound both bytes and time so a
+        // dishonest/slow sender cannot hold a Worker indefinitely.
+        await drainReaderBounded(reader);
+        throw new RequestBodyTooLargeError();
+      }
       const decoder = new TextDecoder();
       const chunks: string[] = [];
       let received = 0;
@@ -32,7 +65,9 @@ export async function readJsonObject(
         if (result.done) break;
         received += result.value.byteLength;
         if (received > maxBytes) {
-          await reader.cancel("request body exceeds size limit").catch(() => undefined);
+          // Unknown/chunked lengths are discovered only after the limit. Drain
+          // the bounded tail for connection reuse, then reject the body.
+          await drainReaderBounded(reader);
           throw new RequestBodyTooLargeError();
         }
         chunks.push(decoder.decode(result.value, { stream: true }));

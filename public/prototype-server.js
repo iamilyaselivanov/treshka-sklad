@@ -533,7 +533,10 @@
     // every later successful fetch before deciding whether local changes may be
     // uploaded; otherwise an owner is misclassified as read-only and poll can
     // overwrite their offline work.
+    const previousPartial = sync.partial;
     data.authorizationChanged = adoptServerUser(data.user);
+    data.partialChanged = Boolean(data.partial) !== previousPartial;
+    if (data.state == null) sync.partial = Boolean(data.partial);
     sync.lastServerStateJson = data.state == null ? "" : JSON.stringify(data.state);
     sync.lastServerEtag = response.headers.get("etag") || "";
     noteSyncSuccess();
@@ -607,10 +610,17 @@
       const remoteRevision = Number(snapshot.revision || 0);
       if (
         snapshot.state
-        && (snapshot.authorizationChanged || Boolean(snapshot.partial) !== sync.partial)
+        && (snapshot.authorizationChanged || snapshot.partialChanged)
       ) {
         applyRemoteSnapshot(snapshot, false);
         noteSyncSuccess();
+        return;
+      }
+      if (!snapshot.state && snapshot.partialChanged) {
+        // Even an empty warehouse response carries authorization scope. Keep
+        // the upload gate/status in sync instead of waiting for a later state.
+        sync.lastUploaded = localPayload;
+        rerenderCurrentView();
         return;
       }
       if (remoteRevision <= sync.revision) {

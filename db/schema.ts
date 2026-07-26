@@ -1,4 +1,4 @@
-import { integer, index, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { integer, index, primaryKey, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
 
 export const products = sqliteTable(
@@ -80,6 +80,21 @@ export const warehouseFullState = sqliteTable("warehouse_full_state", {
   updatedAt: text("updated_at").notNull(),
   updatedBy: text("updated_by").notNull(),
 });
+
+export const warehouseStateRevisions = sqliteTable(
+  "warehouse_state_revisions",
+  {
+    stateKey: text("state_key").notNull(),
+    revision: integer("revision").notNull(),
+    payload: text("payload").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    updatedBy: text("updated_by").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.stateKey, table.revision] }),
+    index("warehouse_state_revisions_updated_idx").on(table.updatedAt),
+  ],
+);
 
 export const warehouseStateItems = sqliteTable(
   "warehouse_state_items",

@@ -932,10 +932,15 @@ class AppStateStore(context: Context) :
     }
 
     @Synchronized
-    fun markSyncContact() {
+    fun markSyncContact(clearError: Boolean) {
         writableDatabase.execSQL(
-            "UPDATE sync_config SET last_sync_at=? WHERE id=1",
-            arrayOf(System.currentTimeMillis()),
+            """
+            UPDATE sync_config
+            SET last_sync_at=?,
+                last_error=CASE WHEN ? THEN NULL ELSE last_error END
+            WHERE id=1
+            """.trimIndent(),
+            arrayOf(System.currentTimeMillis(), if (clearError) 1 else 0),
         )
     }
 

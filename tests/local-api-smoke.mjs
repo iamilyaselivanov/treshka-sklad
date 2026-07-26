@@ -338,6 +338,28 @@ try {
     body: JSON.stringify({ state: oversizedState, expectedRevision: state.data.revision }),
   }, 413);
   assert.match(oversizedWrite.data.error, /1,5 МБ/);
+  await request("/api/auth/status");
+  const chunkedPayload = JSON.stringify({
+    state: { ...sharedState, rejectedPadding: "y".repeat(1_510_000) },
+    expectedRevision: state.data.revision,
+  });
+  const chunkedBytes = new TextEncoder().encode(chunkedPayload);
+  const chunkedBody = new ReadableStream({
+    start(controller) {
+      for (let offset = 0; offset < chunkedBytes.length; offset += 64 * 1024) {
+        controller.enqueue(chunkedBytes.slice(offset, offset + 64 * 1024));
+      }
+      controller.close();
+    },
+  });
+  const chunkedOversizedWrite = await request("/api/state", {
+    method: "PUT",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: chunkedBody,
+    duplex: "half",
+  }, 413);
+  assert.match(chunkedOversizedWrite.data.error, /1,5 МБ/);
+  await request("/api/auth/status");
   const collectionOverflow = {
     ...sharedState,
     inventoryActs: [...sharedState.inventoryActs, { no: "inventory-overflow", diffs: [] }],
@@ -604,6 +626,28 @@ try {
     body: JSON.stringify({ state: candidate, expectedRevision: stateAfterDeletion.data.revision }),
   })));
   assert.deepEqual(parallelWrites.map((response) => response.status).sort(), [200, 409]);
+  const currentBeforeRestore = await request("/api/state", { headers: ownerHeaders });
+  const history = await request("/api/state/history", { headers: ownerHeaders });
+  assert.ok(history.data.revisions.length >= 2);
+  assert.ok(history.data.revisions.length <= 10);
+  const targetRevision = history.data.revisions.find(
+    (entry) => entry.revision < currentBeforeRestore.data.revision,
+  ).revision;
+  const archived = await request(`/api/state/history?revision=${targetRevision}`, { headers: ownerHeaders });
+  await request("/api/state/history", {
+    method: "POST",
+    headers: { cookie: roleCookies.admin, "content-type": "application/json" },
+    body: JSON.stringify({ revision: targetRevision, expectedRevision: currentBeforeRestore.data.revision }),
+  }, 403);
+  const restored = await request("/api/state/history", {
+    method: "POST",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({ revision: targetRevision, expectedRevision: currentBeforeRestore.data.revision }),
+  });
+  assert.equal(restored.data.revision, currentBeforeRestore.data.revision + 1);
+  assert.equal(restored.data.restoredFrom, targetRevision);
+  const stateAfterRestore = await request("/api/state", { headers: ownerHeaders });
+  assert.deepEqual(stateAfterRestore.data.state, archived.data.state);
 
   const onePixelPng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
   await request("/api/media/images", {

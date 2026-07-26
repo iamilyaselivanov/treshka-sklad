@@ -37,6 +37,14 @@ class SyncPolicyTest {
     }
 
     @Test
+    fun successfulContactClearsStaleErrorsOnlyWithoutParkedConflicts() {
+        assertTrue(SyncPolicy.shouldClearContactError(pendingCount = 2, sendablePendingCount = 2))
+        assertFalse(SyncPolicy.shouldClearContactError(pendingCount = 2, sendablePendingCount = 0))
+        assertFalse(SyncPolicy.shouldClearContactError(pendingCount = 2, sendablePendingCount = 1))
+        assertFalse(SyncPolicy.shouldClearContactError(pendingCount = 0, sendablePendingCount = 0))
+    }
+
+    @Test
     fun legacyZeroBaseSnapshotsAreQuarantinedInsteadOfPromoted() {
         assertEquals(
             LegacyOutboxMigration.NONE,

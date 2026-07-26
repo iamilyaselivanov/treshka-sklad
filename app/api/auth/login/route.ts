@@ -20,6 +20,8 @@ type LoginRow = {
   status: string;
 };
 
+const DUMMY_PASSWORD_HASH = "pbkdf2$100000$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
 export async function POST(request: Request) {
   const body = await readJsonObject(request);
   if (!body) return Response.json({ error: "Некорректный JSON" }, { status: 400 });
@@ -52,8 +54,11 @@ export async function POST(request: Request) {
   const row = await env.DB.prepare(
     "SELECT id, callsign, login, password_hash, role, assignment, status FROM users WHERE login = ?",
   ).bind(login).first<LoginRow>();
+  // Unknown, blocked and active accounts all pay the same PBKDF2 cost. Without
+  // this dummy hash an attacker can distinguish a missing login by timing.
+  const passwordMatches = await verifyPassword(password, row?.password_hash ?? DUMMY_PASSWORD_HASH);
 
-  if (!row || row.status !== "active" || !(await verifyPassword(password, row.password_hash))) {
+  if (!row || row.status !== "active" || !passwordMatches) {
     // A second IP-wide lane bounds login rotation. It is incremented only for
     // actual failures, so successful logins on a shared warehouse network do
     // not consume its allowance.

@@ -2870,10 +2870,25 @@ let notificationSeq = 0;
 function maxRecordNumber(rows, kind){
   return (rows||[]).reduce((max,row)=>{
     if(kind && row.kind!==kind) return max;
-    const match=String(row.no||'').match(/(\d+)\s*$/);
+    const match=String(row.no||'').trim().match(/^(?:ДФ|АВР|ВН)-0*(\d+)(?:\/.*)?$/i);
     return match ? Math.max(max,Number(match[1])) : max;
   },0);
 }
+function localDocumentNodeId(){
+  const key='treshka_sklad_document_node_v1';
+  try{
+    const existing=String(localStorage.getItem(key)||'').trim().toUpperCase();
+    if(/^[A-Z0-9]{6}$/.test(existing))return existing;
+    const generated=(globalThis.crypto&&typeof globalThis.crypto.randomUUID==='function'
+      ? globalThis.crypto.randomUUID().replace(/-/g,'')
+      : Date.now().toString(36)+Math.random().toString(36).slice(2)).slice(0,6).toUpperCase();
+    localStorage.setItem(key,generated);
+    return generated;
+  }catch(e){
+    return (Date.now().toString(36)+Math.random().toString(36).slice(2)).slice(-6).toUpperCase();
+  }
+}
+const documentNodeId=localDocumentNodeId();
 let documentSeq = {
   defekt: Math.max(99 + docs.filter(d=>d.kind==='defekt').length, maxRecordNumber(docs,'defekt')),
   work: Math.max(199 + docs.filter(d=>d.kind==='work').length, maxRecordNumber(docs,'work')),
@@ -2883,11 +2898,11 @@ function nextDocumentNo(kind){
   const prefix=kind==='work'?'АВР-':'ДФ-';
   const floor=kind==='work'?199:99;
   documentSeq[kind]=Math.max(floor,Number(documentSeq[kind])||0,maxRecordNumber(docs,kind))+1;
-  return prefix+documentSeq[kind];
+  return prefix+documentSeq[kind]+'/'+documentNodeId;
 }
 function nextExternalIssueNo(){
   externalIssueSeq=Math.max(19,Number(externalIssueSeq)||0,maxRecordNumber(extIssues))+1;
-  return 'ВН-'+String(externalIssueSeq).padStart(3,'0');
+  return 'ВН-'+String(externalIssueSeq).padStart(3,'0')+'/'+documentNodeId;
 }
 function newBusinessRecordId(prefix){
   if(globalThis.crypto&&typeof globalThis.crypto.randomUUID==='function') return prefix+'-'+globalThis.crypto.randomUUID();

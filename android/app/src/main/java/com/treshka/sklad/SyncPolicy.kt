@@ -25,6 +25,9 @@ internal object SyncPolicy {
         return (5L * (1L shl exponent)).coerceAtMost(300L)
     }
 
+    fun shouldClearContactError(pendingCount: Int, sendablePendingCount: Int): Boolean =
+        pendingCount > 0 && pendingCount == sendablePendingCount
+
     /**
      * Schema v7 incorrectly replaced every zero base revision with the current
      * server revision. When upgrading from that exact schema the original

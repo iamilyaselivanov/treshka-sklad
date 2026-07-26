@@ -24,6 +24,7 @@ test("security endpoints and server-connected APK are present", async () => {
     "app/api/auth/recover-owner/route.ts",
     "app/api/users/transfer-owner/route.ts",
     "app/api/audit/route.ts",
+    "app/api/state/history/route.ts",
     "app/api/media/images/route.ts",
   ];
   await Promise.all(paths.map(text));
@@ -121,6 +122,7 @@ test("security hardening keeps state writes privileged and recovery throttling g
   assert.match(auth, /fetchSite !== "same-origin" && fetchSite !== "none"/);
   assert.match(auth, /MAX_REJECTED_BODY_DRAIN_BYTES = 1_500_000 \+ 64 \* 1024/);
   assert.match(auth, /RETURNING failures, blocked_until/);
+  assert.match(await text("app/api/auth/login/route.ts"), /DUMMY_PASSWORD_HASH/);
   assert.doesNotMatch(`${auth}\n${stateRoute}\n${productsRoute}`, /CREATE TABLE IF NOT EXISTS/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS `warehouse_full_state`/);
 });
@@ -174,7 +176,8 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.doesNotMatch(androidStore, /fun markMutationAttempted\(/);
   assert.match(androidSync, /store\.markMutationConflicted\(pending\.mutationId, message\)/);
   assert.match(androidSync, /store\.sendablePendingCount\(\) == 0/);
-  assert.match(androidSync, /store\.markSyncContact\(\)/);
+  assert.match(androidSync, /store\.markSyncContact\(/);
+  assert.match(androidSync, /refreshServerRole\(config, force = true\)/);
   assert.match(androidSync, /store\.savePendingRemoteSnapshot\(payload, revision\)/);
   assert.match(androidSync, /store\.acceptServerSnapshot\(id, allowDiscardWithoutBackup\)/);
   assert.doesNotMatch(androidSync, /localExportConfirmed/);
@@ -220,6 +223,8 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.match(prototype, /Не удалось подтвердить роль этого аккаунта/);
   assert.match(prototype, /conflictLoadError/);
   assert.match(prototype, /nativeRoleCanAdminister/);
+  assert.match(prototype, /treshka_sklad_document_node_v1/);
+  assert.match(prototype, /(?:ДФ\|АВР\|ВН)/);
   assert.match(browserSync, /state\.auditLog = Array\.isArray\(state\.auditLog\).*slice\(0, 2_000\)/);
   assert.match(browserSync, /!sync\.partial/);
   assert.match(browserSync, /authorizationChanged/);
@@ -279,6 +284,7 @@ test("build and local D1 bootstrap use the packaged Drizzle migrations", async (
   await text("dist/.openai/drizzle/0006_special_peter_quill.sql");
   await text("dist/.openai/drizzle/0007_cold_khan.sql");
   await text("dist/.openai/drizzle/0008_assignment_key_invariant.sql");
+  await text("dist/.openai/drizzle/0009_living_leo.sql");
 });
 
 test("database migrations build a clean schema and adopt the legacy runtime state table", async () => {
@@ -292,6 +298,7 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
     text("drizzle/0006_special_peter_quill.sql"),
     text("drizzle/0007_cold_khan.sql"),
     text("drizzle/0008_assignment_key_invariant.sql"),
+    text("drizzle/0009_living_leo.sql"),
   ]);
   const apply = (database, sql) => {
     for (const statement of sql.split("--> statement-breakpoint")) {
@@ -302,6 +309,8 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   assert.doesNotMatch(migrations[6], /ALTER TABLE/);
   assert.match(migrations[7], /ALTER TABLE `users` ADD `assignment_key`/);
   assert.match(migrations[8], /CREATE TRIGGER `users_assignment_key_after_insert`/);
+  assert.match(migrations[9], /CREATE TABLE `warehouse_state_revisions`/);
+  assert.match(migrations[9], /INSERT OR IGNORE INTO `warehouse_state_revisions`/);
 
   const clean = new DatabaseSync(":memory:");
   for (const migration of migrations) apply(clean, migration);
@@ -309,7 +318,7 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   assert.deepEqual(
     clean.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all()
       .map((row) => row.name),
-    ["audit_log", "login_throttle", "products", "push_deliveries", "push_delivery_attempts", "push_devices", "push_events", "push_maintenance_state", "sessions", "users", "warehouse_full_state", "warehouse_state_items"],
+    ["audit_log", "login_throttle", "products", "push_deliveries", "push_delivery_attempts", "push_devices", "push_events", "push_maintenance_state", "sessions", "users", "warehouse_full_state", "warehouse_state_items", "warehouse_state_revisions"],
   );
   clean.close();
 
@@ -367,12 +376,17 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   ).run("legacy-worker", "Тест", "legacy-worker", "hash", "worker", "  тЭч  ", "2026-07-26");
   apply(adopted, migrations[7]);
   apply(adopted, migrations[8]);
+  apply(adopted, migrations[9]);
   assert.deepEqual(
     adopted.prepare("SELECT item_id AS itemId FROM warehouse_state_items WHERE state_key='main'").all()
       .map((row) => row.itemId),
     ["legacy-item"],
   );
   assert.equal(adopted.prepare("SELECT COUNT(*) AS count FROM push_delivery_attempts").get().count, 0);
+  assert.equal(
+    adopted.prepare("SELECT revision FROM warehouse_state_revisions WHERE state_key='main'").get().revision,
+    4,
+  );
   assert.equal(
     adopted.prepare("SELECT assignment_key AS key FROM users WHERE id='legacy-worker'").get().key,
     "тэч",

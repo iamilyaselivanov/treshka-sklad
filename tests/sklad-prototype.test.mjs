@@ -78,6 +78,7 @@ async function newHttpServerPage({
   promoteToRole = null,
   embeddedPhoto = false,
   mediaDelayMs = 0,
+  emptyState = false,
 } = {}) {
   const ctx = await browser.newContext();
   const state = serverStateFixture();
@@ -110,7 +111,7 @@ async function newHttpServerPage({
           headers: { etag: `W/"warehouse-main-7-test-${responseRole}"` },
           body: JSON.stringify({
             revision: 7,
-            state,
+            state: emptyState ? null : state,
             partial: responseRole === 'worker',
             user: {
               id: 'test-promotable-user',
@@ -363,12 +364,19 @@ test('business record ids are immutable and document numbers remain monotonic af
       persistedExternalSeq: saved.externalIssueSeq,
     };
   });
-  const suffix = (value) => Number(value.match(/(\d+)$/)?.[1] ?? 0);
-  assert.equal(suffix(result.secondDefect), suffix(result.firstDefect) + 1);
-  assert.equal(suffix(result.secondExternal), suffix(result.firstExternal) + 1);
+  const { ctx: otherCtx, page: otherPage } = await newPage();
+  const otherDeviceDefect = await otherPage.evaluate(() => nextDocumentNo('defekt'));
+  const sequence = (value) => Number(value.match(/-(\d+)(?:\/|$)/)?.[1] ?? 0);
+  const node = (value) => value.match(/\/([A-Z0-9]{6})$/)?.[1] ?? '';
+  assert.equal(sequence(result.secondDefect), sequence(result.firstDefect) + 1);
+  assert.equal(sequence(result.secondExternal), sequence(result.firstExternal) + 1);
   assert.equal(result.uniqueIds, true);
-  assert.equal(result.persistedDefectSeq, suffix(result.secondDefect));
-  assert.equal(result.persistedExternalSeq, suffix(result.secondExternal));
+  assert.equal(result.persistedDefectSeq, sequence(result.secondDefect));
+  assert.equal(result.persistedExternalSeq, sequence(result.secondExternal));
+  assert.equal(sequence(otherDeviceDefect), sequence(result.firstDefect));
+  assert.notEqual(node(otherDeviceDefect), node(result.firstDefect));
+  assert.notEqual(otherDeviceDefect, result.firstDefect, 'offline devices must not issue the same human document number');
+  await otherCtx.close();
   await ctx.close();
 });
 
@@ -1163,6 +1171,25 @@ test('review 1c9e809 — worker projection is replaced before a promoted adminis
   assert.equal(counts().statePuts, 1, 'the partial graph itself must never be uploaded');
   assert.equal(putBodies[0].partial, false);
   assert.equal(putBodies[0].state.items[0].stock, 6);
+  await ctx.close();
+});
+
+test('review 4968fed — authorization scope updates even when the server warehouse is empty', async () => {
+  const { ctx, page, counts } = await newHttpServerPage({
+    role: 'worker',
+    promoteToRole: 'admin',
+    emptyState: true,
+  });
+  const result = await page.evaluate(async () => {
+    await window.treshkaServerSync.flush();
+    return {
+      role: window.treshkaServerRole(),
+      status: window.treshkaServerSync.status(),
+    };
+  });
+  assert.equal(result.role, 'admin');
+  assert.equal(result.status.partial, false);
+  assert.equal(counts().statePuts, 0, 'an authorization-only response must not upload the old local graph');
   await ctx.close();
 });
 

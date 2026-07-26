@@ -287,29 +287,27 @@ function immutableHistoryPreserved(previousValue: unknown, nextValue: unknown) {
   return true;
 }
 
-function rollingHistoryPreserved(previousValue: unknown, nextValue: unknown) {
-  const previousRows = rows(previousValue);
-  const nextRows = rows(nextValue);
+function rollingHistoryPreserved(previousValue: unknown, nextValue: unknown, windowLimit: number) {
+  const previousRows = rows(previousValue).map(canonicalHistoryJson);
+  const nextRows = rows(nextValue).map(canonicalHistoryJson);
   if (nextRows.length < previousRows.length) return false;
-  const previousCounts = new Map<string, number>();
-  const nextCounts = new Map<string, number>();
-  for (const value of previousRows) {
-    const serialized = canonicalHistoryJson(value);
-    previousCounts.set(serialized, (previousCounts.get(serialized) ?? 0) + 1);
+  if (previousRows.length < windowLimit) {
+    // New feed rows are prepended. Before the window is full, every previous
+    // row must remain as an unchanged suffix.
+    const suffix = nextRows.slice(nextRows.length - previousRows.length);
+    return suffix.every((value, index) => value === previousRows[index]);
   }
-  for (const value of nextRows) {
-    const serialized = canonicalHistoryJson(value);
-    nextCounts.set(serialized, (nextCounts.get(serialized) ?? 0) + 1);
+  // Once the rolling window is full, only an unchanged prefix of the previous
+  // window may remain after newly prepended rows push the oldest tail out.
+  // Arbitrary one-for-one replacement in the middle is therefore rejected.
+  for (let added = 0; added < nextRows.length; added += 1) {
+    const retained = nextRows.length - added;
+    if (retained <= 0) break;
+    if (nextRows.slice(added).every((value, index) => value === previousRows[index])) {
+      return true;
+    }
   }
-  let missing = 0;
-  let added = 0;
-  for (const [serialized, count] of previousCounts) {
-    missing += Math.max(0, count - (nextCounts.get(serialized) ?? 0));
-  }
-  for (const [serialized, count] of nextCounts) {
-    added += Math.max(0, count - (previousCounts.get(serialized) ?? 0));
-  }
-  return missing <= added;
+  return nextRows.every((value, index) => value === previousRows[index]);
 }
 
 /**
@@ -328,8 +326,8 @@ export function warehouseHistoryMutationIssue(
     || !mutableHistoryPreserved(previous.extIssues, next.extIssues)
     || !immutableHistoryPreserved(previous.stockTransfers, next.stockTransfers)
     || !immutableHistoryPreserved(previous.inventoryActs, next.inventoryActs)
-    || !rollingHistoryPreserved(previous.auditLog, next.auditLog)
-    || !rollingHistoryPreserved(previous.notifications, next.notifications)
+    || !rollingHistoryPreserved(previous.auditLog, next.auditLog, 2_000)
+    || !rollingHistoryPreserved(previous.notifications, next.notifications, 2_000)
   ) {
     return {
       status: 403 as const,
