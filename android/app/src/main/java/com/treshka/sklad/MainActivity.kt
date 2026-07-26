@@ -38,6 +38,7 @@ import java.io.FileOutputStream
 import org.json.JSONObject
 import com.google.firebase.FirebaseApp
 import com.google.firebase.messaging.FirebaseMessaging
+import java.util.concurrent.atomic.AtomicBoolean
 
 private const val APP_URL = "https://sklad-ok-prototype.janfoody2016.chatgpt.site/"
 private const val APP_HOST = "sklad-ok-prototype.janfoody2016.chatgpt.site"
@@ -71,6 +72,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var appStateStore: AppStateStore
     private lateinit var serverSyncManager: ServerSyncManager
     private lateinit var pushRegistrationStore: PushRegistrationStore
+    private val conflictDiscardConfirmationVisible = AtomicBoolean(false)
 
     private val scanLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -334,24 +336,43 @@ class MainActivity : AppCompatActivity() {
 
         @JavascriptInterface
         fun listConflicts(): String = try {
-            serverSyncManager.listConflicts()
+            if (!appStateStore.syncRoleCanAdminister()) {
+                JSONObject()
+                    .put("error", "Конфликты доступны только владельцу или администратору")
+                    .toString()
+            } else {
+                serverSyncManager.listConflicts()
+            }
         } catch (e: Exception) {
             JSONObject().put("error", e.message ?: "Ошибка загрузки конфликтов").toString()
         }
 
         @JavascriptInterface
         fun resolveConflict(id: Long, decision: String): String = try {
-            val result = serverSyncManager.resolveConflict(id, decision)
-            if (decision == "server" && JSONObject(result).optBoolean("confirmationRequired")) {
-                requestNativeConflictDiscardConfirmation(id)
+            if (!appStateStore.syncRoleCanAdminister()) {
+                JSONObject()
+                    .put("error", "Решение конфликтов доступно только владельцу или администратору")
+                    .toString()
+            } else {
+                val result = serverSyncManager.resolveConflict(id, decision)
+                if (decision == "server" && JSONObject(result).optBoolean("confirmationRequired")) {
+                    requestNativeConflictDiscardConfirmation(id)
+                }
+                result
             }
-            result
         } catch (e: Exception) {
             JSONObject().put("error", e.message ?: "Ошибка решения конфликта").toString()
         }
 
         @JavascriptInterface
-        fun latestConflictBackup(): String = appStateStore.latestConflictBackupJson()
+        fun exportLatestConflictBackup(): String {
+            if (!appStateStore.syncRoleCanAdminister()) {
+                return JSONObject()
+                    .put("error", "Экспорт резервной копии доступен только владельцу или администратору")
+                    .toString()
+            }
+            return exportLatestConflictBackupToDownloads()
+        }
 
         @JavascriptInterface
         fun uploadImage(dataUrl: String): String = try {
@@ -371,8 +392,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestNativeConflictDiscardConfirmation(id: Long) {
+        if (!conflictDiscardConfirmationVisible.compareAndSet(false, true)) return
         runOnUiThread {
-            AlertDialog.Builder(this)
+            if (isFinishing || isDestroyed) {
+                conflictDiscardConfirmationVisible.set(false)
+                return@runOnUiThread
+            }
+            var resolutionStarted = false
+            val dialog = AlertDialog.Builder(this)
                 .setTitle("Резервная копия не создана")
                 .setMessage(
                     "Хранилище устройства не позволило сохранить локальные изменения. " +
@@ -381,6 +408,7 @@ class MainActivity : AppCompatActivity() {
                 )
                 .setNegativeButton("Отмена", null)
                 .setPositiveButton("Продолжить") { _, _ ->
+                    resolutionStarted = true
                     Thread {
                         val result = runCatching {
                             serverSyncManager.resolveConflict(
@@ -393,16 +421,81 @@ class MainActivity : AppCompatActivity() {
                                 .put("error", it.message ?: "Ошибка решения конфликта")
                                 .toString()
                         }
-                        runOnUiThread {
+                        runOnUiThread completion@{
+                            if (isFinishing || isDestroyed) return@completion
                             webView.evaluateJavascript(
                                 "window.onNativeConflictResolutionCompleted && " +
                                     "window.onNativeConflictResolutionCompleted(${jsStringLiteral(result)});",
                                 null,
                             )
                         }
+                        conflictDiscardConfirmationVisible.set(false)
                     }.start()
                 }
-                .show()
+                .create()
+            dialog.setOnDismissListener {
+                if (!resolutionStarted) conflictDiscardConfirmationVisible.set(false)
+            }
+            dialog.show()
+        }
+    }
+
+    private fun exportLatestConflictBackupToDownloads(): String {
+        val source = appStateStore.latestConflictBackupFile()
+            ?: return JSONObject()
+                .put("error", "Резервных копий конфликтов пока нет")
+                .toString()
+        return try {
+            val saved = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val resolver = contentResolver
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, source.name)
+                    put(MediaStore.Downloads.MIME_TYPE, "application/json")
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: return JSONObject().put("error", "Не удалось создать файл в «Загрузках»").toString()
+                var published = false
+                try {
+                    resolver.openOutputStream(uri)?.use { output ->
+                        source.inputStream().use { input -> input.copyTo(output, 64 * 1024) }
+                    } ?: return JSONObject().put("error", "Не удалось открыть файл в «Загрузках»").toString()
+                    values.clear()
+                    values.put(MediaStore.Downloads.IS_PENDING, 0)
+                    published = resolver.update(uri, values, null, null) > 0
+                    published
+                } finally {
+                    if (!published) runCatching { resolver.delete(uri, null, null) }
+                }
+            } else {
+                if (
+                    ContextCompat.checkSelfPermission(
+                        this,
+                        Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                    ) != PackageManager.PERMISSION_GRANTED
+                ) {
+                    return JSONObject().put("error", "Нет разрешения на запись в «Загрузки»").toString()
+                }
+                @Suppress("DEPRECATION")
+                val downloadsDir =
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                if (!downloadsDir.exists() && !downloadsDir.mkdirs()) {
+                    return JSONObject().put("error", "Не удалось открыть папку «Загрузки»").toString()
+                }
+                val target = File(downloadsDir, source.name)
+                source.inputStream().use { input ->
+                    FileOutputStream(target).use { output -> input.copyTo(output, 64 * 1024) }
+                }
+                true
+            }
+            if (saved) {
+                JSONObject().put("ok", true).put("filename", source.name).toString()
+            } else {
+                JSONObject().put("error", "Не удалось экспортировать резервную копию").toString()
+            }
+        } catch (error: Exception) {
+            Log.e("ConflictBackupExport", "Export failed", error)
+            JSONObject().put("error", "Не удалось экспортировать резервную копию").toString()
         }
     }
 

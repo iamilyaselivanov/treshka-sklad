@@ -40,11 +40,29 @@ export async function runPushMaintenance(database: D1Database) {
   ]);
 }
 
+async function releasePushMaintenanceClaim(
+  database: D1Database,
+  claimedAt: Date,
+) {
+  await database.prepare(
+    "UPDATE push_maintenance_state SET last_run_at = ? WHERE id = 1 AND last_run_at = ?",
+  ).bind(new Date(0).toISOString(), claimedAt.toISOString()).run();
+}
+
 export async function maybeRunPushMaintenance(
   database: D1Database,
   now = new Date(),
 ) {
   if (!await claimPushMaintenance(database, now)) return false;
-  await runPushMaintenance(database);
-  return true;
+  try {
+    await runPushMaintenance(database);
+    return true;
+  } catch (error) {
+    try {
+      await releasePushMaintenanceClaim(database, now);
+    } catch (releaseError) {
+      console.error("push maintenance claim release failed", releaseError);
+    }
+    throw error;
+  }
 }

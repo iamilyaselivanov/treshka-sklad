@@ -1235,6 +1235,50 @@ test('server conflict resolution delegates native private backup without trustin
   await ctx.close();
 });
 
+test('conflict backup export is admin-only and delegates streaming to the native bridge', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.__backupExports = 0;
+    window.AndroidSync = {
+      status: () => JSON.stringify({
+        configured: true,
+        serverRevision: 4,
+        pending: 0,
+        conflictBackups: 1,
+      }),
+      exportLatestConflictBackup: () => {
+        window.__backupExports += 1;
+        return JSON.stringify({ ok: true, filename: 'treshka_conflict_test.json' });
+      },
+    };
+  });
+  const result = await page.evaluate(() => {
+    currentRole = 'rabotnik';
+    const worker = exportLatestConflictBackup();
+    currentRole = 'admin';
+    const admin = exportLatestConflictBackup();
+    return { worker, admin, exports: window.__backupExports };
+  });
+  assert.deepEqual(result, { worker: false, admin: true, exports: 1 });
+  await ctx.close();
+});
+
+test('server UI never falls back to a client admin role while server identity is missing', async () => {
+  const { ctx, page } = await newPage(() => {
+    window.treshkaServerRole = () => '';
+  });
+  const result = await page.evaluate(() => {
+    currentRole = 'admin';
+    const missingSession = canAdminister();
+    window.treshkaServerRole = () => 'owner';
+    const owner = canAdminister();
+    window.treshkaServerRole = () => 'worker';
+    const worker = canAdminister();
+    return { missingSession, owner, worker };
+  });
+  assert.deepEqual(result, { missingSession: false, owner: true, worker: false });
+  await ctx.close();
+});
+
 test('review round — post movements are listed and an over-limit return is rejected atomically', async () => {
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => {

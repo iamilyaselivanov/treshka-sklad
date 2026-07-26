@@ -122,7 +122,7 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.match(browserSync, /sync\.conflict \|\| !canUploadState\(\)/);
   assert.match(androidStore, /SyncTokenVault/);
   assert.match(androidStore, /AndroidKeyStore/);
-  assert.match(androidStore, /DB_VERSION = 5/);
+  assert.match(androidStore, /DB_VERSION = 6/);
   assert.match(androidStore, /base_revision INTEGER NOT NULL DEFAULT 0/);
   assert.match(androidStore, /conflict INTEGER NOT NULL DEFAULT 0/);
   assert.match(androidStore, /fun claimNextPending\(\)/);
@@ -135,9 +135,14 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.match(androidSync, /store\.acceptServerSnapshot\(id, allowDiscardWithoutBackup\)/);
   assert.doesNotMatch(androidSync, /localExportConfirmed/);
   assert.match(androidStore, /noBackupFilesDir/);
-  assert.match(androidStore, /fun latestConflictBackupJson\(\)/);
+  assert.match(androidStore, /fun latestConflictBackupFile\(\)/);
+  assert.doesNotMatch(androidStore, /file\.readBytes\(\)/);
   assert.match(androidStore, /SELECT rowid, mutation_id, payload, schema_version, created_at/);
   assert.match(activity, /requestNativeConflictDiscardConfirmation/);
+  assert.match(activity, /fun exportLatestConflictBackup\(\)/);
+  assert.match(activity, /source\.inputStream\(\)\.use/);
+  assert.match(activity, /syncRoleCanAdminister/);
+  assert.match(activity, /conflictDiscardConfirmationVisible/);
   assert.match(androidSync, /store\.requeueConflictedMutation\(id, authoritative\.second\)/);
   assert.match(androidSync, /ConflictRequeueResult\.SERVER_ADVANCED/);
   assert.match(androidSync, /pending\.baseRevision/);
@@ -175,6 +180,7 @@ test("build and local D1 bootstrap use the packaged Drizzle migrations", async (
   await text("dist/.openai/drizzle/0005_hard_moira_mactaggert.sql");
   await text("dist/.openai/drizzle/0006_special_peter_quill.sql");
   await text("dist/.openai/drizzle/0007_cold_khan.sql");
+  await text("dist/.openai/drizzle/0008_assignment_key_invariant.sql");
 });
 
 test("database migrations build a clean schema and adopt the legacy runtime state table", async () => {
@@ -187,6 +193,7 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
     text("drizzle/0005_hard_moira_mactaggert.sql"),
     text("drizzle/0006_special_peter_quill.sql"),
     text("drizzle/0007_cold_khan.sql"),
+    text("drizzle/0008_assignment_key_invariant.sql"),
   ]);
   const apply = (database, sql) => {
     for (const statement of sql.split("--> statement-breakpoint")) {
@@ -196,6 +203,7 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   assert.match(migrations[5], /ALTER TABLE `push_deliveries` ADD `attempts`/);
   assert.doesNotMatch(migrations[6], /ALTER TABLE/);
   assert.match(migrations[7], /ALTER TABLE `users` ADD `assignment_key`/);
+  assert.match(migrations[8], /CREATE TRIGGER `users_assignment_key_after_insert`/);
 
   const clean = new DatabaseSync(":memory:");
   for (const migration of migrations) apply(clean, migration);
@@ -260,6 +268,7 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
      VALUES (?, ?, ?, ?, ?, ?, 'active', ?)`,
   ).run("legacy-worker", "Тест", "legacy-worker", "hash", "worker", "  тЭч  ", "2026-07-26");
   apply(adopted, migrations[7]);
+  apply(adopted, migrations[8]);
   assert.deepEqual(
     adopted.prepare("SELECT item_id AS itemId FROM warehouse_state_items WHERE state_key='main'").all()
       .map((row) => row.itemId),
@@ -270,11 +279,28 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
     adopted.prepare("SELECT assignment_key AS key FROM users WHERE id='legacy-worker'").get().key,
     "тэч",
   );
+  adopted.prepare(
+    `INSERT INTO users
+       (id, callsign, login, password_hash, role, assignment, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'active', ?)`,
+  ).run(
+    "whitespace-worker",
+    "Пробел",
+    "whitespace-worker",
+    "hash",
+    "worker",
+    `\tТЭЧ\u00a0${" ".repeat(40)}1\r\n`,
+    "2026-07-26",
+  );
+  assert.equal(
+    adopted.prepare("SELECT assignment_key AS key FROM users WHERE id='whitespace-worker'").get().key,
+    "тэч 1",
+  );
   adopted.close();
 });
 
 test("push notifications are server-addressed, durable and connected to Android FCM", async () => {
-  const [eventsRoute, pushEvents, devicesRoute, maintenance, fcm, bridge, prototype, service, activity, migration, metadataMigration, routingMigration] = await Promise.all([
+  const [eventsRoute, pushEvents, devicesRoute, maintenance, fcm, bridge, prototype, service, activity, migration, metadataMigration, routingMigration, invariantMigration] = await Promise.all([
     text("app/api/notifications/events/route.ts"),
     text("lib/push-events.ts"),
     text("app/api/devices/register/route.ts"),
@@ -287,6 +313,7 @@ test("push notifications are server-addressed, durable and connected to Android 
     text("drizzle/0004_pale_thanos.sql"),
     text("drizzle/0006_special_peter_quill.sql"),
     text("drizzle/0007_cold_khan.sql"),
+    text("drizzle/0008_assignment_key_invariant.sql"),
   ]);
   for (const eventType of [
     "post_stock_issued",
@@ -312,8 +339,12 @@ test("push notifications are server-addressed, durable and connected to Android 
   assert.match(eventsRoute, /push_delivery_attempts/);
   assert.match(eventsRoute, /collectPushRecipients/);
   assert.match(eventsRoute, /maybeRunPushMaintenance/);
+  assert.match(eventsRoute, /push_events\.created_at >= \?/);
+  assert.match(eventsRoute, /catch \(error\) \{\s*\/\/ Retention is best-effort housekeeping/);
   assert.match(maintenance, /DELETE FROM push_deliveries WHERE NOT EXISTS/);
   assert.match(maintenance, /UPDATE push_maintenance_state SET last_run_at/);
+  assert.match(maintenance, /releasePushMaintenanceClaim/);
+  assert.match(pushEvents, /PUSH_RECIPIENT_MAX_PAGES/);
   assert.match(eventsRoute, /Promise\.all\(batch\.map/);
   assert.match(eventsRoute, /offset \+= 8/);
   assert.match(fcm, /firebase\.messaging/);
@@ -340,4 +371,5 @@ test("push notifications are server-addressed, durable and connected to Android 
   assert.match(metadataMigration, /CREATE TABLE IF NOT EXISTS `warehouse_state_items`/);
   assert.match(routingMigration, /ALTER TABLE `users` ADD `assignment_key`/);
   assert.match(routingMigration, /CREATE TABLE `push_maintenance_state`/);
+  assert.match(invariantMigration, /AFTER UPDATE OF `assignment` ON `users`/);
 });

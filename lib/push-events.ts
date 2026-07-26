@@ -26,6 +26,7 @@ type PushRecipient = {
 };
 
 export const PUSH_RECIPIENT_PAGE_SIZE = 500;
+export const PUSH_RECIPIENT_MAX_PAGES = 100;
 
 const definitions: Record<PushEventType, PushEventDefinition> = {
   post_stock_issued: {
@@ -87,7 +88,13 @@ export function pushPresentation(
 }
 
 export function normalizePostAssignment(value: string) {
-  return value.trim().replace(/\s+/g, " ").toLocaleLowerCase("ru-RU");
+  // Keep this explicit whitespace set in sync with the SQLite migration and
+  // triggers. It covers every whitespace character accepted by our forms and
+  // avoids relying on SQLite trim()/lower() Unicode behavior.
+  return value
+    .replace(/[\t\n\v\f\r \u00a0]+/g, " ")
+    .trim()
+    .toLocaleLowerCase("ru-RU");
 }
 
 export function pushRecipientQuery(
@@ -135,11 +142,21 @@ export async function collectPushRecipients<T extends PushRecipient>(
   fetchPage: (limit: number, offset: number) => Promise<T[]> | T[],
   pageSize = PUSH_RECIPIENT_PAGE_SIZE,
 ) {
+  if (!Number.isInteger(pageSize) || pageSize < 1) {
+    throw new Error("Invalid push recipient page size");
+  }
   const recipients: T[] = [];
-  for (let offset = 0; ; offset += pageSize) {
+  for (let pageIndex = 0; pageIndex < PUSH_RECIPIENT_MAX_PAGES; pageIndex += 1) {
+    const offset = pageIndex * pageSize;
     const page = await fetchPage(pageSize, offset);
+    if (page.length > pageSize) {
+      throw new Error("Push recipient page exceeded the requested limit");
+    }
     recipients.push(...page);
     if (page.length < pageSize) break;
+    if (pageIndex === PUSH_RECIPIENT_MAX_PAGES - 1) {
+      throw new Error("Push recipient pagination limit exceeded");
+    }
   }
   return recipients;
 }

@@ -29,8 +29,10 @@ class ServerSyncManager(
         val body = JSONObject().put("login", login).put("password", password).toString()
         val response = requestJson("$normalized/v1/auth/login", "POST", null, body)
         if (response.code !in 200..299) throw IllegalStateException("HTTP ${response.code}: ${response.body.take(300)}")
-        val token = JSONObject(response.body).getString("token")
-        store.configureSync(normalized, token)
+        val responseJson = JSONObject(response.body)
+        val token = responseJson.getString("token")
+        val serverRole = responseJson.optJSONObject("user")?.optString("role").orEmpty()
+        store.configureSync(normalized, token, serverRole)
         syncNow()
         return response.body
     }
@@ -86,7 +88,8 @@ class ServerSyncManager(
                 ConflictRequeueResult.SERVER_ADVANCED ->
                     throw IllegalStateException(
                         "Локальный снимок устарел и не может заменить более новую серверную версию. " +
-                            "Выберите серверную версию; перед применением приложение выгрузит локальную копию в JSON-файл",
+                            "Выберите серверную версию; перед применением приложение сохранит локальные изменения " +
+                            "в приватной резервной копии. Владелец или администратор сможет отдельно экспортировать её в «Загрузки»",
                     )
                 ConflictRequeueResult.INVALID_REMOTE_REVISION ->
                     throw IllegalStateException(

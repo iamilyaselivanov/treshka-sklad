@@ -3398,8 +3398,12 @@ function safePhotoSource(value){
     || (typeof value==='string' && /^\/api\/media\/images\?key=images%2F[0-9a-f-]{36}\.(?:jpg|png|webp)$/.test(value));
 }
 function canAdminister(){
-  const serverRole=typeof window!=='undefined'&&typeof window.treshkaServerRole==='function'?window.treshkaServerRole():'';
-  return serverRole ? serverRole==='owner'||serverRole==='admin' : currentRole==='admin';
+  const hasServerRoleProvider=typeof window!=='undefined'&&typeof window.treshkaServerRole==='function';
+  if(hasServerRoleProvider){
+    const serverRole=serverActorRole();
+    return serverRole==='owner'||serverRole==='admin';
+  }
+  return currentRole==='admin';
 }
 function canManageCatalog(){ return canAdminister() || currentRole==='kladovshik'; }
 function canDeleteCatalogItem(){ return canAdminister(); }
@@ -4132,7 +4136,7 @@ function renderServerSettings(){
   const s=refreshNativeSyncStatus();
   let conflicts=[];
   const bridge=nativeSyncBridge();
-  if(s.configured&&currentRole==='admin'&&bridge&&typeof bridge.listConflicts==='function'){
+  if(s.configured&&canAdminister()&&bridge&&typeof bridge.listConflicts==='function'){
     try{const loaded=JSON.parse(bridge.listConflicts());if(Array.isArray(loaded))conflicts=loaded;}catch(e){console.warn(e);}
   }
   setHdr('Сервер и синхронизация','Offline-first: локальная база работает всегда',true,false);
@@ -4146,13 +4150,13 @@ function renderServerSettings(){
       <div class="fld"><label>Пароль</label><input id="serverPassword" type="password" autocomplete="current-password"></div>
       <button class="btn primary" onclick="connectServer()">Подключить и синхронизировать</button>
     </div>
-    ${s.configured?`<button class="btn green" onclick="nativeSyncBridge().syncNow();toast('Синхронизация запущена')">⟳ Синхронизировать сейчас</button>${Number(s.conflictBackups||0)>0?`<button class="btn ghost" onclick="exportLatestConflictBackup()">⤓ Экспорт последней резервной копии конфликта</button>`:''}<button class="btn ghost" onclick="disconnectServer()">Отключить сервер на этом устройстве</button>`:''}
+    ${s.configured?`<button class="btn green" onclick="nativeSyncBridge().syncNow();toast('Синхронизация запущена')">⟳ Синхронизировать сейчас</button>${canAdminister()&&Number(s.conflictBackups||0)>0?`<button class="btn ghost" onclick="exportLatestConflictBackup()">⤓ Экспорт последней резервной копии конфликта</button>`:''}<button class="btn ghost" onclick="disconnectServer()">Отключить сервер на этом устройстве</button>`:''}
     ${conflicts.length?`<div class="sec">Конфликты без потери данных</div>${conflicts.map(c=>{const skipped=Math.max(0,Number(c.serverChanges||0));const localSafe=Boolean(c.canKeepLocal);return `<div class="card static"><div class="t">Устройство ${esc(c.deviceId)}</div><div class="s">Локальная ревизия ${Number(c.baseRevision||0)}, серверная ${Number(c.serverRevision||0)}. ${skipped?`На сервере уже ${skipped} новых ревизий — старый полный снимок не будет отправлен поверх них.`:'Обе копии сохранены.'}</div><button class="fbtn" style="width:100%;margin-top:8px" onclick="resolveServerConflict(${c.id},'server')">Оставить серверную версию</button><button class="fbtn" style="width:100%;margin-top:6px" ${localSafe?`onclick="resolveServerConflict(${c.id},'local')"`:'disabled'}>${localSafe?'Повторить локальную версию':'Локальная версия защищена от опасной перезаписи'}</button></div>`;}).join('')}`:''}
     <div class="sec">Защита данных</div>
     <div class="card static"><div class="s" style="color:var(--ink);line-height:1.55">Каждое изменение сначала атомарно записывается в SQLite вместе с durable outbox. Сервер принимает mutationId только один раз. Перед принятием серверной версии приложение сохраняет фактически удаляемые локальные снимки в приватной резервной копии на устройстве. В «Загрузки» она попадает только по отдельной команде экспорта.</div></div>`;
 }
 function resolveServerConflict(id,decision){
-  if(currentRole!=='admin'){toast('Решение конфликтов доступно только администратору');return false;}
+  if(!canAdminister()){toast('Решение конфликтов доступно только владельцу или администратору');return false;}
   if(!confirm(decision==='local'?'Повторить локальную версию можно только при отсутствии более новых серверных ревизий. Продолжить?':'Оставить серверную версию? Фактически удаляемые несинхронизированные снимки будут сохранены в приватной резервной копии приложения, затем будет применена серверная копия.'))return false;
   const bridge=nativeSyncBridge();
   try{const result=JSON.parse(bridge.resolveConflict(id,decision));if(result.confirmationRequired){toast(result.error||'Требуется подтверждение на устройстве');return false;}if(result.error){toast(result.error);return false;}toast(result.backupSaved===false?'✓ Конфликт решён без резервной копии':'✓ Конфликт решён, приватная резервная копия сохранена');renderServerSettings();return true;}
@@ -4164,14 +4168,14 @@ function onNativeConflictResolutionCompleted(raw){
 }
 window.onNativeConflictResolutionCompleted=onNativeConflictResolutionCompleted;
 function exportLatestConflictBackup(){
-  const bridge=nativeSyncBridge(),fileBridge=nativeFileBridge();
-  if(!bridge||typeof bridge.latestConflictBackup!=='function'||!fileBridge){toast('Экспорт доступен только в Android-приложении');return false;}
+  if(!canAdminister()){toast('Экспорт доступен только владельцу или администратору');return false;}
+  const bridge=nativeSyncBridge();
+  if(!bridge||typeof bridge.exportLatestConflictBackup!=='function'){toast('Экспорт доступен только в Android-приложении');return false;}
   try{
-    const backup=JSON.parse(bridge.latestConflictBackup());
-    if(backup.error){toast(backup.error);return false;}
-    const saved=!!fileBridge.saveExportedFile(backup.base64,backup.filename,backup.mimeType||'application/json');
-    toast(saved?'✓ Резервная копия сохранена в «Загрузки»':'⚠ Не удалось экспортировать резервную копию');
-    return saved;
+    const result=JSON.parse(bridge.exportLatestConflictBackup());
+    if(result.error){toast(result.error);return false;}
+    toast(result.ok?'✓ Резервная копия сохранена в «Загрузки»':'⚠ Не удалось экспортировать резервную копию');
+    return !!result.ok;
   }catch(e){toast('Ошибка экспорта: '+e.message);return false;}
 }
 function connectServer(){

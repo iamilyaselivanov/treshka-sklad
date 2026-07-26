@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import {
   PUSH_EVENT_TYPES,
+  PUSH_RECIPIENT_MAX_PAGES,
   collectPushRecipients,
   excludePreviouslyNotifiedDevices,
   normalizePostAssignment,
@@ -13,6 +14,7 @@ import {
 import {
   PUSH_MAINTENANCE_INTERVAL_MS,
   claimPushMaintenance,
+  maybeRunPushMaintenance,
 } from "../lib/push-maintenance.ts";
 
 async function recipientDevices(database, type, post = "ТЭЧ", pageSize = 500, actorUserId = "actor") {
@@ -155,6 +157,25 @@ test("recipient pagination cannot drop post members after the former 2000-row bo
   database.close();
 });
 
+test("recipient pagination fails closed if a page source never terminates", async () => {
+  let calls = 0;
+  await assert.rejects(
+    collectPushRecipients(() => {
+      calls += 1;
+      return [{ deviceId: `device-${calls}` }];
+    }, 1),
+    /pagination limit exceeded/,
+  );
+  assert.equal(calls, PUSH_RECIPIENT_MAX_PAGES);
+});
+
+test("assignment normalization matches migration whitespace rules", () => {
+  assert.equal(
+    normalizePostAssignment(`\tТЭЧ\u00a0${" ".repeat(40)}1\r\n`),
+    "тэч 1",
+  );
+});
+
 test("heavy push retention is claimed predictably once per day", async () => {
   const database = new DatabaseSync(":memory:");
   database.exec("CREATE TABLE push_maintenance_state (id INTEGER PRIMARY KEY, last_run_at TEXT NOT NULL)");
@@ -182,6 +203,45 @@ test("heavy push retention is claimed predictably once per day", async () => {
     await claimPushMaintenance(d1, new Date(first.getTime() + PUSH_MAINTENANCE_INTERVAL_MS + 1)),
     true,
   );
+  database.close();
+});
+
+test("failed push maintenance releases its daily claim for retry", async () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("CREATE TABLE push_maintenance_state (id INTEGER PRIMARY KEY, last_run_at TEXT NOT NULL)");
+  let shouldFail = true;
+  const d1 = {
+    prepare(sql) {
+      if (sql.trimStart().startsWith("DELETE ")) {
+        return { bind() { return this; } };
+      }
+      const statement = database.prepare(sql);
+      let values = [];
+      return {
+        bind(...args) {
+          values = args;
+          return this;
+        },
+        async run() {
+          const result = statement.run(...values);
+          return { meta: { changes: Number(result.changes) } };
+        },
+      };
+    },
+    async batch() {
+      if (shouldFail) throw new Error("simulated retention failure");
+      return [];
+    },
+  };
+  const now = new Date("2026-07-26T12:00:00.000Z");
+  await assert.rejects(maybeRunPushMaintenance(d1, now), /simulated retention failure/);
+  assert.equal(await claimPushMaintenance(d1, now), true);
+  // Release the manual claim by advancing beyond the interval, then prove the
+  // successful path retains the slot.
+  shouldFail = false;
+  const later = new Date(now.getTime() + PUSH_MAINTENANCE_INTERVAL_MS + 1);
+  assert.equal(await maybeRunPushMaintenance(d1, later), true);
+  assert.equal(await claimPushMaintenance(d1, new Date(later.getTime() + 1)), false);
   database.close();
 });
 

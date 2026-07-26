@@ -101,14 +101,16 @@ export async function POST(request: Request) {
     },
   );
   if (type === "storekeeper_post_issue_completed" && entityNo) {
+    const duplicateCutoff = new Date(Date.now() - 2 * 24 * 60 * 60 * 1_000).toISOString();
     const prior = await env.DB.prepare(
       `SELECT DISTINCT push_deliveries.device_id AS deviceId
        FROM push_deliveries
        JOIN push_events ON push_events.id = push_deliveries.event_id
        WHERE push_events.actor_user_id = ?
          AND push_events.entity_no = ?
-         AND push_events.event_type = 'post_stock_issued'`,
-    ).bind(auth.user.id, entityNo).all<{ deviceId: string }>();
+         AND push_events.event_type = 'post_stock_issued'
+         AND push_events.created_at >= ?`,
+    ).bind(auth.user.id, entityNo, duplicateCutoff).all<{ deviceId: string }>();
     rows = excludePreviouslyNotifiedDevices(
       rows,
       (prior.results ?? []).map((entry) => entry.deviceId),
@@ -206,7 +208,13 @@ export async function POST(request: Request) {
   if (inserted.meta.changes > 0) {
     await audit(auth.user, "push_event", `${type} · ${entityNo || post}`);
   }
-  await maybeRunPushMaintenance(env.DB);
+  try {
+    await maybeRunPushMaintenance(env.DB);
+  } catch (error) {
+    // Retention is best-effort housekeeping. A failure after FCM delivery must
+    // never turn a successfully persisted event into a retryable HTTP 500.
+    console.error("push maintenance failed", error);
+  }
   const responseBody = {
     ok: true,
     pushConfigured: isFirebasePushConfigured(),

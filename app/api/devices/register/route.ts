@@ -78,7 +78,11 @@ export async function POST(request: Request) {
   if (!existing || existing.userId !== auth.user.id || existing.token !== token) {
     await audit(auth.user, "push_device_registered", `${platform} · ${deviceId.slice(0, 8)}`);
   }
-  await maybeRunPushMaintenance(env.DB);
+  try {
+    await maybeRunPushMaintenance(env.DB);
+  } catch (error) {
+    console.error("push maintenance failed", error);
+  }
   return Response.json({ ok: true, pushConfigured: isFirebasePushConfigured(), evictedOldest });
 }
 

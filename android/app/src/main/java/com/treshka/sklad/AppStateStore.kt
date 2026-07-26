@@ -24,6 +24,7 @@ data class SyncConfig(
     val authToken: String,
     val deviceId: String,
     val serverRevision: Long,
+    val serverRole: String,
 )
 
 data class PendingSnapshot(
@@ -49,6 +50,12 @@ enum class ServerConflictResolutionResult {
     BACKUP_FAILED,
 }
 
+private data class ConflictBackupDraft(
+    val filename: String,
+    val content: String,
+    val createdAt: Long,
+)
+
 /**
  * Надёжное offline-first хранилище.
  *
@@ -63,7 +70,7 @@ class AppStateStore(context: Context) :
     companion object {
         private const val TAG = "AppStateStore"
         private const val DB_NAME = "sklad_state.db"
-        private const val DB_VERSION = 5
+        private const val DB_VERSION = 6
         private const val STATE_TABLE = "app_state"
         private const val ROW_ID = 1L
         private const val MAX_CONFLICT_BACKUPS = 10
@@ -103,6 +110,11 @@ class AppStateStore(context: Context) :
         if (oldVersion < 5 && !hasColumn(db, "sync_outbox", "base_revision")) {
             db.execSQL(
                 "ALTER TABLE sync_outbox ADD COLUMN base_revision INTEGER NOT NULL DEFAULT 0",
+            )
+        }
+        if (oldVersion < 6 && !hasColumn(db, "sync_config", "server_role")) {
+            db.execSQL(
+                "ALTER TABLE sync_config ADD COLUMN server_role TEXT NOT NULL DEFAULT ''",
             )
         }
     }
@@ -149,6 +161,7 @@ class AppStateStore(context: Context) :
                 auth_token TEXT NOT NULL DEFAULT '',
                 device_id TEXT NOT NULL,
                 server_revision INTEGER NOT NULL DEFAULT 0,
+                server_role TEXT NOT NULL DEFAULT '',
                 last_sync_at INTEGER,
                 last_error TEXT
             )
@@ -284,9 +297,14 @@ class AppStateStore(context: Context) :
     }
 
     @Synchronized
-    fun configureSync(baseUrl: String, authToken: String) {
+    fun configureSync(baseUrl: String, authToken: String, serverRole: String = "") {
         val normalizedToken = authToken.trim()
+        val normalizedRole = serverRole.trim()
         require(normalizedToken.length <= 8_192) { "Некорректный токен сервера" }
+        require(
+            normalizedRole.isBlank()
+                || normalizedRole in setOf("owner", "admin", "storekeeper", "worker"),
+        ) { "Некорректная роль сервера" }
         val db = writableDatabase
         db.beginTransaction()
         var previousToken: String? = null
@@ -297,8 +315,8 @@ class AppStateStore(context: Context) :
             val normalized = baseUrl.trimEnd('/')
             val newServer = previous == null || previous.baseUrl != normalized
             db.execSQL(
-                "UPDATE sync_config SET base_url=?, auth_token=?, server_revision=CASE WHEN ? THEN 0 ELSE server_revision END, last_error=NULL WHERE id=1",
-                arrayOf(normalized, "", if (newServer) 1 else 0),
+                "UPDATE sync_config SET base_url=?, auth_token=?, server_role=?, server_revision=CASE WHEN ? THEN 0 ELSE server_revision END, last_error=NULL WHERE id=1",
+                arrayOf(normalized, "", normalizedRole, if (newServer) 1 else 0),
             )
             // При первом подключении существующая локальная база обязательно
             // становится первой outbox-мутацией. Если сервер уже непустой,
@@ -344,7 +362,7 @@ class AppStateStore(context: Context) :
     fun clearSyncAuth() {
         tokenVault.clear()
         writableDatabase.execSQL(
-            "UPDATE sync_config SET auth_token='', last_error=NULL WHERE id=1",
+            "UPDATE sync_config SET auth_token='', server_role='', last_error=NULL WHERE id=1",
         )
     }
 
@@ -356,9 +374,10 @@ class AppStateStore(context: Context) :
         var legacyToken = ""
         var deviceId = ""
         var serverRevision = 0L
+        var serverRole = ""
         val found = db.query(
             "sync_config",
-            arrayOf("base_url", "auth_token", "device_id", "server_revision"),
+            arrayOf("base_url", "auth_token", "device_id", "server_revision", "server_role"),
             "id=1",
             null,
             null,
@@ -371,6 +390,7 @@ class AppStateStore(context: Context) :
                 legacyToken = c.getString(1)
                 deviceId = c.getString(2)
                 serverRevision = c.getLong(3)
+                serverRole = c.getString(4)
                 true
             }
         }
@@ -386,8 +406,12 @@ class AppStateStore(context: Context) :
         if (legacyToken.isNotBlank()) {
             db.execSQL("UPDATE sync_config SET auth_token='' WHERE id=1")
         }
-        return SyncConfig(baseUrl, secureToken, deviceId, serverRevision)
+        return SyncConfig(baseUrl, secureToken, deviceId, serverRevision, serverRole)
     }
+
+    @Synchronized
+    fun syncRoleCanAdminister(): Boolean =
+        getSyncConfig()?.serverRole in setOf("owner", "admin")
 
     @Synchronized
     fun claimNextPending(): PendingSnapshot? {
@@ -519,32 +543,58 @@ class AppStateStore(context: Context) :
         allowDiscardWithoutBackup: Boolean = false,
     ): ServerConflictResolutionResult {
         val db = writableDatabase
-        db.beginTransaction()
+        val conflictExists = db.rawQuery(
+            "SELECT 1 FROM sync_outbox WHERE rowid=? AND conflict=1",
+            arrayOf(localId.toString()),
+        ).use { it.moveToFirst() }
+        if (!conflictExists) return ServerConflictResolutionResult.MISSING_CONFLICT
+
+        var payload: String? = null
+        var revision = 0L
+        db.rawQuery(
+            "SELECT payload, revision FROM sync_remote_pending WHERE id=1",
+            null,
+        ).use { cursor ->
+            if (cursor.moveToFirst()) {
+                payload = cursor.getString(0)
+                revision = cursor.getLong(1)
+            }
+        }
+        val authoritative = payload ?: return ServerConflictResolutionResult.MISSING_REMOTE
+        val schemaVersion = JSONObject(authoritative).optInt("schemaVersion", 0)
+        if (schemaVersion < 1) return ServerConflictResolutionResult.MISSING_REMOTE
+
+        // Read the exact rows that would be discarded while AppStateStore's
+        // monitor prevents another local database writer from changing them.
+        // The expensive fsync deliberately happens before opening the write
+        // transaction so slow flash cannot hold SQLite's writer lock.
+        val backupDraft = buildConflictBackup(db, localId, revision)
+        val backupFile = backupDraft?.let(::writeConflictBackup)
+        val backupSaved = backupFile != null
+        if (!backupSaved && !allowDiscardWithoutBackup) {
+            return ServerConflictResolutionResult.BACKUP_FAILED
+        }
+
+        var applied = false
+        try {
+            db.beginTransaction()
+        } catch (error: Exception) {
+            if (backupFile != null && !backupFile.delete()) {
+                Log.w(TAG, "Could not remove unused conflict backup ${backupFile.name}")
+            }
+            throw error
+        }
         return try {
-            val conflictExists = db.rawQuery(
+            val conflictStillExists = db.rawQuery(
                 "SELECT 1 FROM sync_outbox WHERE rowid=? AND conflict=1",
                 arrayOf(localId.toString()),
             ).use { it.moveToFirst() }
-            if (!conflictExists) return ServerConflictResolutionResult.MISSING_CONFLICT
-
-            var payload: String? = null
-            var revision = 0L
-            db.rawQuery(
-                "SELECT payload, revision FROM sync_remote_pending WHERE id=1",
-                null,
-            ).use { cursor ->
-                if (cursor.moveToFirst()) {
-                    payload = cursor.getString(0)
-                    revision = cursor.getLong(1)
-                }
-            }
-            val authoritative = payload ?: return ServerConflictResolutionResult.MISSING_REMOTE
-            val schemaVersion = JSONObject(authoritative).optInt("schemaVersion", 0)
-            if (schemaVersion < 1) return ServerConflictResolutionResult.MISSING_REMOTE
-            val backupSaved = saveConflictBackup(db, localId, revision)
-            if (!backupSaved && !allowDiscardWithoutBackup) {
-                return ServerConflictResolutionResult.BACKUP_FAILED
-            }
+            if (!conflictStillExists) return ServerConflictResolutionResult.MISSING_CONFLICT
+            val remoteStillMatches = db.rawQuery(
+                "SELECT 1 FROM sync_remote_pending WHERE id=1 AND payload=? AND revision=?",
+                arrayOf(authoritative, revision.toString()),
+            ).use { it.moveToFirst() }
+            if (!remoteStillMatches) return ServerConflictResolutionResult.MISSING_REMOTE
             if (!writeState(db, authoritative, schemaVersion)) {
                 return ServerConflictResolutionResult.MISSING_REMOTE
             }
@@ -555,6 +605,7 @@ class AppStateStore(context: Context) :
             )
             db.delete("sync_remote_pending", "id=1", null)
             db.setTransactionSuccessful()
+            applied = true
             if (backupSaved) {
                 ServerConflictResolutionResult.APPLIED
             } else {
@@ -562,6 +613,9 @@ class AppStateStore(context: Context) :
             }
         } finally {
             db.endTransaction()
+            if (!applied && backupFile != null && !backupFile.delete()) {
+                Log.w(TAG, "Could not remove unused conflict backup ${backupFile.name}")
+            }
         }
     }
 
@@ -570,14 +624,11 @@ class AppStateStore(context: Context) :
      * copy will remove. Backups live in noBackupFilesDir, so they are private
      * to the app and are not uploaded by Android's automatic backup service.
      */
-    private fun saveConflictBackup(
+    private fun buildConflictBackup(
         db: SQLiteDatabase,
         selectedConflictId: Long,
         serverRevision: Long,
-    ): Boolean = runCatching {
-        if (!conflictBackupDirectory.exists() && !conflictBackupDirectory.mkdirs()) {
-            error("Cannot create private conflict backup directory")
-        }
+    ): ConflictBackupDraft? = runCatching {
         val mutations = JSONArray()
         db.rawQuery(
             """
@@ -614,12 +665,24 @@ class AppStateStore(context: Context) :
             put("serverRevision", serverRevision)
             put("discardedMutations", mutations)
         }
-        val filename = "treshka_conflict_${createdAt}_${UUID.randomUUID()}.json"
-        val target = File(conflictBackupDirectory, filename)
-        val pending = File.createTempFile(".pending-", ".json", conflictBackupDirectory)
+        ConflictBackupDraft(
+            filename = "treshka_conflict_${createdAt}_${UUID.randomUUID()}.json",
+            content = backup.toString(),
+            createdAt = createdAt,
+        )
+    }.onFailure {
+        Log.e(TAG, "Could not prepare private conflict backup", it)
+    }.getOrNull()
+
+    private fun writeConflictBackup(draft: ConflictBackupDraft): File? = runCatching {
+        if (!conflictBackupDirectory.exists() && !conflictBackupDirectory.mkdirs()) {
+            error("Cannot create private conflict backup directory")
+        }
+        val target = File(conflictBackupDirectory, draft.filename)
+        val pending = File.createTempFile(".pending-", ".tmp", conflictBackupDirectory)
         try {
             FileOutputStream(pending).use { stream ->
-                stream.write(backup.toString(2).toByteArray(Charsets.UTF_8))
+                stream.write(draft.content.toByteArray(Charsets.UTF_8))
                 stream.fd.sync()
             }
             if (!pending.renameTo(target)) {
@@ -631,19 +694,28 @@ class AppStateStore(context: Context) :
                 Log.w(TAG, "Could not clean temporary conflict backup")
             }
         }
-        pruneConflictBackups(createdAt)
-        true
+        pruneConflictBackups(draft.createdAt)
+        target
     }.onFailure {
         Log.e(TAG, "Could not create private conflict backup", it)
-    }.getOrDefault(false)
+    }.getOrNull()
 
     private fun conflictBackupFiles(): List<File> =
         conflictBackupDirectory.listFiles()
-            ?.filter { it.isFile && it.name.endsWith(".json") }
+            ?.filter {
+                it.isFile
+                    && it.name.startsWith("treshka_conflict_")
+                    && it.name.endsWith(".json")
+            }
             ?.sortedByDescending { it.lastModified() }
             ?: emptyList()
 
     private fun pruneConflictBackups(now: Long = System.currentTimeMillis()) {
+        conflictBackupDirectory.listFiles()
+            ?.filter { it.isFile && it.name.startsWith(".pending-") }
+            ?.forEach { file ->
+                if (!file.delete()) Log.w(TAG, "Could not prune temporary backup ${file.name}")
+            }
         conflictBackupFiles().forEachIndexed { index, file ->
             if (
                 index >= MAX_CONFLICT_BACKUPS
@@ -655,19 +727,9 @@ class AppStateStore(context: Context) :
     }
 
     @Synchronized
-    fun latestConflictBackupJson(): String {
+    fun latestConflictBackupFile(): File? {
         pruneConflictBackups()
-        val file = conflictBackupFiles().firstOrNull()
-            ?: return JSONObject().put("error", "Резервных копий конфликтов пока нет").toString()
-        return runCatching {
-            JSONObject().apply {
-                put("filename", file.name)
-                put("mimeType", "application/json")
-                put("base64", Base64.encodeToString(file.readBytes(), Base64.NO_WRAP))
-            }.toString()
-        }.getOrElse {
-            JSONObject().put("error", "Не удалось прочитать резервную копию").toString()
-        }
+        return conflictBackupFiles().firstOrNull()
     }
 
     @Synchronized
