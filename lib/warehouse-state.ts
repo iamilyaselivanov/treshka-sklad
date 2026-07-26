@@ -4,6 +4,11 @@ export type WarehouseDeletionPolicy =
   | { status: 403 | 409; error: string }
   | null;
 
+export type WarehouseStateViewer = {
+  role: string;
+  assignment: string;
+};
+
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -94,6 +99,123 @@ export function removedWarehouseItemIds(previous: WarehouseState, next: Warehous
 
 function normalizedStatus(value: unknown) {
   return String(value ?? "").trim().toLocaleLowerCase("ru-RU");
+}
+
+function normalizedAssignment(value: unknown) {
+  return String(value ?? "").trim().toLocaleLowerCase("ru-RU");
+}
+
+function belongsToAssignment(value: unknown, assignment: string) {
+  const entry = record(value);
+  return normalizedAssignment(entry?.post ?? entry?.name) === assignment;
+}
+
+/**
+ * A worker receives only their assigned post's operational slice. Managers and
+ * storekeepers retain the complete warehouse snapshot.
+ */
+export function projectWarehouseStateForUser(
+  state: WarehouseState,
+  viewer: WarehouseStateViewer,
+): WarehouseState {
+  if (viewer.role !== "worker") return state;
+  const assignment = normalizedAssignment(viewer.assignment);
+  const projectedItems = rows(state.items).map((itemValue) => {
+    const item = record(itemValue);
+    if (!item) return itemValue;
+    const postBalances = record(item.posts);
+    const matchingPostBalances = postBalances
+      ? Object.fromEntries(
+        Object.entries(postBalances)
+          .filter(([post]) => normalizedAssignment(post) === assignment),
+      )
+      : {};
+    return {
+      ...item,
+      stock: 0,
+      ext: 0,
+      lots: [],
+      history: rows(item.history).filter((entry) => {
+        const post = normalizedAssignment(record(entry)?.post);
+        return post && post === assignment;
+      }),
+      posts: matchingPostBalances,
+    };
+  });
+  return {
+    ...state,
+    items: projectedItems,
+    posts: rows(state.posts).filter((entry) => belongsToAssignment(entry, assignment)),
+    docs: rows(state.docs).filter((entry) => belongsToAssignment(entry, assignment)),
+    extIssues: rows(state.extIssues).filter((entry) => belongsToAssignment(entry, assignment)),
+    stockTransfers: rows(state.stockTransfers).filter((entry) => belongsToAssignment(entry, assignment)),
+    inventoryActs: [],
+    auditLog: rows(state.auditLog).filter((entry) => belongsToAssignment(entry, assignment)),
+    notifications: rows(state.notifications).filter((entry) => belongsToAssignment(entry, assignment)),
+  };
+}
+
+function stableRecordKey(value: unknown) {
+  const entry = record(value);
+  if (!entry) return "";
+  for (const key of ["id", "no", "number", "eventId"]) {
+    const candidate = String(entry[key] ?? "").trim();
+    if (candidate) return `${key}:${candidate}`;
+  }
+  return "";
+}
+
+function mutableHistoryPreserved(previousValue: unknown, nextValue: unknown) {
+  const nextRows = rows(nextValue);
+  const nextKeys = new Set(nextRows.map(stableRecordKey).filter(Boolean));
+  const nextUnkeyed = new Set(
+    nextRows.filter((value) => !stableRecordKey(value)).map((value) => JSON.stringify(value)),
+  );
+  return rows(previousValue).every((value) => {
+    const key = stableRecordKey(value);
+    return key ? nextKeys.has(key) : nextUnkeyed.has(JSON.stringify(value));
+  });
+}
+
+function immutableHistoryPreserved(previousValue: unknown, nextValue: unknown) {
+  const counts = new Map<string, number>();
+  for (const value of rows(nextValue)) {
+    const serialized = JSON.stringify(value);
+    counts.set(serialized, (counts.get(serialized) ?? 0) + 1);
+  }
+  for (const value of rows(previousValue)) {
+    const serialized = JSON.stringify(value);
+    const count = counts.get(serialized) ?? 0;
+    if (count <= 0) return false;
+    counts.set(serialized, count - 1);
+  }
+  return true;
+}
+
+/**
+ * Storekeepers may append warehouse history and advance document statuses, but
+ * cannot erase already recorded documents, movements, inventory acts or audit
+ * rows by submitting a handcrafted full snapshot.
+ */
+export function warehouseHistoryMutationIssue(
+  previous: WarehouseState,
+  next: WarehouseState,
+  role: string,
+) {
+  if (role !== "storekeeper") return null;
+  if (
+    !mutableHistoryPreserved(previous.docs, next.docs)
+    || !mutableHistoryPreserved(previous.extIssues, next.extIssues)
+    || !immutableHistoryPreserved(previous.stockTransfers, next.stockTransfers)
+    || !immutableHistoryPreserved(previous.inventoryActs, next.inventoryActs)
+    || !immutableHistoryPreserved(previous.auditLog, next.auditLog)
+  ) {
+    return {
+      status: 403 as const,
+      error: "Кладовщик не может удалять документы и историю складских операций",
+    };
+  }
+  return null;
 }
 
 function isClosedDocument(value: unknown) {

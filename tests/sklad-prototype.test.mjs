@@ -36,6 +36,108 @@ const PROTOTYPE_PATH = path.join(
   'prototype.html',
 );
 const PROTOTYPE_URL = 'file://' + PROTOTYPE_PATH;
+const SERVER_SYNC_PATH = path.join(path.dirname(PROTOTYPE_PATH), 'prototype-server.js');
+const PROTOTYPE_SOURCE = readFileSync(PROTOTYPE_PATH, 'utf8');
+const SERVER_SYNC_SOURCE = readFileSync(SERVER_SYNC_PATH, 'utf8');
+
+function serverStateFixture() {
+  return {
+    schemaVersion: 4,
+    itemSeq: 1,
+    categoriesList: ['Расходные материалы'],
+    componentSubcats: [],
+    accountSeq: 0,
+    notificationSeq: 0,
+    items: [{
+      id: 'server-item',
+      name: 'Серверный товар',
+      sku: 'SERVER-001',
+      topCat: 'Расходные материалы',
+      unit: 'шт',
+      stock: 5,
+      min: 0,
+      abc: 'A',
+      ext: 0,
+      posts: { 'ТЭЧ': 2 },
+      history: [],
+      lots: [],
+    }],
+    posts: [{ id: 'server-post', name: 'ТЭЧ', stock: [], repairs: [] }],
+    docs: [],
+    extIssues: [],
+    stockTransfers: [],
+    inventoryActs: [],
+    auditLog: [],
+    notifications: [],
+  };
+}
+
+async function newHttpServerPage({ role = 'worker', putStatus = 200 } = {}) {
+  const ctx = await browser.newContext();
+  const state = serverStateFixture();
+  let stateGets = 0;
+  let statePuts = 0;
+  await ctx.route('http://treshka.test/**', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname === '/prototype.html') {
+      await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: PROTOTYPE_SOURCE });
+      return;
+    }
+    if (url.pathname === '/prototype-server.js') {
+      await route.fulfill({ status: 200, contentType: 'application/javascript; charset=utf-8', body: SERVER_SYNC_SOURCE });
+      return;
+    }
+    if (url.pathname === '/api/state' && request.method() === 'GET') {
+      stateGets += 1;
+      if (stateGets === 1) {
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          headers: { etag: 'W/"warehouse-main-7-test-scope"' },
+          body: JSON.stringify({
+            revision: 7,
+            state,
+            user: {
+              id: `test-${role}`,
+              callsign: `Тест ${role}`,
+              login: `test-${role}`,
+              role,
+              assignment: role === 'worker' ? 'ТЭЧ' : '',
+            },
+          }),
+        });
+      } else {
+        await route.fulfill({
+          status: 304,
+          headers: { etag: 'W/"warehouse-main-7-test-scope"' },
+          body: '',
+        });
+      }
+      return;
+    }
+    if (url.pathname === '/api/state' && request.method() === 'PUT') {
+      statePuts += 1;
+      await route.fulfill({
+        status: putStatus,
+        contentType: 'application/json',
+        body: putStatus === 413
+          ? JSON.stringify({ error: 'Данные склада превышают безопасный размер 1,5 МБ' })
+          : JSON.stringify({ revision: 8 }),
+      });
+      return;
+    }
+    await route.fulfill({ status: 404, contentType: 'application/json', body: '{}' });
+  });
+  const page = await ctx.newPage();
+  await page.goto('http://treshka.test/prototype.html?server=1');
+  await page.waitForFunction(() => window.treshkaServerSync?.status().ready === true);
+  return {
+    ctx,
+    page,
+    counts: () => ({ stateGets, statePuts }),
+  };
+}
 
 let browser;
 
@@ -922,6 +1024,42 @@ test('regression — rabotnik can never reassign their bound post locally, inclu
   await ctx.close();
 });
 
+test('review 800c0c9 — a 304 response reuses an immutable cached snapshot without parsing an empty body', async () => {
+  const { ctx, page, counts } = await newHttpServerPage({ role: 'worker' });
+  const result = await page.evaluate(async () => {
+    items[0].stock = 99;
+    await window.treshkaServerSync.flush();
+    return {
+      stock: items[0].stock,
+      status: window.treshkaServerSync.status(),
+    };
+  });
+  assert.ok(counts().stateGets >= 2, 'the explicit flush must exercise the 304 branch');
+  assert.equal(result.stock, 5, 'worker-local drift must be replaced from the cached server graph');
+  assert.equal(result.status.lastError, null);
+  await ctx.close();
+});
+
+test('review 800c0c9 — a 413 response enters backoff instead of uploading every timer tick', async () => {
+  const { ctx, page, counts } = await newHttpServerPage({ role: 'owner', putStatus: 413 });
+  const result = await page.evaluate(async () => {
+    auditLog.unshift({ action: 'oversized-local-change', detail: 'kept on device' });
+    await window.treshkaServerSync.flush();
+    const afterFailure = window.treshkaServerSync.status();
+    await window.treshkaServerSync.flush();
+    return {
+      afterFailure,
+      afterImmediateRetry: window.treshkaServerSync.status(),
+      now: Date.now(),
+    };
+  });
+  assert.equal(counts().statePuts, 1, 'backoff must suppress the immediate second upload');
+  assert.ok(result.afterFailure.consecutiveFailures >= 1);
+  assert.ok(result.afterFailure.nextAttemptAt >= result.now + 20_000);
+  assert.match(result.afterFailure.lastError, /1,5 МБ/);
+  await ctx.close();
+});
+
 test('v1.3 — quantity input accepts only whole numbers and rejects fractions, letters, negatives, zero and exponent notation', async () => {
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => ({
@@ -1496,20 +1634,37 @@ test('review c3db85a — rejected native remote save restores the pre-callback J
 test('review c3db85a — privileged workflow guards reject direct calls and work-close rollback restores its document', async () => {
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => {
-    const template = JSON.parse(JSON.stringify(docs.find((entry) => entry.kind === 'work')));
-    template.no = 'АВР-GUARD-ROLLBACK';
-    template.status = 'Ожидает приёмки на склад';
-    template.itemId = null;
-    template.materials = [{ id: '__missing_item__', q: 1 }];
-    docs.push(template);
+    const source = JSON.parse(JSON.stringify(docs.find((entry) => entry.kind === 'work')));
+    const valid = {
+      ...source,
+      no: 'АВР-GUARD-VALID',
+      status: 'Ожидает приёмки на склад',
+      itemId: null,
+      materials: [],
+    };
+    docs.push(valid);
 
     currentRole = 'admin';
-    const deniedClose = performWorkClose(template) === false
-      && docs.find((entry) => entry.no === template.no)?.status === 'Ожидает приёмки на склад';
+    const deniedClose = performWorkClose(valid) === false
+      && docs.find((entry) => entry.no === valid.no)?.status === 'Ожидает приёмки на склад';
 
+    // Prove the fixture itself is valid. If the role guard is removed, the
+    // preceding admin call will close it and this assertion will fail.
     currentRole = 'kladovshik';
-    const failedClose = performWorkClose(template) === false;
-    const documentRolledBack = docs.find((entry) => entry.no === template.no)?.status === 'Ожидает приёмки на склад';
+    const validClose = performWorkClose(valid) === true
+      && docs.find((entry) => entry.no === valid.no)?.status === 'Закрыт';
+
+    const broken = {
+      ...source,
+      no: 'АВР-GUARD-ROLLBACK',
+      status: 'Ожидает приёмки на склад',
+      itemId: null,
+      materials: [{ id: '__missing_item__', q: 1 }],
+    };
+    docs.push(broken);
+    currentRole = 'kladovshik';
+    const failedClose = performWorkClose(broken) === false;
+    const documentRolledBack = docs.find((entry) => entry.no === broken.no)?.status === 'Ожидает приёмки на склад';
 
     currentRole = 'rabotnik';
     views.newDefekt();
@@ -1538,6 +1693,7 @@ test('review c3db85a — privileged workflow guards reject direct calls and work
 
     return {
       deniedClose,
+      validClose,
       failedClose,
       documentRolledBack,
       deniedCard,

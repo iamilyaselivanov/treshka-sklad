@@ -238,7 +238,6 @@
     }
   }
 
-  window.treshkaServerRole = () => sync.user?.role || "";
   window.treshkaEmitPushEvent = function (type, details = {}) {
     if (!sync.user || !type) return "";
     pruneExpiredPushEvents();
@@ -288,9 +287,6 @@
     delete state.currentRole;
     delete state.currentUserPost;
     delete state.savedAt;
-    if (Array.isArray(state.auditLog)) state.auditLog = state.auditLog.slice(0, 2_000);
-    if (Array.isArray(state.notifications)) state.notifications = state.notifications.slice(0, 2_000);
-    if (Array.isArray(state.inventoryActs)) state.inventoryActs = state.inventoryActs.slice(0, 5_000);
     return state;
   }
 
@@ -373,7 +369,7 @@
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ callsign, login, password, role, assignment }),
       });
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
       if (!response.ok) { toast(data.error || "Аккаунт не создан"); return false; }
       toast("✓ Аккаунт создан на сервере");
       await window.renderAccounts();
@@ -537,6 +533,12 @@
       ) {
         if (response.status === 413) {
           sync.lastError = data.error || "Снимок склада слишком велик";
+          noteSyncFailure();
+          // A size error cannot heal on the next 2.5-second tick. Give embedded
+          // photo migration time to replace Base64 payloads with R2 URLs and
+          // avoid uploading megabytes in a tight loop.
+          sync.nextAttemptAt = Math.max(sync.nextAttemptAt, Date.now() + 30_000);
+          void migrateEmbeddedPhotos();
           toast("⚠ " + sync.lastError + ". Удалите лишние локальные уведомления или архивные данные.");
           return false;
         }
@@ -703,6 +705,8 @@
       payloadBytes: sync.lastUploaded.length,
       conflict: sync.conflict,
       lastError: sync.lastError,
+      consecutiveFailures: sync.consecutiveFailures,
+      nextAttemptAt: sync.nextAttemptAt,
     }),
     flush: synchronize,
     resolveConflict,

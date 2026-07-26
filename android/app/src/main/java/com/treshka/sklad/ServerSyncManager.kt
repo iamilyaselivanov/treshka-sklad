@@ -25,6 +25,7 @@ class ServerSyncManager(
     private val rerunRequested = AtomicBoolean(false)
     private val retryScheduled = AtomicBoolean(false)
     @Volatile private var lastRoleRefreshAt = 0L
+    @Volatile private var lastRoleRefreshError: String? = null
     @Volatile private var callbackOwner: Any? = null
     @Volatile private var onStatusCallback: (String) -> Unit = {}
     @Volatile private var onRemoteStateCallback: (String, Long) -> Unit = { _, _ -> }
@@ -62,6 +63,7 @@ class ServerSyncManager(
             )
         store.configureSync(normalized, token, serverRole)
         lastRoleRefreshAt = System.currentTimeMillis()
+        lastRoleRefreshError = null
         syncNow()
         return response.body
     }
@@ -73,9 +75,14 @@ class ServerSyncManager(
      * case an already known role stays usable, while a migrated blank role is
      * surfaced explicitly by syncStatusJson().
      */
-    private fun refreshServerRole(config: SyncConfig, force: Boolean = false) {
+    private fun refreshServerRole(config: SyncConfig, force: Boolean = false): String? {
         val now = System.currentTimeMillis()
-        if (!force && now - lastRoleRefreshAt < ROLE_REFRESH_INTERVAL_MS) return
+        if (!force && now - lastRoleRefreshAt < ROLE_REFRESH_INTERVAL_MS) {
+            return lastRoleRefreshError
+        }
+        // Throttle every attempted refresh, including transport and protocol
+        // failures. Otherwise a broken role endpoint is hit on every sync pass.
+        lastRoleRefreshAt = now
         val response = runCatching {
             requestJson(
                 "${config.baseUrl}/v1/auth/status",
@@ -85,39 +92,49 @@ class ServerSyncManager(
             )
         }.getOrElse {
             Log.w(TAG, "server role refresh failed", it)
-            return
+            val message = it.message ?: "Не удалось подтвердить роль аккаунта на сервере"
+            lastRoleRefreshError = message
+            return message
         }
         if (response.code == 404 || response.code == 405) {
-            lastRoleRefreshAt = now
-            return
+            lastRoleRefreshError = null
+            return null
         }
         if (response.code == 401 || response.code == 403) {
-            lastRoleRefreshAt = now
-            store.clearServerRole("Сессия сервера истекла. Войдите снова для подтверждения прав")
-            return
+            val message = "Сессия сервера истекла. Войдите снова для подтверждения прав"
+            store.clearServerRole(message)
+            lastRoleRefreshError = message
+            return message
         }
         if (response.code !in 200..299) {
             Log.w(TAG, "server role refresh HTTP ${response.code}")
-            return
+            val message = "Не удалось подтвердить роль аккаунта: HTTP ${response.code}"
+            lastRoleRefreshError = message
+            return message
         }
         val responseJson = runCatching { JSONObject(response.body) }.getOrElse {
             Log.w(TAG, "server role refresh returned invalid JSON", it)
-            return
+            val message = "Сервер вернул некорректный ответ при подтверждении роли"
+            lastRoleRefreshError = message
+            return message
         }
         val role = responseServerRole(responseJson)
         if (role == null) {
             Log.w(TAG, "server role refresh omitted user.role")
-            store.clearServerRole("Сервер не подтвердил роль аккаунта. Войдите снова")
-            return
+            val message = "Сервер не подтвердил роль аккаунта. Войдите снова"
+            store.clearServerRole(message)
+            lastRoleRefreshError = message
+            return message
         }
         store.updateServerRole(role)
-        store.markSyncOk()
-        lastRoleRefreshAt = now
+        lastRoleRefreshError = null
+        return null
     }
 
     private fun adoptServerRole(responseBody: String) {
         val role = runCatching { responseServerRole(JSONObject(responseBody)) }.getOrNull() ?: return
         store.updateServerRole(role)
+        lastRoleRefreshError = null
     }
 
     private fun responseServerRole(responseJson: JSONObject): String? {
@@ -302,6 +319,8 @@ class ServerSyncManager(
     private fun syncLoop() {
         var config = store.getSyncConfig() ?: return
         if (config.baseUrl.isBlank() || config.authToken.isBlank()) return
+        var passError: String? = null
+        var nativePersistencePending = false
         while (true) {
             // Claim and increment attempts in one SQLite transaction. A
             // concurrent save can no longer compact the row after we selected
@@ -323,6 +342,7 @@ class ServerSyncManager(
             if (response.code == 409) {
                 val message = "Конфликт версий: локальные данные сохранены отдельно и не перезаписаны"
                 store.markMutationConflicted(pending.mutationId, message)
+                passError = message
                 // A conflict requires an explicit user decision. Automatically
                 // releasing it with the same stale baseRevision creates an
                 // endless 409 loop and must never enable pull over local work.
@@ -340,6 +360,7 @@ class ServerSyncManager(
                 // explicitly resolvable conflict. Otherwise the same rejected
                 // row blocks every newer snapshot forever.
                 store.markMutationConflicted(pending.mutationId, message)
+                passError = message
                 if (response.code == 401 || response.code == 403) break
                 continue
             }
@@ -363,7 +384,6 @@ class ServerSyncManager(
             if (response.code == 200) {
                 adoptServerRole(response.body)
                 val json = JSONObject(response.body)
-                var nativePersistencePending = false
                 if (!json.optBoolean("unchanged", false) && json.has("payload")) {
                     val payload = json.getJSONObject("payload").toString()
                     val revision = json.getLong("revision")
@@ -375,15 +395,21 @@ class ServerSyncManager(
                         onRemoteStateCallback(payload, revision)
                     }
                 }
-                // saveRemoteState() marks success only after WebView migration
-                // and SQLite persistence. Do not pre-emptively clear an error
-                // while that asynchronous callback is still pending.
-                if (!nativePersistencePending) store.markSyncOk()
             } else if (response.code !in 200..299) {
-                store.markSyncError(null, "Pull HTTP ${response.code}")
+                passError = "Pull HTTP ${response.code}"
             }
         }
-        store.getSyncConfig()?.let { refreshServerRole(it) }
+        store.getSyncConfig()?.let {
+            val roleError = refreshServerRole(it)
+            if (roleError != null) passError = roleError
+        }
+        val finalError = passError
+        when {
+            finalError != null -> store.markSyncError(null, finalError)
+            // saveRemoteState() marks success only after WebView migration and
+            // SQLite persistence. Parked conflicts must remain visible too.
+            !nativePersistencePending && store.pendingCount() == 0 -> store.markSyncOk()
+        }
     }
 
     private fun scheduleRetry(attempt: Int) {

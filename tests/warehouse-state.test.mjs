@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   findWarehouseItemId,
+  projectWarehouseStateForUser,
   removeWarehouseItemFromState,
   warehouseDeletionPolicy,
+  warehouseHistoryMutationIssue,
   warehouseItemDeletionIssue,
 } from "../lib/warehouse-state.ts";
 
@@ -14,6 +16,10 @@ function state(overrides = {}) {
     posts: [],
     docs: [],
     extIssues: [],
+    stockTransfers: [],
+    inventoryActs: [],
+    auditLog: [],
+    notifications: [],
     ...overrides,
   };
 }
@@ -146,4 +152,55 @@ test("history removal and missing archive metadata return distinct deletion erro
     warehouseDeletionPolicy(previous, metadataMissing, "admin")?.error ?? "",
     /отсутствует архивное название/,
   );
+});
+
+test("storekeeper may advance documents but cannot erase warehouse history", () => {
+  const previous = state({
+    docs: [{ no: "АВР-1", status: "На согласовании", post: "ТЭЧ" }],
+    extIssues: [{ no: "ВН-1", status: "Выдано", post: "ТЭЧ" }],
+    stockTransfers: [{ no: "ПМ-1", post: "ТЭЧ", items: [] }],
+    inventoryActs: [{ no: "ИНВ-1", diffs: [] }],
+    auditLog: [{ id: "audit-1", action: "Выдача", post: "ТЭЧ" }],
+  });
+  const advanced = state({
+    docs: [{ ...previous.docs[0], status: "Ожидает приёмки на склад" }],
+    extIssues: [{ ...previous.extIssues[0], status: "Возвращено" }],
+    stockTransfers: previous.stockTransfers,
+    inventoryActs: previous.inventoryActs,
+    auditLog: previous.auditLog,
+  });
+  assert.equal(warehouseHistoryMutationIssue(previous, advanced, "storekeeper"), null);
+  assert.equal(warehouseHistoryMutationIssue(previous, state(), "storekeeper")?.status, 403);
+  assert.equal(warehouseHistoryMutationIssue(previous, state(), "admin"), null);
+});
+
+test("worker state projection contains only the assigned post slice", () => {
+  const full = state({
+    items: [{
+      id: "item-1",
+      stock: 100,
+      ext: 4,
+      lots: [{ q: 100 }],
+      posts: { "ТЭЧ": 2, "НРТК": 8 },
+      history: [{ post: "ТЭЧ", q: 2 }, { post: "НРТК", q: 8 }],
+    }],
+    posts: [{ name: "ТЭЧ" }, { name: "НРТК" }],
+    docs: [{ no: "ДФ-1", post: "ТЭЧ" }, { no: "ДФ-2", post: "НРТК" }],
+    extIssues: [{ no: "ВН-1", post: "ТЭЧ" }, { no: "ВН-2", post: "НРТК" }],
+    stockTransfers: [{ no: "ПМ-1", post: "ТЭЧ" }, { no: "ПМ-2", post: "НРТК" }],
+    inventoryActs: [{ no: "ИНВ-1" }],
+    auditLog: [{ id: "a-1", post: "ТЭЧ" }, { id: "a-2", post: "НРТК" }],
+    notifications: [{ id: "n-1", post: "ТЭЧ" }, { id: "n-2", post: "НРТК" }],
+  });
+  const projected = projectWarehouseStateForUser(full, { role: "worker", assignment: " ТЭЧ " });
+  assert.deepEqual(projected.posts.map((entry) => entry.name), ["ТЭЧ"]);
+  assert.deepEqual(projected.docs.map((entry) => entry.no), ["ДФ-1"]);
+  assert.deepEqual(projected.extIssues.map((entry) => entry.no), ["ВН-1"]);
+  assert.deepEqual(projected.stockTransfers.map((entry) => entry.no), ["ПМ-1"]);
+  assert.deepEqual(projected.auditLog.map((entry) => entry.id), ["a-1"]);
+  assert.deepEqual(projected.notifications.map((entry) => entry.id), ["n-1"]);
+  assert.deepEqual(projected.inventoryActs, []);
+  assert.equal(projected.items[0].stock, 0);
+  assert.deepEqual(projected.items[0].posts, { "ТЭЧ": 2 });
+  assert.equal(full.items[0].stock, 100, "projection must not mutate server truth");
 });

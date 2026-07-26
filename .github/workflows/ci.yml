@@ -1,5 +1,12 @@
 name: CI
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
   pull_request:
@@ -15,6 +22,7 @@ jobs:
           node-version: 22.13.0
           cache: npm
       - run: npm ci
+      - run: npx playwright-core install --with-deps chromium
       - run: npm run db:check
       - run: npm test
 

@@ -70,7 +70,7 @@ class AppStateStore(context: Context) :
     companion object {
         private const val TAG = "AppStateStore"
         private const val DB_NAME = "sklad_state.db"
-        private const val DB_VERSION = 7
+        private const val DB_VERSION = 8
         private const val STATE_TABLE = "app_state"
         private const val ROW_ID = 1L
         private const val MAX_CONFLICT_BACKUPS = 10
@@ -117,21 +117,41 @@ class AppStateStore(context: Context) :
                 "ALTER TABLE sync_config ADD COLUMN server_role TEXT NOT NULL DEFAULT ''",
             )
         }
-        if (oldVersion < 7) {
-            // Builds predating base_revision persisted queued snapshots with
-            // DEFAULT 0 even when the device had already synchronized far past
-            // revision zero. Preserve the legacy claim-time behavior once,
-            // then keep every row's real base immutable while it is in flight.
-            db.execSQL(
-                """
-                UPDATE sync_outbox
-                SET base_revision = COALESCE(
-                    (SELECT server_revision FROM sync_config WHERE id=1),
-                    0
+        if (oldVersion < 8) {
+            val serverRevision = db.rawQuery(
+                "SELECT server_revision FROM sync_config WHERE id=1",
+                null,
+            ).use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else 0L }
+            val migration = SyncPolicy.legacyOutboxMigration(oldVersion, serverRevision)
+            val reason = when (migration) {
+                LegacyOutboxMigration.ALL_PENDING_ROWS ->
+                    "Очередь создана сборкой с неоднозначной базой ревизии; подтвердите серверную или локальную версию вручную"
+                LegacyOutboxMigration.ZERO_BASE_ROWS ->
+                    "База ревизии не сохранена предыдущей версией приложения; подтвердите версию вручную"
+                LegacyOutboxMigration.NONE -> null
+            }
+            if (reason != null) {
+                val selection = if (migration == LegacyOutboxMigration.ALL_PENDING_ROWS) {
+                    "conflict=0"
+                } else {
+                    "conflict=0 AND base_revision=0"
+                }
+                db.execSQL(
+                    "UPDATE sync_outbox SET conflict=1, last_error=? WHERE $selection",
+                    arrayOf(reason),
                 )
-                WHERE conflict=0 AND base_revision=0
-                """.trimIndent(),
-            )
+                db.execSQL(
+                    """
+                    UPDATE sync_config
+                    SET last_error=CASE
+                      WHEN EXISTS(SELECT 1 FROM sync_outbox WHERE conflict=1) THEN ?
+                      ELSE last_error
+                    END
+                    WHERE id=1
+                    """.trimIndent(),
+                    arrayOf(reason),
+                )
+            }
         }
     }
 
@@ -526,12 +546,36 @@ class AppStateStore(context: Context) :
             // applied full snapshot was in flight. It already contains that
             // snapshot, so advance it to the acknowledged revision instead of
             // manufacturing a guaranteed false 409 on the next push.
+            val mutationIds = mutableListOf<String>()
+            db.query(
+                "sync_outbox",
+                arrayOf("mutation_id", "attempts", "base_revision", "conflict"),
+                "base_revision=?",
+                arrayOf(appliedBaseRevision.toString()),
+                null,
+                null,
+                null,
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    if (SyncPolicy.shouldAdvanceQueuedSnapshot(
+                            attempts = cursor.getInt(1),
+                            conflict = cursor.getInt(3) != 0,
+                            baseRevision = cursor.getLong(2),
+                            appliedBaseRevision = appliedBaseRevision,
+                        )
+                    ) {
+                        mutationIds += cursor.getString(0)
+                    }
+                }
+            }
+            for (queuedMutationId in mutationIds) {
+                db.execSQL(
+                    "UPDATE sync_outbox SET base_revision=? WHERE mutation_id=? AND attempts=0 AND conflict=0",
+                    arrayOf(revision, queuedMutationId),
+                )
+            }
             db.execSQL(
-                "UPDATE sync_outbox SET base_revision=? WHERE conflict=0 AND base_revision=?",
-                arrayOf(revision, appliedBaseRevision),
-            )
-            db.execSQL(
-                "UPDATE sync_config SET server_revision=MAX(server_revision, ?), last_sync_at=?, last_error=NULL WHERE id=1",
+                "UPDATE sync_config SET server_revision=MAX(server_revision, ?), last_sync_at=? WHERE id=1",
                 arrayOf(revision, System.currentTimeMillis()),
             )
             db.setTransactionSuccessful()
@@ -814,7 +858,9 @@ class AppStateStore(context: Context) :
                 put("payload", payload)
                 put("schema_version", schemaVersion)
                 put("created_at", System.currentTimeMillis())
-                put("attempts", 0)
+                // A manually selected historical snapshot is not a fresh child
+                // of an in-flight mutation and must never inherit its revision.
+                put("attempts", 1)
                 put("base_revision", remoteRevision)
                 put("conflict", 0)
             }

@@ -88,7 +88,9 @@ test("clean-checkout CI typechecks assets and compiles the Android application",
   ]);
   assert.match(assetTypes, /declare module "\*\.css"/);
   assert.match(workflow, /android:\s*[\s\S]*\.\/gradlew testDebugUnitTest/);
-  assert.match(workflow, /npm ci[\s\S]*npm run db:check[\s\S]*npm test/);
+  assert.match(workflow, /permissions:\s*[\s\S]*contents: read/);
+  assert.match(workflow, /concurrency:\s*[\s\S]*cancel-in-progress: true/);
+  assert.match(workflow, /npm ci[\s\S]*playwright-core install --with-deps chromium[\s\S]*npm run db:check[\s\S]*npm test/);
   assert.doesNotMatch(eslintConfig, /"build\/\*\*"/);
 });
 
@@ -102,6 +104,9 @@ test("security hardening keeps state writes privileged and recovery throttling g
   ]);
   assert.match(stateRoute, /requireUser\(request, \["owner", "admin", "storekeeper"\]\)/);
   assert.match(stateRoute, /warehouseDeletionPolicy\(previous, state, auth\.user\.role\)/);
+  assert.match(stateRoute, /warehouseHistoryMutationIssue\(previous, state, auth\.user\.role\)/);
+  assert.match(stateRoute, /projectWarehouseStateForUser\(parsedState, auth\.user\)/);
+  assert.match(stateRoute, /readJsonObject\(request, MAX_STATE_REQUEST_BYTES\)/);
   assert.match(stateRoute, /terminal: true, recover: "server"/);
   assert.match(stateRoute, /SELECT item_id AS itemId FROM warehouse_state_items/);
   assert.match(productsRoute, /requireUser\(request, \["owner", "admin"\]\)/);
@@ -113,7 +118,7 @@ test("security hardening keeps state writes privileged and recovery throttling g
   assert.match(auth, /DELETE FROM login_throttle WHERE login = \? AND last_attempt_at = \?/);
   assert.match(auth, /fetchSite !== "same-origin" && fetchSite !== "none"/);
   assert.match(auth, /MAX_REJECTED_BODY_DRAIN_BYTES = 1_500_000 \+ 64 \* 1024/);
-  assert.match(auth, /RETURNING blocked_until/);
+  assert.match(auth, /RETURNING failures, blocked_until/);
   assert.doesNotMatch(`${auth}\n${stateRoute}\n${productsRoute}`, /CREATE TABLE IF NOT EXISTS/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS `warehouse_full_state`/);
 });
@@ -152,15 +157,16 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.match(browserSync, /sync\.conflict \|\| !canUploadState\(\)/);
   assert.match(androidStore, /SyncTokenVault/);
   assert.match(androidStore, /AndroidKeyStore/);
-  assert.match(androidStore, /DB_VERSION = 7/);
+  assert.match(androidStore, /DB_VERSION = 8/);
   assert.match(androidStore, /base_revision INTEGER NOT NULL DEFAULT 0/);
   assert.match(androidStore, /conflict INTEGER NOT NULL DEFAULT 0/);
   assert.match(androidStore, /fun claimNextPending\(\)/);
   assert.match(androidStore, /arrayOf\("mutation_id", "payload", "schema_version", "attempts", "base_revision"\)/);
   assert.match(androidStore, /UPDATE sync_outbox SET attempts=\? WHERE mutation_id=\? AND conflict=0/);
   assert.doesNotMatch(androidStore, /SET attempts=\?, base_revision=\?/);
-  assert.match(androidStore, /UPDATE sync_outbox SET base_revision=\? WHERE conflict=0 AND base_revision=\?/);
-  assert.match(androidStore, /WHERE conflict=0 AND base_revision=0/);
+  assert.match(androidStore, /LegacyOutboxMigration\.ALL_PENDING_ROWS/);
+  assert.match(androidStore, /UPDATE sync_outbox SET conflict=1, last_error=\?/);
+  assert.doesNotMatch(androidStore, /SET base_revision = COALESCE/);
   assert.match(androidStore, /db\.delete\("sync_outbox", "attempts = 0 AND conflict = 0"/);
   assert.doesNotMatch(androidStore, /fun markMutationAttempted\(/);
   assert.match(androidSync, /store\.markMutationConflicted\(pending\.mutationId, message\)/);
@@ -205,7 +211,7 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
     "privilege guards must run both at script start and after account controls are installed",
   );
   assert.match(serverContract, /not implemented in this repository/);
-  assert.match(androidSync, /store\.clearServerRole\("Сессия сервера истекла/);
+  assert.match(androidSync, /store\.clearServerRole\(message\)/);
   assert.match(androidStore, /"serverRoleUnknown"/);
   assert.match(prototype, /Не удалось подтвердить роль этого аккаунта/);
   assert.match(prototype, /conflictLoadError/);
@@ -231,6 +237,12 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.match(browserSync, /lastServerStateJson/);
   assert.doesNotMatch(browserSync, /lastServerState:\s*null/);
   assert.match(browserSync, /sync\.lastServerStateJson = payload/);
+  assert.match(browserSync, /sync\.nextAttemptAt = Math\.max\(sync\.nextAttemptAt, Date\.now\(\) \+ 30_000\)/);
+  assert.equal(
+    (browserSync.match(/window\.treshkaServerRole\s*=/g) ?? []).length,
+    1,
+    "the server role provider must have one authoritative definition",
+  );
   assert.match(browserSync, /Локальное изменение отменено/);
   assert.match(activity, /uri\.host != APP_HOST/);
   assert.match(manifest, /android:allowBackup="false"/);

@@ -33,4 +33,32 @@ class SyncPolicyTest {
         assertEquals(10L, SyncPolicy.retryDelaySeconds(2))
         assertEquals(300L, SyncPolicy.retryDelaySeconds(20))
     }
+
+    @Test
+    fun legacyZeroBaseSnapshotsAreQuarantinedInsteadOfPromoted() {
+        assertEquals(
+            LegacyOutboxMigration.NONE,
+            SyncPolicy.legacyOutboxMigration(oldVersion = 6, serverRevision = 0),
+        )
+        assertEquals(
+            LegacyOutboxMigration.ZERO_BASE_ROWS,
+            SyncPolicy.legacyOutboxMigration(oldVersion = 6, serverRevision = 42),
+        )
+        assertEquals(
+            LegacyOutboxMigration.ALL_PENDING_ROWS,
+            SyncPolicy.legacyOutboxMigration(oldVersion = 7, serverRevision = 42),
+        )
+        assertEquals(
+            LegacyOutboxMigration.NONE,
+            SyncPolicy.legacyOutboxMigration(oldVersion = 8, serverRevision = 42),
+        )
+    }
+
+    @Test
+    fun onlyFreshUnattemptedChildrenInheritAnAcknowledgedRevision() {
+        assertTrue(SyncPolicy.shouldAdvanceQueuedSnapshot(0, false, 42, 42))
+        assertFalse(SyncPolicy.shouldAdvanceQueuedSnapshot(1, false, 42, 42))
+        assertFalse(SyncPolicy.shouldAdvanceQueuedSnapshot(0, true, 42, 42))
+        assertFalse(SyncPolicy.shouldAdvanceQueuedSnapshot(0, false, 41, 42))
+    }
 }

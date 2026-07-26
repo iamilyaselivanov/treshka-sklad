@@ -1,7 +1,13 @@
 import { env } from "cloudflare:workers";
 import { audit, requireUser } from "@/lib/auth";
 import type { SessionUser } from "@/lib/auth";
-import { warehouseDeletionPolicy, warehouseItemIds } from "@/lib/warehouse-state";
+import { readJsonObject, RequestBodyTooLargeError } from "@/lib/http";
+import {
+  projectWarehouseStateForUser,
+  warehouseDeletionPolicy,
+  warehouseHistoryMutationIssue,
+  warehouseItemIds,
+} from "@/lib/warehouse-state";
 import type { WarehouseState } from "@/lib/warehouse-state";
 
 export const dynamic = "force-dynamic";
@@ -16,6 +22,7 @@ type StateRow = {
 type StateMetaRow = Omit<StateRow, "payload">;
 
 const MAX_STATE_BYTES = 1_500_000;
+const MAX_STATE_REQUEST_BYTES = 1_550_000;
 const MAX_COLLECTION_ITEMS = 50_000;
 const MAX_AUDIT_LOG_ITEMS = 2_000;
 const MAX_NOTIFICATION_ITEMS = 2_000;
@@ -28,6 +35,24 @@ const OPTIONAL_COLLECTIONS = [
   "auditLog",
   "notifications",
 ] as const;
+
+const SPECIFIC_COLLECTION_LIMITS = {
+  auditLog: MAX_AUDIT_LOG_ITEMS,
+  notifications: MAX_NOTIFICATION_ITEMS,
+  inventoryActs: MAX_INVENTORY_ACT_ITEMS,
+} as const;
+
+function collectionLimitError(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const state = value as WarehouseState;
+  for (const [key, limit] of Object.entries(SPECIFIC_COLLECTION_LIMITS)) {
+    const collection = state[key];
+    if (Array.isArray(collection) && collection.length > limit) {
+      return `Коллекция ${key} превышает безопасный предел ${limit}; данные не были усечены`;
+    }
+  }
+  return null;
+}
 
 function normalizedState(value: unknown): WarehouseState | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -48,9 +73,6 @@ function normalizedState(value: unknown): WarehouseState | null {
   delete state.currentRole;
   delete state.currentUserPost;
   delete state.savedAt;
-  if (Array.isArray(state.auditLog)) state.auditLog = state.auditLog.slice(0, MAX_AUDIT_LOG_ITEMS);
-  if (Array.isArray(state.notifications)) state.notifications = state.notifications.slice(0, MAX_NOTIFICATION_ITEMS);
-  if (Array.isArray(state.inventoryActs)) state.inventoryActs = state.inventoryActs.slice(0, MAX_INVENTORY_ACT_ITEMS);
   return state;
 }
 
@@ -79,14 +101,17 @@ export async function GET(request: Request) {
     });
   }
   try {
+    const parsedState = JSON.parse(row.payload) as WarehouseState;
+    const projectedState = projectWarehouseStateForUser(parsedState, auth.user);
+    const projectedPayload = JSON.stringify(projectedState);
     return Response.json(
       {
         revision: row.revision,
-        state: JSON.parse(row.payload),
+        state: projectedState,
         user: auth.user,
         updatedAt: row.updated_at,
         updatedBy: row.updated_by,
-        sizeBytes: new TextEncoder().encode(row.payload).byteLength,
+        sizeBytes: new TextEncoder().encode(projectedPayload).byteLength,
       },
       { headers: { "cache-control": "no-store", etag } },
     );
@@ -104,9 +129,20 @@ export async function PUT(request: Request) {
   if (auth.response || !auth.user) return auth.response;
   let body: { state?: unknown; expectedRevision?: unknown };
   try {
-    body = (await request.json()) as typeof body;
-  } catch {
+    const parsed = await readJsonObject(request, MAX_STATE_REQUEST_BYTES);
+    if (!parsed) {
+      return Response.json({ error: "Некорректный JSON" }, { status: 400 });
+    }
+    body = parsed as typeof body;
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return Response.json({ error: "Данные склада превышают безопасный размер 1,5 МБ" }, { status: 413 });
+    }
     return Response.json({ error: "Некорректный JSON" }, { status: 400 });
+  }
+  const limitError = collectionLimitError(body.state);
+  if (limitError) {
+    return Response.json({ error: limitError }, { status: 413 });
   }
   const state = normalizedState(body.state);
   if (!state) {
@@ -169,9 +205,10 @@ export async function PUT(request: Request) {
       "SELECT item_id AS itemId FROM warehouse_state_items WHERE state_key = 'main'",
     ).all<{ itemId: string }>();
     const previousItemIds = (indexedItems.results ?? []).map((row) => row.itemId);
-    const needsPolicyCheck = previousItemIds.length === 0
+    const needsDeletionPolicyCheck = previousItemIds.length === 0
       || previousItemIds.some((itemId) => !nextItemIds.has(itemId));
-    if (!needsPolicyCheck) {
+    const needsHistoryPolicyCheck = auth.user.role === "storekeeper";
+    if (!needsDeletionPolicyCheck && !needsHistoryPolicyCheck) {
       // Normal writes avoid reading and parsing the potentially 4 MB snapshot.
       // warehouse_state_items is maintained atomically with payload below.
     } else {
@@ -196,11 +233,12 @@ export async function PUT(request: Request) {
           { status: 500 },
         );
       }
-      const deletionPolicy = warehouseDeletionPolicy(previous, state, auth.user.role);
-      if (deletionPolicy) {
+      const policy = warehouseHistoryMutationIssue(previous, state, auth.user.role)
+        ?? warehouseDeletionPolicy(previous, state, auth.user.role);
+      if (policy) {
         return Response.json(
-          { error: deletionPolicy.error, terminal: true, recover: "server" },
-          { status: deletionPolicy.status },
+          { error: policy.error, terminal: true, recover: "server" },
+          { status: policy.status },
         );
       }
     }
@@ -277,11 +315,19 @@ export async function PUT(request: Request) {
       { status: 409, headers: { "cache-control": "no-store" } },
     );
   }
-  await audit(
-    auth.user,
-    revision === 1 ? "state_created" : "state_updated",
-    `${sizeBytes} байт · ревизия ${revision}`,
-  );
+  try {
+    await audit(
+      auth.user,
+      revision === 1 ? "state_created" : "state_updated",
+      `${sizeBytes} байт · ревизия ${revision}`,
+    );
+  } catch (error) {
+    // The state transaction has already committed. Returning 500 here makes a
+    // correct client retry with a stale revision and manufacture a false
+    // conflict. Keep the successful write response authoritative and surface
+    // the independent audit-storage failure to platform logs.
+    console.error("warehouse state success audit failed", error);
+  }
   return Response.json(
     { revision, sizeBytes, updatedAt },
     { headers: { etag: stateEtag(revision, auth.user) } },

@@ -4111,7 +4111,7 @@ function renderServerSettings(){
   let conflictLoadError='';
   const bridge=nativeSyncBridge();
   if(s.configured&&canAdminister()&&bridge&&typeof bridge.listConflicts==='function'){
-    try{const loaded=JSON.parse(bridge.listConflicts());if(Array.isArray(loaded))conflicts=loaded;else if(loaded&&loaded.error)conflictLoadError=String(loaded.error);}catch(e){conflictLoadError='Не удалось прочитать список конфликтов';console.warn(e);}
+    try{const loaded=JSON.parse(bridge.listConflicts());if(Array.isArray(loaded))conflicts=loaded;else conflictLoadError=String(loaded&&loaded.error||'Сервер вернул некорректный список конфликтов');}catch(e){conflictLoadError='Не удалось прочитать список конфликтов';console.warn(e);}
   }
   setHdr('Сервер и синхронизация','Offline-first: локальная база работает всегда',true,false);
   $('content').innerHTML=`
@@ -4126,7 +4126,7 @@ function renderServerSettings(){
       <div class="fld"><label>Пароль</label><input id="serverPassword" type="password" autocomplete="current-password"></div>
       <button class="btn primary" onclick="connectServer()">Подключить и синхронизировать</button>
     </div>
-    ${s.configured?`<button class="btn green" onclick="nativeSyncBridge().syncNow();toast('Синхронизация запущена')">⟳ Синхронизировать сейчас</button>${canAdminister()&&Number(s.conflictBackups||0)>0?`<button class="btn ghost" onclick="exportLatestConflictBackup()">⤓ Экспорт последней резервной копии конфликта</button>`:''}<button class="btn ghost" onclick="disconnectServer()">Отключить сервер на этом устройстве</button>`:''}
+    ${s.configured?`<button class="btn green" onclick="nativeSyncBridge().syncNow();toast('Синхронизация запущена')">⟳ Синхронизировать сейчас</button>${['owner','admin'].includes(String(s.serverRole||''))&&Number(s.conflictBackups||0)>0?`<button class="btn ghost" onclick="exportLatestConflictBackup()">⤓ Экспорт последней резервной копии конфликта</button>`:''}<button class="btn ghost" onclick="disconnectServer()">Отключить сервер на этом устройстве</button>`:''}
     ${conflicts.length?`<div class="sec">Конфликты без потери данных</div>${conflicts.map(c=>{const skipped=Math.max(0,Number(c.serverChanges||0));const localSafe=Boolean(c.canKeepLocal);return `<div class="card static"><div class="t">Устройство ${esc(c.deviceId)}</div><div class="s">Локальная ревизия ${Number(c.baseRevision||0)}, серверная ${Number(c.serverRevision||0)}. ${skipped?`На сервере уже ${skipped} новых ревизий — старый полный снимок не будет отправлен поверх них.`:'Обе копии сохранены.'}</div><button class="fbtn" style="width:100%;margin-top:8px" onclick="resolveServerConflict(${c.id},'server')">Оставить серверную версию</button><button class="fbtn" style="width:100%;margin-top:6px" ${localSafe?`onclick="resolveServerConflict(${c.id},'local')"`:'disabled'}>${localSafe?'Повторить локальную версию':'Локальная версия защищена от опасной перезаписи'}</button></div>`;}).join('')}`:''}
     <div class="sec">Защита данных</div>
     <div class="card static"><div class="s" style="color:var(--ink);line-height:1.55">Каждое изменение сначала атомарно записывается в SQLite вместе с durable outbox. Сервер принимает mutationId только один раз. Перед принятием серверной версии приложение сохраняет фактически удаляемые локальные снимки в приватной резервной копии на устройстве. В «Загрузки» она попадает только по отдельной команде экспорта.</div></div>`;

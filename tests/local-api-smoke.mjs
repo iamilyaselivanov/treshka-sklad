@@ -92,6 +92,21 @@ try {
     timings[`login_${definition.role}`] = login.elapsedMs;
   }
 
+  const fifthAttemptTarget = definitions.find((definition) => definition.role === "admin");
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await request("/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ login: fifthAttemptTarget.login, password: "Definitely-Wrong-1600" }),
+    }, 401);
+  }
+  const fifthAttemptSuccess = await request("/api/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ login: fifthAttemptTarget.login, password: fifthAttemptTarget.password }),
+  });
+  assert.equal(fifthAttemptSuccess.data.user.login, fifthAttemptTarget.login);
+
   const bruteTarget = definitions.find((definition) => definition.role === "worker");
   const parallelFailures = await Promise.all(Array.from({ length: 5 }, () =>
     fetch(new URL("/api/auth/login", baseUrl), {
@@ -110,6 +125,17 @@ try {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ login: bruteTarget.login, password: bruteTarget.password }),
   }, 429);
+  const throttleAudit = await request("/api/audit", { headers: ownerHeaders });
+  assert.equal(
+    throttleAudit.data.entries.filter((entry) => entry.action === "login_blocked").length,
+    1,
+    "only the threshold crossing should create a security audit row",
+  );
+  assert.equal(
+    throttleAudit.data.entries.some((entry) => entry.action === "login_failed"),
+    false,
+    "individual unauthenticated failures must not evict the real audit history",
+  );
 
   const users = await request("/api/users", { headers: ownerHeaders });
   assert.equal(users.data.users.filter((user) => createdIds.includes(user.id)).length, 3);
@@ -277,9 +303,9 @@ try {
   sharedState.currentAccountId = "must-not-be-stored";
   sharedState.currentRole = "admin";
   sharedState.savedAt = "must-not-create-a-new-revision";
-  sharedState.auditLog = Array.from({ length: 2_005 }, (_, index) => ({ marker: index }));
-  sharedState.notifications = Array.from({ length: 2_005 }, (_, index) => ({ id: `notification-${index}` }));
-  sharedState.inventoryActs = Array.from({ length: 5_005 }, (_, index) => ({ no: `inventory-${index}`, diffs: [] }));
+  sharedState.auditLog = Array.from({ length: 2_000 }, (_, index) => ({ marker: index }));
+  sharedState.notifications = Array.from({ length: 2_000 }, (_, index) => ({ id: `notification-${index}` }));
+  sharedState.inventoryActs = Array.from({ length: 5_000 }, (_, index) => ({ no: `inventory-${index}`, diffs: [] }));
   const rejectedLargeState = { ...sharedState, rejectedPadding: "x".repeat(128 * 1024) };
   await request("/api/state", {
     method: "PUT",
@@ -294,10 +320,22 @@ try {
   const oversizedState = { ...sharedState, rejectedPadding: "x".repeat(1_510_000) };
   const oversizedWrite = await request("/api/state", {
     method: "PUT",
-    headers: { ...ownerHeaders, "content-type": "application/json" },
+    // Workerd closes a connection after an early oversized-body response.
+    // Isolate this probe so its dead keep-alive socket cannot poison the next assertion.
+    headers: { ...ownerHeaders, "content-type": "application/json", connection: "close" },
     body: JSON.stringify({ state: oversizedState, expectedRevision: state.data.revision }),
   }, 413);
   assert.match(oversizedWrite.data.error, /1,5 МБ/);
+  const collectionOverflow = {
+    ...sharedState,
+    inventoryActs: [...sharedState.inventoryActs, { no: "inventory-overflow", diffs: [] }],
+  };
+  const rejectedCollectionOverflow = await request("/api/state", {
+    method: "PUT",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({ state: collectionOverflow, expectedRevision: state.data.revision }),
+  }, 413);
+  assert.match(rejectedCollectionOverflow.data.error, /не были усечены/);
   await request("/api/state", {
     method: "PUT",
     headers: { cookie: roleCookies.worker, "content-type": "application/json" },
@@ -357,6 +395,13 @@ try {
     headers: { cookie: roleCookies.admin, "if-none-match": etag },
   });
   assert.equal(wrongAuthorizationScope.status, 200, "a role/account change must never reuse another identity's 304");
+  const workerSnapshot = await request("/api/state", { headers: { cookie: roleCookies.worker } });
+  assert.ok(workerSnapshot.data.state.posts.every((post) => post.name === "ТЭЧ"));
+  assert.deepEqual(workerSnapshot.data.state.inventoryActs, []);
+  assert.deepEqual(workerSnapshot.data.state.auditLog, []);
+  assert.ok(workerSnapshot.data.state.items.every((item) =>
+    Number(item.stock) === 0
+    && Object.keys(item.posts ?? {}).every((post) => post === "ТЭЧ")));
   const deletionProbeId = `delete-state-${suffix}`;
   const stateWithDeletionProbe = {
     ...sanitized.data.state,
@@ -401,6 +446,15 @@ try {
       expectedRevision: deletionProbeSaved.data.revision,
     }),
   });
+  const forbiddenHistoryErase = await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.storekeeper, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: { ...stateWithDocumentReference, docs: [] },
+      expectedRevision: documentReferenceSaved.data.revision,
+    }),
+  }, 403);
+  assert.match(forbiddenHistoryErase.data.error, /историю складских операций/);
   const withoutDocumentReferencedItem = {
     ...stateWithDocumentReference,
     items: stateWithDocumentReference.items.filter((item) => item.id !== deletionProbeId),
@@ -487,7 +541,7 @@ try {
     ],
     inventoryActs: [
       { no: `INV-${suffix}`, diffs: [{ id: linkedProduct.data.product.id, counted: 0 }] },
-      ...(stateAfterDeletion.data.state.inventoryActs ?? []),
+      ...(stateAfterDeletion.data.state.inventoryActs ?? []).slice(1),
     ],
   };
   const linkedSaved = await request("/api/state", {
@@ -519,7 +573,7 @@ try {
   assert.equal(archivedInventoryLine.name, linkedProduct.data.product.name);
   const parallelStates = [1, 2].map((marker) => ({
     ...stateAfterDeletion.data.state,
-    auditLog: [{ marker }, ...(stateAfterDeletion.data.state.auditLog ?? [])],
+    auditLog: [{ marker }, ...(stateAfterDeletion.data.state.auditLog ?? []).slice(0, 1_999)],
   }));
   const parallelWrites = await Promise.all(parallelStates.map((candidate) => fetch(new URL("/api/state", baseUrl), {
     method: "PUT",

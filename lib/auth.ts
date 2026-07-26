@@ -68,7 +68,7 @@ export async function recordThrottleFailure(
          ELSE login_throttle.blocked_until
        END,
        last_attempt_at = excluded.last_attempt_at
-     RETURNING blocked_until`,
+     RETURNING failures, blocked_until`,
   ).bind(
     key,
     maxFailures,
@@ -76,8 +76,11 @@ export async function recordThrottleFailure(
     now.toISOString(),
     maxFailures,
     blockedUntil,
-  ).first<{ blocked_until: string | null }>();
-  return Boolean(row?.blocked_until && Date.parse(row.blocked_until) > now.getTime());
+  ).first<{ failures: number; blocked_until: string | null }>();
+  return {
+    failures: Number(row?.failures ?? 0),
+    blocked: Boolean(row?.blocked_until && Date.parse(row.blocked_until) > now.getTime()),
+  };
 }
 
 export async function clearThrottle(key: string) {
