@@ -191,8 +191,9 @@ class MainActivity : AppCompatActivity() {
 
         webView = WebView(this)
         setContentView(webView)
-        serverSyncManager = ServerSyncManager(
-            appStateStore,
+        serverSyncManager = (application as WarehouseApplication).serverSyncManager
+        serverSyncManager.setCallbacks(
+            owner = this,
             onStatus = { json ->
                 runOnUiThread {
                     webView.evaluateJavascript(
@@ -806,6 +807,12 @@ class MainActivity : AppCompatActivity() {
     override fun onStop() {
         super.onStop()
         flushWebAppState()
+    }
+
+    override fun onDestroy() {
+        if (::serverSyncManager.isInitialized) serverSyncManager.clearCallbacks(this)
+        if (::webView.isInitialized) webView.destroy()
+        super.onDestroy()
     }
 
     @Suppress("MissingSuperCall")

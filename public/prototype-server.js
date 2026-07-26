@@ -15,6 +15,7 @@
     pendingMediaDeletes: new Set(),
     consecutiveFailures: 0,
     nextAttemptAt: 0,
+    lastServerState: null,
   };
   const push = {
     registering: false,
@@ -29,6 +30,20 @@
   const PUSH_QUEUE_KEY = "treshka_push_events_v1";
   const MAX_PUSH_QUEUE = 500;
   const PUSH_EVENT_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+
+  function installServerPrivilegeGuards() {
+    window.requestRoleSwitch = () => toast("Роль назначается владельцем и меняется только после входа под другим аккаунтом.");
+    window.confirmRoleSwitch = window.requestRoleSwitch;
+    window.requestPostSwitch = () => toast("Пост назначается владельцем в аккаунте сотрудника.");
+    window.confirmPostSwitch = window.requestPostSwitch;
+  }
+
+  // Cached prototype state and its legacy PIN are never an authorization
+  // source for the server-connected application.
+  currentRole = "rabotnik";
+  window.treshkaServerRole = () => sync.user?.role || null;
+  installServerPrivilegeGuards();
+  if (typeof updateNavForRole === "function") updateNavForRole();
 
   async function fetchWithTimeout(input, init = {}, timeoutMs = 15_000) {
     const controller = new AbortController();
@@ -271,19 +286,21 @@
     state.currentAccountId = null;
     delete state.currentRole;
     delete state.currentUserPost;
+    delete state.savedAt;
+    if (Array.isArray(state.auditLog)) state.auditLog = state.auditLog.slice(0, 2_000);
     return state;
   }
 
   function applyServerRole() {
     if (!sync.user) return;
-    currentRole = sync.user.role === "owner" || sync.user.role === "admin"
-      ? "admin"
-      : sync.user.role === "storekeeper"
-        ? "kladovshik"
-        : "rabotnik";
+    const nextRole = typeof window.mapServerRoleToClientRole === "function"
+      ? window.mapServerRoleToClientRole(sync.user.role)
+      : "rabotnik";
+    const roleChanged = currentRole !== nextRole;
+    currentRole = nextRole;
     if (sync.user.assignment) currentUserPost = sync.user.assignment;
     updateNavForRole();
-    if (typeof window.onTreshkaServerRoleChanged === "function") {
+    if (roleChanged && typeof window.onTreshkaServerRoleChanged === "function") {
       window.onTreshkaServerRoleChanged(sync.user.role);
     }
   }
@@ -323,10 +340,7 @@
   }
 
   function installServerAccountControls() {
-    window.requestRoleSwitch = () => toast("Роль назначается владельцем и меняется только после входа под другим аккаунтом.");
-    window.confirmRoleSwitch = window.requestRoleSwitch;
-    window.requestPostSwitch = () => toast("Пост назначается владельцем в аккаунте сотрудника.");
-    window.confirmPostSwitch = window.requestPostSwitch;
+    installServerPrivilegeGuards();
 
     window.renderAccounts = async function () {
       try {
@@ -454,6 +468,7 @@
       throw new Error("Сервер вернул несовместимые данные");
     }
     sync.revision = Number(snapshot.revision || 0);
+    sync.lastServerState = snapshot.state;
     sync.lastUploaded = JSON.stringify(normalizedState());
     sync.lastError = null;
     rerenderCurrentView();
@@ -461,7 +476,18 @@
   }
 
   async function fetchSnapshot() {
-    const response = await fetchWithTimeout("/api/state", { cache: "no-store" });
+    const headers = {};
+    if (sync.revision > 0) headers["if-none-match"] = `W/"warehouse-main-${sync.revision}"`;
+    const response = await fetchWithTimeout("/api/state", { cache: "no-store", headers });
+    if (response.status === 304) {
+      noteSyncSuccess();
+      return {
+        revision: sync.revision,
+        state: sync.lastServerState,
+        user: sync.user,
+        unchanged: true,
+      };
+    }
     const data = await response.json();
     if (response.status === 401 || !data.user) {
       parent.postMessage({ type: "treshka-auth-required" }, location.origin);
@@ -473,6 +499,7 @@
     // uploaded; otherwise an owner is misclassified as read-only and poll can
     // overwrite their offline work.
     adoptServerUser(data.user);
+    sync.lastServerState = data.state ?? null;
     noteSyncSuccess();
     return data;
   }

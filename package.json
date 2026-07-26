@@ -9,10 +9,12 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/release.test.mjs tests/rendered-html.test.mjs tests/push-events.test.mjs tests/warehouse-state.test.mjs tests/sklad-prototype.test.mjs && node tests/run-local-api-smoke.mjs",
+    "test": "npm run typecheck && npm run lint && npm run build && node --test tests/release.test.mjs tests/rendered-html.test.mjs tests/push-events.test.mjs tests/warehouse-state.test.mjs tests/sklad-prototype.test.mjs && node tests/run-local-api-smoke.mjs",
     "test:api-local": "node tests/local-api-smoke.mjs",
     "test:sklad": "node --test tests/sklad-prototype.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "typecheck": "tsc --noEmit",
+    "db:check": "drizzle-kit check",
     "db:generate": "drizzle-kit generate",
     "db:migrate:local": "npm run build && wrangler d1 migrations apply DB --local --persist-to .wrangler/state --config dist/server/wrangler.json"
   },
@@ -24,6 +26,7 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.47.0",
+    "@cloudflare/workers-types": "^5.20260722.1",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",

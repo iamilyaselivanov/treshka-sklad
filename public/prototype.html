@@ -3013,14 +3013,14 @@ function logAction(action, detail, post, itemId){
 function deepClone(value){ return JSON.parse(JSON.stringify(value)); }
 function restoreArray(target, snapshot){ target.length=0; target.push(...snapshot); }
 function runStockTransaction(label, action){
-  const snapshot={items:deepClone(items),posts:deepClone(posts),extIssues:deepClone(extIssues),stockTransfers:deepClone(stockTransfers),auditLog:deepClone(auditLog),notifications:deepClone(notifications)};
+  const snapshot={items:deepClone(items),posts:deepClone(posts),docs:deepClone(docs),extIssues:deepClone(extIssues),stockTransfers:deepClone(stockTransfers),inventoryActs:deepClone(inventoryActs),auditLog:deepClone(auditLog),notifications:deepClone(notifications),cycleCount:deepClone(cycleCount)};
   try{
     const result=action();
     if(result===false) throw new Error('Операция отклонена');
     return true;
   }catch(e){
-    restoreArray(items,snapshot.items);restoreArray(posts,snapshot.posts);restoreArray(extIssues,snapshot.extIssues);
-    restoreArray(stockTransfers,snapshot.stockTransfers);restoreArray(auditLog,snapshot.auditLog);restoreArray(notifications,snapshot.notifications);
+    restoreArray(items,snapshot.items);restoreArray(posts,snapshot.posts);restoreArray(docs,snapshot.docs);restoreArray(extIssues,snapshot.extIssues);
+    restoreArray(stockTransfers,snapshot.stockTransfers);restoreArray(inventoryActs,snapshot.inventoryActs);restoreArray(auditLog,snapshot.auditLog);restoreArray(notifications,snapshot.notifications);cycleCount=snapshot.cycleCount;
     console.error('Транзакция отменена: '+label,e);
     toast('Операция отменена: остатки не изменены');
     return false;
@@ -3205,7 +3205,9 @@ function applyAppState(saved){
     const componentSubcatsNext = (Array.isArray(s.componentSubcats) && s.componentSubcats.length) ? s.componentSubcats : componentSubcats;
     // Первый запуск начинается работником (начальное значение currentRole),
     // после успешного ввода ПИН выбранная роль сохраняется на этом устройстве.
-    const currentRoleNext = (s.currentRole && ROLES[s.currentRole]) ? s.currentRole : currentRole;
+    const currentRoleNext = typeof window.treshkaServerRole === 'function'
+      ? mapServerRoleToClientRole(window.treshkaServerRole())
+      : (s.currentRole && ROLES[s.currentRole]) ? s.currentRole : currentRole;
     const currentUserPostNext = s.currentUserPost ? s.currentUserPost : currentUserPost;
     const currentAccountIdNext=typeof s.currentAccountId==='string'?s.currentAccountId:null;
 
@@ -4192,7 +4194,7 @@ function connectServer(){
   try{
     const response=JSON.parse(bridge.login(url,login,password));
     if(response.error){toast(response.error);return false;}
-    if(response.user){currentRole=response.user.role||currentRole;if(response.user.post)currentUserPost=response.user.post;}
+    if(response.user){currentRole=mapServerRoleToClientRole(response.user.role);if(response.user.post)currentUserPost=response.user.post;}
     refreshNativeSyncStatus();updateNavForRole();toast('✓ Сервер подключён');renderServerSettings();return true;
   }catch(e){toast('Ошибка подключения: '+e.message);return false;}
 }
@@ -5617,9 +5619,7 @@ function acceptWorkToWarehouse(no){
   if(currentRole!=='kladovshik'){toast('Принять изделие на склад может только кладовщик');return false;}
   const d=docs.find(x=>x.no===no);
   if(!d||d.status!=='Ожидает приёмки на склад'){toast('Акт не ожидает приёмки на склад');return false;}
-  d.warehouseAcceptedAt=Date.now();
-  d.warehouseAcceptedBy='Кладовщик';
-  performWorkClose(d,d.approvalNote||'принято кладовщиком на склад');
+  if(!performWorkClose(d,d.approvalNote||'принято кладовщиком на склад'))return false;
   emitServerPush('storekeeper_warehouse_return_accepted',{
     post:d.post,
     entityNo:d.no,
@@ -5628,7 +5628,11 @@ function acceptWorkToWarehouse(no){
   return true;
 }
 function performWorkClose(d, note){
-  if(d.status==='Закрыт'){ toast('Акт уже закрыт'); return; }
+  if(currentRole!=='kladovshik'){toast('Закрыть приёмку может только кладовщик');return false;}
+  if(!d||d.status!=='Ожидает приёмки на склад'){toast('Акт не ожидает приёмки на склад');return false;}
+  const closed=runStockTransaction('Закрытие акта выполненных работ',()=>{
+  d.warehouseAcceptedAt=Date.now();
+  d.warehouseAcceptedBy='Кладовщик';
   d.status='Закрыт';
   d.materials.forEach(m=>{
     const it=item(m.id);
@@ -5656,8 +5660,11 @@ function performWorkClose(d, note){
     repaired.history.push({d:todayStr(), type:'in', text:`${d.serial&&d.serial!=='—'?'№'+d.serial+' ':''}возвращено на склад после ремонта (${d.no})`, q:`+1 ${repaired.unit}`});
   }
   logAction('Акт выполненных работ закрыт', `${d.no}: ${d.item}, списано ${d.materials.length} позиций материалов${note?' · '+note:''}`, d.post);
+  });
+  if(!closed)return false;
   toast('✓ Акт закрыт: материалы списаны');
   setTimeout(()=>go('docs'), 900);
+  return true;
 }
 
 function onDefektItemChange(){
@@ -5710,6 +5717,7 @@ function submitDefekt(){
   let itemId = $('f_itemid') && $('f_itemid').value ? $('f_itemid').value : null;
   if(itemId&&!item(itemId)){toast('Выбранная складская карточка не существует');return;}
   if(!itemId&&$('f_create_card')?.checked){
+    if(!canManageCatalog()){toast('Создавать карточки товара может только администратор');return false;}
     const unit=$('f_create_unit').value.trim()||'шт',topCat=$('f_create_cat').value;
     const newItem={id:nextItemInternalId(),icon:CAT_ICON[topCat]||'📦',name:itemLabel,sku:nextGeneratedSku(),topCat,unit,stock:0,min:0,abc:'C',desc:'Создано из акта дефектовки',posts:{},ext:0,history:[{d:todayStr(),type:'in',text:'Карточка создана из акта дефектовки',q:`+0 ${unit}`}]};
     items.push(newItem);itemId=newItem.id;
@@ -5781,12 +5789,21 @@ function setRole(role){
   if(prevRole !== role) logAction('Смена роли', ROLES[prevRole].label+' → '+ROLES[role].label);
 }
 
+function mapServerRoleToClientRole(role){
+  if(role==='owner'||role==='admin')return 'admin';
+  if(role==='storekeeper')return 'kladovshik';
+  return 'rabotnik';
+}
+window.mapServerRoleToClientRole=mapServerRoleToClientRole;
+
 function startCycleCount(){
+  if(currentRole!=='admin'){toast('Инвентаризацию может проводить только администратор');return false;}
   cycleCount = {counts:{}};
   logAction('Инвентаризация начата', 'Полный пересчёт основного склада');
   render({fn:views.inventory}, false);
 }
 function setCount(id, val){
+  if(currentRole!=='admin'||!cycleCount){toast('Инвентаризация недоступна');return false;}
   const v = parseQuantity(val, true);
   if(v===null){ toast('Введите целое неотрицательное количество'); delete cycleCount.counts[id]; return; }
   cycleCount.counts[id] = v;
@@ -5795,6 +5812,7 @@ function setCount(id, val){
   if($('inventoryRemaining'))$('inventoryRemaining').textContent=done<items.length?`Осталось пересчитать: ${items.length-done}`:'Все позиции заполнены';
 }
 function finishCycleCount(){
+  if(currentRole!=='admin'||!cycleCount){toast('Инвентаризация недоступна');return false;}
   const counted = Object.keys(cycleCount.counts).length;
   if(counted < items.length){ toast('Пересчитайте все позиции перед завершением: осталось '+(items.length-counted)); return; }
   const diffs = items.map(i=>{

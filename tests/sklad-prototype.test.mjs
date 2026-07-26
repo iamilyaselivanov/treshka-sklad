@@ -205,16 +205,17 @@ test('#7 — schema migration refuses newer-than-known or unmigratable-older dat
   await ctx.close();
 });
 
-test('#5/#6 — privileged roles require a PIN; rabotnik cannot export the whole warehouse', async () => {
+test('#5/#6 — server role overrides cached privileges; rabotnik cannot export the whole warehouse', async () => {
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => {
     const out = {};
     out.startsAsWorker = currentRole === 'rabotnik';
-    out.pinsUpdated = ROLE_PINS.admin === '21208' && ROLE_PINS.kladovshik === '21208';
     const state = serializeAppState();
     out.rolePersisted = state.currentRole === 'rabotnik';
+    window.treshkaServerRole = () => 'worker';
     currentRole = 'rabotnik';
-    out.savedAdminRestoredOnLoad = applyAppState({ ...state, currentRole: 'admin' }) && currentRole === 'admin';
+    out.serverRoleOverridesCachedAdmin = applyAppState({ ...state, currentRole: 'admin' }) && currentRole === 'rabotnik';
+    delete window.treshkaServerRole;
     currentRole = 'admin';
     requestRoleSwitch('rabotnik');
     out.rabotnikNoPinNeeded = currentRole === 'rabotnik';
@@ -844,12 +845,13 @@ test('regression — closing a work act decrements the specific post-level lots,
 
     const clone = JSON.parse(JSON.stringify(docs.find((d) => d.no === 'АВР-145')));
     clone.no = 'АВР-TEST-LOTS';
-    clone.status = 'Черновик';
+    clone.status = 'Ожидает приёмки на склад';
     clone.post = 'НРТК';
     clone.itemId = null; // не связываем с конкретным изделием — тест только про партии материала
     clone.materials = [{ id: 'battnrtk', q: 1 }];
     docs.push(clone);
 
+    currentRole = 'kladovshik';
     performWorkClose(clone);
 
     const after = p.stock.find((s) => s.id === 'battnrtk');

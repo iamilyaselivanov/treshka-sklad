@@ -17,8 +17,7 @@ class WarehouseFirebaseMessagingService : FirebaseMessagingService() {
     }
 
     override fun onDeletedMessages() {
-        val store = (application as WarehouseApplication).appStateStore
-        ServerSyncManager(store, {}, { _, _ -> }).syncNow()
+        (application as WarehouseApplication).serverSyncManager.syncNow()
     }
 
     override fun onMessageReceived(message: RemoteMessage) {

@@ -99,7 +99,12 @@ try {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ login: bruteTarget.login, password: "Definitely-Wrong-1600" }),
     })));
-  assert.deepEqual(parallelFailures.map((response) => response.status), [401, 401, 401, 401, 401]);
+  const parallelFailureStatuses = parallelFailures.map((response) => response.status);
+  assert.ok(parallelFailureStatuses.every((status) => status === 401 || status === 429));
+  assert.ok(
+    parallelFailureStatuses.includes(429),
+    `the atomic failure threshold must close the concurrent race: ${parallelFailureStatuses.join(",")}`,
+  );
   await request("/api/auth/login", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -271,6 +276,8 @@ try {
   sharedState.accounts = [{ id: "must-not-be-stored", role: "owner" }];
   sharedState.currentAccountId = "must-not-be-stored";
   sharedState.currentRole = "admin";
+  sharedState.savedAt = "must-not-create-a-new-revision";
+  sharedState.auditLog = Array.from({ length: 2_005 }, (_, index) => ({ marker: index }));
   const rejectedLargeState = { ...sharedState, rejectedPadding: "x".repeat(128 * 1024) };
   await request("/api/state", {
     method: "PUT",
@@ -293,6 +300,16 @@ try {
     body: JSON.stringify({ state: sharedState, expectedRevision: state.data.revision }),
   });
   assert.equal(saved.data.revision, state.data.revision + 1);
+  const noOpSaved = await request("/api/state", {
+    method: "PUT",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: { ...sharedState, savedAt: "a-different-volatile-timestamp" },
+      expectedRevision: saved.data.revision,
+    }),
+  });
+  assert.equal(noOpSaved.data.unchanged, true);
+  assert.equal(noOpSaved.data.revision, saved.data.revision);
   const stateAudit = await request("/api/audit", { headers: ownerHeaders });
   assert.ok(
     stateAudit.data.entries.some((entry) =>
@@ -313,6 +330,15 @@ try {
   assert.equal("accounts" in sanitized.data.state, false);
   assert.equal("currentAccountId" in sanitized.data.state, false);
   assert.equal("currentRole" in sanitized.data.state, false);
+  assert.equal("savedAt" in sanitized.data.state, false);
+  assert.equal(sanitized.data.state.auditLog.length, 2_000);
+  const etag = sanitized.response.headers.get("etag");
+  assert.equal(etag, `W/"warehouse-main-${sanitized.data.revision}"`);
+  const notModified = await fetch(new URL("/api/state", baseUrl), {
+    headers: { ...ownerHeaders, "if-none-match": etag },
+  });
+  assert.equal(notModified.status, 304);
+  assert.equal(await notModified.text(), "");
   const deletionProbeId = `delete-state-${suffix}`;
   const stateWithDeletionProbe = {
     ...sanitized.data.state,
@@ -475,7 +501,7 @@ try {
   assert.equal(archivedInventoryLine.name, linkedProduct.data.product.name);
   const parallelStates = [1, 2].map((marker) => ({
     ...stateAfterDeletion.data.state,
-    auditLog: [...(stateAfterDeletion.data.state.auditLog ?? []), { marker }],
+    auditLog: [{ marker }, ...(stateAfterDeletion.data.state.auditLog ?? [])],
   }));
   const parallelWrites = await Promise.all(parallelStates.map((candidate) => fetch(new URL("/api/state", baseUrl), {
     method: "PUT",

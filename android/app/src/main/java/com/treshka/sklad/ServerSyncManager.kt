@@ -15,8 +15,6 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class ServerSyncManager(
     private val store: AppStateStore,
-    private val onStatus: (String) -> Unit,
-    private val onRemoteState: (String, Long) -> Unit,
 ) {
     companion object {
         private const val TAG = "ServerSync"
@@ -27,6 +25,28 @@ class ServerSyncManager(
     private val running = AtomicBoolean(false)
     private val retryScheduled = AtomicBoolean(false)
     @Volatile private var lastRoleRefreshAt = 0L
+    @Volatile private var callbackOwner: Any? = null
+    @Volatile private var onStatusCallback: (String) -> Unit = {}
+    @Volatile private var onRemoteStateCallback: (String, Long) -> Unit = { _, _ -> }
+
+    @Synchronized
+    fun setCallbacks(
+        owner: Any,
+        onStatus: (String) -> Unit,
+        onRemoteState: (String, Long) -> Unit,
+    ) {
+        callbackOwner = owner
+        onStatusCallback = onStatus
+        onRemoteStateCallback = onRemoteState
+    }
+
+    @Synchronized
+    fun clearCallbacks(owner: Any) {
+        if (callbackOwner !== owner) return
+        callbackOwner = null
+        onStatusCallback = {}
+        onRemoteStateCallback = { _, _ -> }
+    }
 
     fun login(baseUrl: String, login: String, password: String): String {
         val normalized = baseUrl.trim().trimEnd('/')
@@ -56,7 +76,6 @@ class ServerSyncManager(
     private fun refreshServerRole(config: SyncConfig, force: Boolean = false) {
         val now = System.currentTimeMillis()
         if (!force && now - lastRoleRefreshAt < ROLE_REFRESH_INTERVAL_MS) return
-        lastRoleRefreshAt = now
         val response = runCatching {
             requestJson(
                 "${config.baseUrl}/v1/auth/status",
@@ -68,8 +87,12 @@ class ServerSyncManager(
             Log.w(TAG, "server role refresh failed", it)
             return
         }
-        if (response.code == 404 || response.code == 405) return
+        if (response.code == 404 || response.code == 405) {
+            lastRoleRefreshAt = now
+            return
+        }
         if (response.code == 401 || response.code == 403) {
+            lastRoleRefreshAt = now
             store.clearServerRole("Сессия сервера истекла. Войдите снова для подтверждения прав")
             return
         }
@@ -88,6 +111,7 @@ class ServerSyncManager(
             return
         }
         store.updateServerRole(role)
+        lastRoleRefreshAt = now
     }
 
     private fun adoptServerRole(responseBody: String) {
@@ -98,7 +122,12 @@ class ServerSyncManager(
     private fun responseServerRole(responseJson: JSONObject): String? {
         val user = responseJson.optJSONObject("user") ?: return null
         val role = user.optString("role").trim()
-        return role.takeIf { it in SERVER_ROLES }
+        if (role.isBlank()) return null
+        if (role !in SERVER_ROLES) {
+            Log.w(TAG, "unknown server role '$role'; native privileges reduced to worker")
+            return "worker"
+        }
+        return role
     }
 
     fun createUser(json: String): String {
@@ -124,10 +153,10 @@ class ServerSyncManager(
             val authoritative = loadAuthoritativeSnapshot(config)
             when (store.acceptServerSnapshot(id, allowDiscardWithoutBackup)) {
                 ServerConflictResolutionResult.APPLIED ->
-                    onRemoteState(authoritative.first, authoritative.second)
+                    onRemoteStateCallback(authoritative.first, authoritative.second)
                 ServerConflictResolutionResult.APPLIED_WITHOUT_BACKUP -> {
                     backupSaved = false
-                    onRemoteState(authoritative.first, authoritative.second)
+                    onRemoteStateCallback(authoritative.first, authoritative.second)
                 }
                 ServerConflictResolutionResult.MISSING_CONFLICT ->
                     throw IllegalStateException("Локальный конфликт не найден")
@@ -170,7 +199,6 @@ class ServerSyncManager(
     }
 
     private fun loadAuthoritativeSnapshot(config: SyncConfig): Pair<String, Long> {
-        store.pendingRemoteSnapshot()?.let { return it }
         val response = requestJson(
             "${config.baseUrl}/v1/sync/pull?afterRevision=0",
             "GET",
@@ -256,7 +284,7 @@ class ServerSyncManager(
                 scheduleRetry(store.nextPendingAttempt())
             } finally {
                 running.set(false)
-                onStatus(store.syncStatusJson())
+                onStatusCallback(store.syncStatusJson())
             }
         }
     }
@@ -264,8 +292,6 @@ class ServerSyncManager(
     private fun syncLoop() {
         var config = store.getSyncConfig() ?: return
         if (config.baseUrl.isBlank() || config.authToken.isBlank()) return
-        refreshServerRole(config)
-        config = store.getSyncConfig() ?: return
         while (true) {
             // Claim and increment attempts in one SQLite transaction. A
             // concurrent save can no longer compact the row after we selected
@@ -337,13 +363,14 @@ class ServerSyncManager(
                         store.savePendingRemoteSnapshot(payload, revision)
                     } else {
                         store.clearPendingRemoteSnapshot()
-                        onRemoteState(payload, revision)
+                        onRemoteStateCallback(payload, revision)
                     }
                 }
             } else if (response.code !in 200..299) {
                 store.markSyncError(null, "Pull HTTP ${response.code}")
             }
         }
+        store.getSyncConfig()?.let { refreshServerRole(it) }
     }
 
     private fun scheduleRetry(attempt: Int) {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import {
@@ -16,6 +17,17 @@ import {
   claimPushMaintenance,
   maybeRunPushMaintenance,
 } from "../lib/push-maintenance.ts";
+
+const assignmentInvariantMigration = readFileSync(
+  new URL("../drizzle/0008_assignment_key_invariant.sql", import.meta.url),
+  "utf8",
+);
+
+function applySqlMigration(database, sql) {
+  for (const statement of sql.split("--> statement-breakpoint")) {
+    if (statement.trim()) database.exec(statement);
+  }
+}
 
 async function recipientDevices(database, type, post = "ТЭЧ", pageSize = 500, actorUserId = "actor") {
   const query = pushRecipientQuery(type, post, actorUserId);
@@ -35,7 +47,7 @@ function createRoutingDatabase() {
       id TEXT PRIMARY KEY,
       role TEXT NOT NULL,
       assignment TEXT NOT NULL,
-      assignment_key TEXT NOT NULL,
+      assignment_key TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL
     );
     CREATE TABLE push_devices (
@@ -43,7 +55,9 @@ function createRoutingDatabase() {
       device_id TEXT NOT NULL,
       token TEXT NOT NULL
     );
+    CREATE UNIQUE INDEX push_devices_device_id_unique ON push_devices(device_id);
   `);
+  applySqlMigration(database, assignmentInvariantMigration);
   const users = [
     ["owner", "owner", "", "active"],
     ["admin-1", "admin", "", "active"],
@@ -56,13 +70,13 @@ function createRoutingDatabase() {
     ["worker-inactive", "worker", "ТЭЧ", "disabled"],
   ];
   const insertUser = database.prepare(
-    "INSERT INTO users (id, role, assignment, assignment_key, status) VALUES (?, ?, ?, ?, ?)",
+    "INSERT INTO users (id, role, assignment, status) VALUES (?, ?, ?, ?)",
   );
   const insertDevice = database.prepare(
     "INSERT INTO push_devices (user_id, device_id, token) VALUES (?, ?, ?)",
   );
   for (const user of users) {
-    insertUser.run(user[0], user[1], user[2], normalizePostAssignment(user[2]), user[3]);
+    insertUser.run(user[0], user[1], user[2], user[3]);
     insertDevice.run(user[0], `device-${user[0]}`, `token-${user[0]}`);
   }
   insertDevice.run("owner", "device-owner-2", "token-owner-2");
@@ -139,14 +153,14 @@ test("storekeeper issue completion reaches owner and all administrators", async 
 test("recipient pagination cannot drop post members after the former 2000-row boundary", async () => {
   const database = createRoutingDatabase();
   const insertUser = database.prepare(
-    "INSERT INTO users (id, role, assignment, assignment_key, status) VALUES (?, 'worker', ?, ?, 'active')",
+    "INSERT INTO users (id, role, assignment, status) VALUES (?, 'worker', ?, 'active')",
   );
   const insertDevice = database.prepare(
     "INSERT INTO push_devices (user_id, device_id, token) VALUES (?, ?, ?)",
   );
   for (let index = 0; index < 2_050; index += 1) {
     const id = `bulk-${String(index).padStart(4, "0")}`;
-    insertUser.run(id, "ТЭЧ", normalizePostAssignment("ТЭЧ"));
+    insertUser.run(id, "ТЭЧ");
     insertDevice.run(id, `device-${id}`, `token-${id}`);
   }
   const recipients = await recipientDevices(database, "post_stock_issued", "  тЭч ", 137);
@@ -184,6 +198,13 @@ test("recipient pagination accepts exactly the configured maximum", async () => 
 });
 
 test("assignment normalization matches migration whitespace rules", () => {
+  const database = createRoutingDatabase();
+  assert.equal(
+    database.prepare("SELECT assignment_key AS key FROM users WHERE id = 'worker-2'").get().key,
+    normalizePostAssignment("  тЭч  "),
+    "routing fixtures must use the production migration trigger, not a duplicated test calculation",
+  );
+  database.close();
   assert.equal(
     normalizePostAssignment(`\tТЭЧ\u00a0${" ".repeat(40)}1\r\n`),
     "тэч 1",

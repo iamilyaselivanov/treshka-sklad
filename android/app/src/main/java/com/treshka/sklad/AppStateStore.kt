@@ -260,9 +260,14 @@ class AppStateStore(context: Context) :
         val db = writableDatabase
         db.beginTransaction()
         return try {
+            val currentRevision = db.rawQuery(
+                "SELECT server_revision FROM sync_config WHERE id=1",
+                null,
+            ).use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else 0L }
+            if (revision < currentRevision) return false
             if (!writeState(db, payload, schemaVersion)) return false
             db.execSQL(
-                "UPDATE sync_config SET server_revision=?, last_sync_at=?, last_error=NULL WHERE id=1",
+                "UPDATE sync_config SET server_revision=MAX(server_revision, ?), last_sync_at=?, last_error=NULL WHERE id=1",
                 arrayOf(revision, System.currentTimeMillis()),
             )
             db.setTransactionSuccessful()
@@ -419,8 +424,13 @@ class AppStateStore(context: Context) :
         require(normalizedRole in setOf("owner", "admin", "storekeeper", "worker")) {
             "Некорректная роль сервера"
         }
+        val currentRole = readableDatabase.rawQuery(
+            "SELECT server_role FROM sync_config WHERE id=1",
+            null,
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else "" }
+        if (currentRole == normalizedRole) return
         writableDatabase.execSQL(
-            "UPDATE sync_config SET server_role=?, last_error=NULL WHERE id=1",
+            "UPDATE sync_config SET server_role=? WHERE id=1",
             arrayOf(normalizedRole),
         )
     }
@@ -438,13 +448,9 @@ class AppStateStore(context: Context) :
         val db = writableDatabase
         db.beginTransaction()
         return try {
-            val baseRevision = db.rawQuery(
-                "SELECT server_revision FROM sync_config WHERE id=1",
-                null,
-            ).use { c -> if (c.moveToFirst()) c.getLong(0) else 0L }
             val pending = db.query(
                 "sync_outbox",
-                arrayOf("mutation_id", "payload", "schema_version", "attempts"),
+                arrayOf("mutation_id", "payload", "schema_version", "attempts", "base_revision"),
                 "conflict = 0",
                 null,
                 null,
@@ -458,13 +464,13 @@ class AppStateStore(context: Context) :
                     c.getString(1),
                     c.getInt(2),
                     c.getInt(3) + 1,
-                    baseRevision,
+                    c.getLong(4),
                 )
             }
             if (pending != null) {
                 db.execSQL(
-                    "UPDATE sync_outbox SET attempts=?, base_revision=? WHERE mutation_id=? AND conflict=0",
-                    arrayOf(pending.attempts, pending.baseRevision, pending.mutationId),
+                    "UPDATE sync_outbox SET attempts=? WHERE mutation_id=? AND conflict=0",
+                    arrayOf(pending.attempts, pending.mutationId),
                 )
             }
             db.setTransactionSuccessful()
@@ -501,7 +507,7 @@ class AppStateStore(context: Context) :
         try {
             db.delete("sync_outbox", "mutation_id=?", arrayOf(mutationId))
             db.execSQL(
-                "UPDATE sync_config SET server_revision=?, last_sync_at=?, last_error=NULL WHERE id=1",
+                "UPDATE sync_config SET server_revision=MAX(server_revision, ?), last_sync_at=?, last_error=NULL WHERE id=1",
                 arrayOf(revision, System.currentTimeMillis()),
             )
             db.setTransactionSuccessful()
@@ -615,12 +621,17 @@ class AppStateStore(context: Context) :
                 arrayOf(authoritative, revision.toString()),
             ).use { it.moveToFirst() }
             if (!remoteStillMatches) return ServerConflictResolutionResult.MISSING_REMOTE
+            val currentRevision = db.rawQuery(
+                "SELECT server_revision FROM sync_config WHERE id=1",
+                null,
+            ).use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else 0L }
+            if (revision < currentRevision) return ServerConflictResolutionResult.MISSING_REMOTE
             if (!writeState(db, authoritative, schemaVersion)) {
                 return ServerConflictResolutionResult.MISSING_REMOTE
             }
             db.delete("sync_outbox", null, null)
             db.execSQL(
-                "UPDATE sync_config SET server_revision=?, last_sync_at=?, last_error=NULL WHERE id=1",
+                "UPDATE sync_config SET server_revision=MAX(server_revision, ?), last_sync_at=?, last_error=NULL WHERE id=1",
                 arrayOf(revision, System.currentTimeMillis()),
             )
             db.delete("sync_remote_pending", "id=1", null)
@@ -785,7 +796,7 @@ class AppStateStore(context: Context) :
             }
             db.insertOrThrow("sync_outbox", null, values)
             db.execSQL(
-                "UPDATE sync_config SET server_revision=?, last_error=NULL WHERE id=1",
+                "UPDATE sync_config SET server_revision=MAX(server_revision, ?), last_error=NULL WHERE id=1",
                 arrayOf(remoteRevision),
             )
             db.delete("sync_remote_pending", "id=1", null)

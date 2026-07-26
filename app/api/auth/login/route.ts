@@ -41,8 +41,16 @@ export async function POST(request: Request) {
 
   if (!row || row.status !== "active" || !(await verifyPassword(password, row.password_hash))) {
     await recordThrottleFailure(throttleKey, 5, blockMs, now);
+    const blocked = await isThrottleBlocked(throttleKey, blockMs, new Date());
     await new Promise((resolve) => setTimeout(resolve, 350));
-    return Response.json({ error: "Неверный логин или пароль" }, { status: 401 });
+    return Response.json(
+      {
+        error: blocked
+          ? "Слишком много попыток. Повторите вход через 15 минут"
+          : "Неверный логин или пароль",
+      },
+      { status: blocked ? 429 : 401 },
+    );
   }
 
   const user = { id: row.id, callsign: row.callsign, login: row.login, role: row.role, assignment: row.assignment };

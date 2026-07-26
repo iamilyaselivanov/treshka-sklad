@@ -12,10 +12,9 @@ type StateRow = {
   updated_by: string;
 };
 
-type StateMetadataRow = Omit<StateRow, "payload">;
-
 const MAX_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_COLLECTION_ITEMS = 50_000;
+const MAX_AUDIT_LOG_ITEMS = 2_000;
 const REQUIRED_COLLECTIONS = ["items", "posts", "docs"] as const;
 const OPTIONAL_COLLECTIONS = [
   "extIssues",
@@ -43,6 +42,8 @@ function normalizedState(value: unknown): WarehouseState | null {
   delete state.currentAccountId;
   delete state.currentRole;
   delete state.currentUserPost;
+  delete state.savedAt;
+  if (Array.isArray(state.auditLog)) state.auditLog = state.auditLog.slice(0, MAX_AUDIT_LOG_ITEMS);
   return state;
 }
 
@@ -58,6 +59,13 @@ export async function GET(request: Request) {
       { headers: { "cache-control": "no-store" } },
     );
   }
+  const etag = `W/"warehouse-main-${row.revision}"`;
+  if (request.headers.get("if-none-match") === etag) {
+    return new Response(null, {
+      status: 304,
+      headers: { "cache-control": "no-store", etag },
+    });
+  }
   try {
     return Response.json(
       {
@@ -68,7 +76,7 @@ export async function GET(request: Request) {
         updatedBy: row.updated_by,
         sizeBytes: new TextEncoder().encode(row.payload).byteLength,
       },
-      { headers: { "cache-control": "no-store" } },
+      { headers: { "cache-control": "no-store", etag } },
     );
   } catch {
     await audit(auth.user, "state_corrupted", `Не удалось прочитать ревизию ${row.revision}`);
@@ -99,9 +107,14 @@ export async function PUT(request: Request) {
       { status: 428 },
     );
   }
+  const payload = JSON.stringify(state);
+  const sizeBytes = new TextEncoder().encode(payload).byteLength;
+  if (sizeBytes > MAX_STATE_BYTES) {
+    return Response.json({ error: "Данные склада превышают безопасный размер 4 МБ" }, { status: 413 });
+  }
   const current = await env.DB.prepare(
-    "SELECT revision, updated_at, updated_by FROM warehouse_full_state WHERE state_key = 'main'",
-  ).first<StateMetadataRow>();
+    "SELECT revision, payload, updated_at, updated_by FROM warehouse_full_state WHERE state_key = 'main'",
+  ).first<StateRow>();
   if (
     (expectedRevision === 0 && current)
     || (expectedRevision > 0 && current?.revision !== expectedRevision)
@@ -115,6 +128,22 @@ export async function PUT(request: Request) {
         updatedBy: current?.updated_by ?? null,
       },
       { status: 409, headers: { "cache-control": "no-store" } },
+    );
+  }
+  if (current?.payload === payload) {
+    return Response.json(
+      {
+        revision: current.revision,
+        sizeBytes,
+        updatedAt: current.updated_at,
+        unchanged: true,
+      },
+      {
+        headers: {
+          "cache-control": "no-store",
+          etag: `W/"warehouse-main-${current.revision}"`,
+        },
+      },
     );
   }
   const nextItemIds = warehouseItemIds(state);
@@ -158,11 +187,6 @@ export async function PUT(request: Request) {
         );
       }
     }
-  }
-  const payload = JSON.stringify(state);
-  const sizeBytes = new TextEncoder().encode(payload).byteLength;
-  if (sizeBytes > MAX_STATE_BYTES) {
-    return Response.json({ error: "Данные склада превышают безопасный размер 4 МБ" }, { status: 413 });
   }
   const revision = expectedRevision + 1;
   const updatedAt = new Date().toISOString();
@@ -227,5 +251,8 @@ export async function PUT(request: Request) {
     revision === 1 ? "state_created" : "state_updated",
     `${sizeBytes} байт · ревизия ${revision}`,
   );
-  return Response.json({ revision, sizeBytes, updatedAt });
+  return Response.json(
+    { revision, sizeBytes, updatedAt },
+    { headers: { etag: `W/"warehouse-main-${revision}"` } },
+  );
 }

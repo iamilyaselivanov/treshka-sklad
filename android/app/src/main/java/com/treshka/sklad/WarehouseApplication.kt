@@ -11,4 +11,7 @@ class WarehouseApplication : Application() {
     val appStateStore: AppStateStore by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         AppStateStore(this)
     }
+    val serverSyncManager: ServerSyncManager by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        ServerSyncManager(appStateStore)
+    }
 }
