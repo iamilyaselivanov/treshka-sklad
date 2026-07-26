@@ -89,10 +89,13 @@ export const warehouseStateRevisions = sqliteTable(
     payload: text("payload").notNull(),
     updatedAt: text("updated_at").notNull(),
     updatedBy: text("updated_by").notNull(),
+    sizeBytes: integer("size_bytes").notNull().default(0),
+    archivedAt: text("archived_at").notNull().default(""),
   },
   (table) => [
     primaryKey({ columns: [table.stateKey, table.revision] }),
     index("warehouse_state_revisions_updated_idx").on(table.updatedAt),
+    index("warehouse_state_revisions_archived_idx").on(table.archivedAt),
   ],
 );
 

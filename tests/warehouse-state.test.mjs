@@ -245,6 +245,21 @@ test("rolling feeds only evict the oldest tail after newer rows are prepended", 
     403,
     "one write cannot erase a full audit window by fabricating 1999 rows",
   );
+
+  const legitimateOfflineBatch = [
+    ...Array.from({ length: 201 }, (_, index) => ({
+      id: `offline-${index}`,
+      action: "offline-event",
+    })),
+    ...previousAudit.slice(0, 1_799),
+  ];
+  const overflow = warehouseHistoryMutationIssue(
+    previous,
+    state({ auditLog: legitimateOfflineBatch }),
+    "admin",
+  );
+  assert.equal(overflow?.status, 403);
+  assert.match(overflow?.error ?? "", /не более 200 новых записей журнала/);
 });
 
 test("notification read state is mutable without allowing notification content edits", () => {

@@ -4043,6 +4043,9 @@ more(){
     <div class="card" onclick="render({fn:renderServerSettings})">
       <div class="row"><div class="icbox">☁️</div><div class="grow"><div class="t">Сервер и синхронизация</div><div class="s">${syncStatus.configured?(syncStatus.lastError?'Ошибка · локальные данные защищены':`Подключено · очередь ${syncStatus.pending||0}`):'Работа офлайн · сервер не настроен'}</div></div><div style="color:${syncStatus.lastError?'var(--red)':'var(--muted)'}">›</div></div>
     </div>
+    ${['owner','admin'].includes(serverActorRole())?`<div class="card" onclick="render({fn:renderStateHistory})">
+      <div class="row"><div class="icbox">↶</div><div class="grow"><div class="t">История ревизий</div><div class="s">Просмотр архивных снимков${serverActorRole()==='owner'?' и восстановление владельцем':''}</div></div><div style="color:var(--muted)">›</div></div>
+    </div>`:''}
     <div class="card" onclick="render({fn:views.roles})">
       <div class="row">
         <div class="icbox">👤</div>
@@ -4156,6 +4159,89 @@ function renderNotifications(){
   $('content').innerHTML=`
     ${list.length?`<button class="fbtn" style="width:100%;margin-bottom:10px" onclick="markNotificationsRead()">✓ Отметить всё прочитанным</button>`:''}
     ${list.map(n=>`<div class="card static" style="${n.read?'opacity:.7':'border-color:var(--accent)'}"><div class="t">${esc(n.title)}</div><div class="s" style="margin-top:4px;color:var(--ink)">${esc(n.body)}</div><div class="s" style="margin-top:6px">${esc(n.date)}</div></div>`).join('')||'<div class="s" style="text-align:center;padding:32px">Уведомлений пока нет</div>'}`;
+}
+function stateHistoryBridge(){
+  return typeof window!=='undefined'&&window.treshkaStateHistory?window.treshkaStateHistory:null;
+}
+function stateHistoryDate(value){
+  const date=new Date(value||'');
+  return Number.isNaN(date.getTime())?'—':date.toLocaleString('ru-RU');
+}
+function stateHistorySize(value){
+  const bytes=Math.max(0,Number(value)||0);
+  if(bytes<1024)return `${bytes} Б`;
+  if(bytes<1024*1024)return `${(bytes/1024).toFixed(1)} КБ`;
+  return `${(bytes/1024/1024).toFixed(2)} МБ`;
+}
+async function renderStateHistory(){
+  setHdr('История ревизий','Архивные снимки состояния склада',true,false);
+  const bridge=stateHistoryBridge();
+  if(!bridge||typeof bridge.canView!=='function'||!bridge.canView()){
+    $('content').innerHTML='<div class="progress-note bad">История доступна только владельцу и администратору после входа на сервер.</div>';
+    return;
+  }
+  $('content').innerHTML='<div class="progress-note">Загрузка истории…</div>';
+  try{
+    const data=await bridge.list();
+    const revisions=Array.isArray(data.revisions)?data.revisions:[];
+    $('content').innerHTML=`
+      <div class="progress-note">Сервер хранит не более 500 снимков и не дольше 30 дней. Восстановление доступно только владельцу.</div>
+      ${revisions.map(row=>`<div class="card" onclick="renderStateRevision(${Number(row.revision)})">
+        <div class="row"><div class="icbox">#${Number(row.revision)}</div><div class="grow"><div class="t">Ревизия ${Number(row.revision)}</div><div class="s">Архив: ${esc(stateHistoryDate(row.archivedAt))}</div><div class="s">Автор: ${esc(row.updatedBy||'—')} · ${stateHistorySize(row.sizeBytes)}</div></div><div style="color:var(--muted)">›</div></div>
+      </div>`).join('')||'<div class="s" style="text-align:center;padding:32px">Архивных ревизий пока нет</div>'}`;
+  }catch(e){
+    $('content').innerHTML=`<div class="progress-note bad">⚠ ${esc(e.message||'Не удалось загрузить историю ревизий')}</div><button class="btn ghost" onclick="renderStateHistory()">Повторить</button>`;
+  }
+}
+async function renderStateRevision(revision){
+  setHdr(`Ревизия ${Number(revision)}`,'Предварительный просмотр архивного снимка',true,false);
+  const bridge=stateHistoryBridge();
+  if(!bridge||!bridge.canView()){
+    $('content').innerHTML='<div class="progress-note bad">Нет доступа к истории ревизий.</div>';
+    return;
+  }
+  $('content').innerHTML='<div class="progress-note">Загрузка снимка…</div>';
+  try{
+    const data=await bridge.get(Number(revision));
+    const state=data&&data.state&&typeof data.state==='object'?data.state:{};
+    const archivedItems=Array.isArray(state.items)?state.items:[];
+    const archivedPosts=Array.isArray(state.posts)?state.posts:[];
+    const archivedDocs=Array.isArray(state.docs)?state.docs:[];
+    const archivedIssues=Array.isArray(state.extIssues)?state.extIssues:[];
+    $('content').innerHTML=`
+      <div class="card static"><div class="t">Ревизия ${Number(data.revision)}</div>
+        <div class="s" style="margin-top:6px">Состояние изменено: ${esc(stateHistoryDate(data.updatedAt))}</div>
+        <div class="s">Архивировано: ${esc(stateHistoryDate(data.archivedAt))}</div>
+        <div class="s">Автор: ${esc(data.updatedBy||'—')} · ${stateHistorySize(data.sizeBytes)}</div>
+      </div>
+      <div class="card static"><div class="t">Содержимое снимка</div>
+        <div class="s" style="margin-top:6px">Товаров: ${archivedItems.length} · постов: ${archivedPosts.length}</div>
+        <div class="s">Документов: ${archivedDocs.length} · внешних выдач: ${archivedIssues.length}</div>
+        ${archivedItems.length?`<div class="s" style="margin-top:8px;color:var(--ink)">Первые позиции: ${archivedItems.slice(0,5).map(item=>esc(item&&item.name||item&&item.sku||'Без названия')).join(', ')}</div>`:''}
+      </div>
+      ${bridge.canRestore()?`<div class="progress-note bad">Восстановление заменит текущее состояние склада этим снимком. Текущее состояние предварительно сохранится в архиве.</div><button class="btn primary" onclick="restoreStateRevision(${Number(data.revision)})">Восстановить ревизию ${Number(data.revision)}</button>`:'<div class="progress-note">Администратор может просматривать историю. Восстановление выполняет только владелец.</div>'}
+      <button class="btn ghost" onclick="renderStateHistory()">Вернуться к списку</button>`;
+  }catch(e){
+    $('content').innerHTML=`<div class="progress-note bad">⚠ ${esc(e.message||'Не удалось открыть ревизию')}</div><button class="btn ghost" onclick="renderStateHistory()">Вернуться к списку</button>`;
+  }
+}
+async function restoreStateRevision(revision){
+  const bridge=stateHistoryBridge();
+  if(!bridge||!bridge.canRestore()){toast('Восстанавливать ревизии может только владелец');return false;}
+  if(!confirm(`Восстановить ревизию ${Number(revision)}? Текущее состояние склада будет заменено, но сохранится в архиве.`))return false;
+  const button=document.querySelector('button[onclick^="restoreStateRevision"]');
+  if(button){button.disabled=true;button.textContent='Восстановление…';}
+  try{
+    const result=await bridge.restore(Number(revision));
+    const discarded=Math.max(0,Number(result.discardedItemReferences)||0);
+    toast(discarded?`✓ Ревизия восстановлена. Отброшено ссылок на удалённые карточки: ${discarded}`:'✓ Ревизия восстановлена');
+    await renderStateHistory();
+    return true;
+  }catch(e){
+    toast('⚠ '+(e.message||'Не удалось восстановить ревизию'));
+    await renderStateRevision(Number(revision));
+    return false;
+  }
 }
 function renderServerSettings(){
   const s=refreshNativeSyncStatus();

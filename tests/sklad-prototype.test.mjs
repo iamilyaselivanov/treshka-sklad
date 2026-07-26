@@ -89,6 +89,8 @@ async function newHttpServerPage({
   let stateGets = 0;
   let statePuts = 0;
   let mediaPosts = 0;
+  let historyGets = 0;
+  let historyRestores = 0;
   const putBodies = [];
   await ctx.route('http://treshka.test/**', async (route) => {
     const request = route.request();
@@ -108,6 +110,7 @@ async function newHttpServerPage({
         stateGets === 1
         || (stateGets === 2 && promoteToRole)
         || (stateGets > 2 && promoteToRole && forcedFullFetch)
+        || (historyRestores > 0 && forcedFullFetch)
       ) {
         const responseRole = stateGets >= 2 && promoteToRole ? promoteToRole : role;
         await route.fulfill({
@@ -115,7 +118,7 @@ async function newHttpServerPage({
           contentType: 'application/json',
           headers: { etag: `W/"warehouse-main-7-test-${responseRole}"` },
           body: JSON.stringify({
-            revision: 7,
+            revision: historyRestores > 0 ? 8 : 7,
             state: emptyState ? null : state,
             partial: responseRole === 'worker',
             user: {
@@ -134,6 +137,41 @@ async function newHttpServerPage({
           body: '',
         });
       }
+      return;
+    }
+    if (url.pathname === '/api/state/history' && request.method() === 'GET') {
+      historyGets += 1;
+      const revision = Number(url.searchParams.get('revision') || 0);
+      const metadata = {
+        revision: revision || 6,
+        updatedAt: '2026-07-26T08:00:00.000Z',
+        updatedBy: 'Тестовый владелец',
+        archivedAt: '2026-07-26T08:05:00.000Z',
+        sizeBytes: JSON.stringify(state).length,
+      };
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(revision
+          ? { ...metadata, state }
+          : { revisions: [metadata] }),
+      });
+      return;
+    }
+    if (url.pathname === '/api/state/history' && request.method() === 'POST') {
+      historyRestores += 1;
+      await route.fulfill({
+        status: role === 'owner' ? 200 : 403,
+        contentType: 'application/json',
+        body: role === 'owner'
+          ? JSON.stringify({
+            revision: 8,
+            restoredFrom: Number(JSON.parse(request.postData() || '{}').revision),
+            updatedAt: '2026-07-26T09:00:00.000Z',
+            discardedItemReferences: 2,
+          })
+          : JSON.stringify({ error: 'Восстанавливать ревизии может только владелец' }),
+      });
       return;
     }
     if (url.pathname === '/api/state' && request.method() === 'PUT') {
@@ -169,7 +207,7 @@ async function newHttpServerPage({
   return {
     ctx,
     page,
-    counts: () => ({ stateGets, statePuts, mediaPosts }),
+    counts: () => ({ stateGets, statePuts, mediaPosts, historyGets, historyRestores }),
     putBodies,
   };
 }
@@ -2115,4 +2153,33 @@ test('security — user text cannot break out of headers or product edit fields,
   assert.equal(result.executed, 0);
   assert.equal(pageErrors.length, 0, `page errors: ${pageErrors.join('; ')}`);
   await ctx.close();
+});
+
+test('server revision history is visible to admins and restorable only by the owner', async () => {
+  const owner = await newHttpServerPage({ role: 'owner' });
+  const ownerMore = await owner.page.evaluate(() => {
+    render({ fn: views.more });
+    return document.getElementById('content').textContent;
+  });
+  assert.match(ownerMore, /История ревизий/);
+
+  await owner.page.evaluate(() => renderStateHistory());
+  await owner.page.waitForFunction(() => document.getElementById('content').textContent.includes('Ревизия 6'));
+  await owner.page.evaluate(() => renderStateRevision(6));
+  await owner.page.waitForFunction(() => document.getElementById('content').textContent.includes('Восстановить ревизию 6'));
+  owner.page.once('dialog', (dialog) => dialog.accept());
+  assert.equal(await owner.page.evaluate(() => restoreStateRevision(6)), true);
+  assert.equal(owner.counts().historyRestores, 1);
+  assert.ok(owner.counts().historyGets >= 3, 'list, preview and refreshed list must all reach the server');
+  assert.ok(owner.counts().stateGets >= 2, 'restore must force-fetch the canonical restored state');
+  await owner.ctx.close();
+
+  const admin = await newHttpServerPage({ role: 'admin' });
+  await admin.page.evaluate(() => renderStateRevision(6));
+  await admin.page.waitForFunction(() => document.getElementById('content').textContent.includes('Администратор может просматривать историю'));
+  assert.equal(
+    await admin.page.evaluate(() => document.getElementById('content').textContent.includes('Восстановить ревизию 6')),
+    false,
+  );
+  await admin.ctx.close();
 });

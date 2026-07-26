@@ -3,6 +3,8 @@ import { audit, requireUser } from "@/lib/auth";
 import type { SessionUser } from "@/lib/auth";
 import { readJsonObject, RequestBodyTooLargeError } from "@/lib/http";
 import {
+  STATE_HISTORY_MAX_ROWS,
+  stateHistoryArchiveTimestamp,
   stateHistoryRetentionCutoff,
   stateHistorySampleCutoff,
 } from "@/lib/state-history";
@@ -273,28 +275,39 @@ export async function PUT(request: Request) {
       `).bind(revision, payload, updatedAt, auth.user.callsign, expectedRevision);
   let result;
   try {
+    const archivedAt = stateHistoryArchiveTimestamp();
     const results = await env.DB.batch([
       env.DB.prepare(
         `INSERT OR IGNORE INTO warehouse_state_revisions
-           (state_key, revision, payload, updated_at, updated_by)
-         SELECT state_key, revision, payload, updated_at, updated_by
+           (state_key, revision, payload, updated_at, updated_by, size_bytes, archived_at)
+         SELECT state_key, revision, payload, updated_at, updated_by, length(payload), ?
          FROM warehouse_full_state
          WHERE state_key = 'main'
            AND NOT EXISTS (
              SELECT 1 FROM warehouse_state_revisions
-             WHERE state_key = 'main' AND updated_at >= ?
+             WHERE state_key = 'main' AND archived_at >= ?
            )`,
-      ).bind(stateHistorySampleCutoff()),
+      ).bind(archivedAt, stateHistorySampleCutoff()),
       stateWrite,
       env.DB.prepare(
         `DELETE FROM warehouse_state_revisions
          WHERE state_key = 'main'
-           AND updated_at < ?
+           AND archived_at < ?
            AND revision <> (
              SELECT MAX(revision) FROM warehouse_state_revisions
              WHERE state_key = 'main'
            )`,
       ).bind(stateHistoryRetentionCutoff()),
+      env.DB.prepare(
+        `DELETE FROM warehouse_state_revisions
+         WHERE state_key = 'main'
+           AND revision NOT IN (
+             SELECT revision FROM warehouse_state_revisions
+             WHERE state_key = 'main'
+             ORDER BY archived_at DESC, revision DESC
+             LIMIT ?
+           )`,
+      ).bind(STATE_HISTORY_MAX_ROWS),
       env.DB.prepare(
          `DELETE FROM warehouse_state_items
          WHERE state_key = 'main'

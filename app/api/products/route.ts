@@ -1,7 +1,11 @@
 import { env } from "cloudflare:workers";
 import { audit, requireUser } from "@/lib/auth";
 import { readJsonObject } from "@/lib/http";
-import { stateHistoryRetentionCutoff } from "@/lib/state-history";
+import {
+  STATE_HISTORY_MAX_ROWS,
+  stateHistoryArchiveTimestamp,
+  stateHistoryRetentionCutoff,
+} from "@/lib/state-history";
 import {
   findWarehouseItemId,
   removeWarehouseItemFromState,
@@ -139,14 +143,15 @@ export async function DELETE(request: Request) {
       const nextState = removeWarehouseItemFromState(state, warehouseItemId);
       const nextPayload = JSON.stringify(nextState);
       const updatedAt = new Date().toISOString();
+      const archivedAt = stateHistoryArchiveTimestamp();
       const results = await env.DB.batch([
         env.DB.prepare(
           `INSERT OR REPLACE INTO warehouse_state_revisions
-             (state_key, revision, payload, updated_at, updated_by)
-           SELECT state_key, revision, payload, updated_at, updated_by
+             (state_key, revision, payload, updated_at, updated_by, size_bytes, archived_at)
+           SELECT state_key, revision, payload, updated_at, updated_by, length(payload), ?
            FROM warehouse_full_state
            WHERE state_key = 'main' AND revision = ?`,
-        ).bind(stateRow.revision),
+        ).bind(archivedAt, stateRow.revision),
         env.DB.prepare(
           `UPDATE warehouse_full_state
            SET revision = ?, payload = ?, updated_at = ?, updated_by = ?
@@ -163,12 +168,22 @@ export async function DELETE(request: Request) {
         env.DB.prepare(
           `DELETE FROM warehouse_state_revisions
            WHERE state_key = 'main'
-             AND updated_at < ?
+             AND archived_at < ?
              AND revision <> (
                SELECT MAX(revision) FROM warehouse_state_revisions
                WHERE state_key = 'main'
              )`,
         ).bind(stateHistoryRetentionCutoff()),
+        env.DB.prepare(
+          `DELETE FROM warehouse_state_revisions
+           WHERE state_key = 'main'
+             AND revision NOT IN (
+               SELECT revision FROM warehouse_state_revisions
+               WHERE state_key = 'main'
+               ORDER BY archived_at DESC, revision DESC
+               LIMIT ?
+             )`,
+        ).bind(STATE_HISTORY_MAX_ROWS),
         env.DB.prepare(
           `DELETE FROM warehouse_state_items
            WHERE state_key = 'main' AND item_id = ?
@@ -198,7 +213,7 @@ export async function DELETE(request: Request) {
       ]);
       if (
         Number(results[1].meta?.changes ?? 0) !== 1
-        || Number(results[4].meta?.changes ?? 0) !== 1
+        || Number(results[5].meta?.changes ?? 0) !== 1
       ) {
         return Response.json(
           { error: "Склад изменён другим пользователем. Обновите данные и повторите", conflict: true },

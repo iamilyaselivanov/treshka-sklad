@@ -756,6 +756,51 @@
     }
   });
 
+  async function stateHistoryRequest(path = "", init = {}) {
+    const response = await fetchWithTimeout("/api/state/history" + path, {
+      cache: "no-store",
+      ...init,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(data.error || "Не удалось выполнить операцию с историей ревизий");
+      error.status = response.status;
+      error.data = data;
+      throw error;
+    }
+    return data;
+  }
+
+  async function restoreStateRevision(revision) {
+    if (sync.user?.role !== "owner") {
+      throw new Error("Восстанавливать ревизии может только владелец");
+    }
+    const restored = await stateHistoryRequest("", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        revision: Number(revision),
+        expectedRevision: sync.revision,
+      }),
+    });
+    // Re-read the canonical state immediately. The archived payload may have
+    // contained references to product cards that the server deliberately
+    // discarded while rebuilding the deletion guard index.
+    sync.lastServerEtag = "";
+    const snapshot = await fetchSnapshot({ forceFull: true });
+    if (!snapshot.state) throw new Error("Сервер не вернул восстановленное состояние");
+    applyRemoteSnapshot(snapshot, false);
+    return restored;
+  }
+
+  window.treshkaStateHistory = {
+    canView: () => !!sync.user && ["owner", "admin"].includes(sync.user.role),
+    canRestore: () => sync.user?.role === "owner",
+    list: () => stateHistoryRequest(),
+    get: (revision) => stateHistoryRequest("?revision=" + encodeURIComponent(Number(revision))),
+    restore: restoreStateRevision,
+  };
+
   window.treshkaServerSync = {
     status: () => ({
       ready: sync.ready,

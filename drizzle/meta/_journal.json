@@ -71,6 +71,13 @@
       "when": 1785090250466,
       "tag": "0009_living_leo",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1785096696638,
+      "tag": "0010_optimal_ender_wiggin",
+      "breakpoints": true
     }
   ]
 }

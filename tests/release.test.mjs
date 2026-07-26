@@ -301,6 +301,7 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
     text("drizzle/0007_cold_khan.sql"),
     text("drizzle/0008_assignment_key_invariant.sql"),
     text("drizzle/0009_living_leo.sql"),
+    text("drizzle/0010_optimal_ender_wiggin.sql"),
   ]);
   const apply = (database, sql) => {
     for (const statement of sql.split("--> statement-breakpoint")) {
@@ -313,6 +314,9 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   assert.match(migrations[8], /CREATE TRIGGER `users_assignment_key_after_insert`/);
   assert.match(migrations[9], /CREATE TABLE `warehouse_state_revisions`/);
   assert.match(migrations[9], /INSERT OR IGNORE INTO `warehouse_state_revisions`/);
+  assert.match(migrations[10], /ADD `size_bytes`/);
+  assert.match(migrations[10], /ADD `archived_at`/);
+  assert.match(migrations[10], /SET `size_bytes` = length\(`payload`\)/);
 
   const clean = new DatabaseSync(":memory:");
   for (const migration of migrations) apply(clean, migration);
@@ -379,6 +383,7 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   apply(adopted, migrations[7]);
   apply(adopted, migrations[8]);
   apply(adopted, migrations[9]);
+  apply(adopted, migrations[10]);
   assert.deepEqual(
     adopted.prepare("SELECT item_id AS itemId FROM warehouse_state_items WHERE state_key='main'").all()
       .map((row) => row.itemId),
@@ -388,6 +393,13 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   assert.equal(
     adopted.prepare("SELECT revision FROM warehouse_state_revisions WHERE state_key='main'").get().revision,
     4,
+  );
+  assert.ok(
+    adopted.prepare("SELECT size_bytes AS sizeBytes FROM warehouse_state_revisions WHERE state_key='main'").get().sizeBytes > 0,
+  );
+  assert.equal(
+    adopted.prepare("SELECT archived_at AS archivedAt FROM warehouse_state_revisions WHERE state_key='main'").get().archivedAt,
+    "2026-07-25",
   );
   assert.equal(
     adopted.prepare("SELECT assignment_key AS key FROM users WHERE id='legacy-worker'").get().key,
@@ -440,10 +452,16 @@ test("state revision history is sampled, time-retained and shared by every write
   assert.match(policy, /STATE_HISTORY_RETENTION_DAYS = 30/);
   assert.match(policy, /STATE_HISTORY_SAMPLE_INTERVAL_MS = 5 \* 60 \* 1_000/);
   assert.match(policy, /STATE_HISTORY_LIST_LIMIT = 500/);
+  assert.match(policy, /STATE_HISTORY_MAX_ROWS = 500/);
   assert.match(stateRoute, /stateHistorySampleCutoff\(\)/);
+  assert.match(stateRoute, /stateHistoryArchiveTimestamp\(\)/);
   assert.match(stateRoute, /stateHistoryRetentionCutoff\(\)/);
+  assert.match(stateRoute, /LIMIT \?/);
   assert.match(productRoute, /stateHistoryRetentionCutoff\(\)/);
+  assert.match(productRoute, /STATE_HISTORY_MAX_ROWS/);
   assert.match(historyRoute, /STATE_HISTORY_LIST_LIMIT/);
+  assert.match(historyRoute, /size_bytes AS sizeBytes/);
+  assert.match(historyRoute, /archived_at AS archivedAt/);
   assert.match(historyRoute, /status: 507/);
   assert.match(historyRoute, /item_id NOT IN \(SELECT id FROM products\)/);
 });

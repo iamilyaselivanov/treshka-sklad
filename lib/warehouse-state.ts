@@ -309,39 +309,43 @@ function feedRowPreserved(
   return true;
 }
 
-function rollingHistoryPreserved(
+type RollingHistoryIssue = "mutation" | "too_many_new_rows" | null;
+
+function rollingHistoryIssue(
   previousValue: unknown,
   nextValue: unknown,
   windowLimit: number,
   mutableFields: ReadonlySet<string>,
-) {
+): RollingHistoryIssue {
   const previousRows = rows(previousValue);
   const nextRows = rows(nextValue);
-  if (nextRows.length < previousRows.length) return false;
-  if (nextRows.length > windowLimit) return false;
+  if (nextRows.length < previousRows.length) return "mutation";
+  if (nextRows.length > windowLimit) return "mutation";
   if (previousRows.length < windowLimit) {
     // New feed rows are prepended. Before the window is full, every previous
     // row must remain as an unchanged suffix.
-    if (nextRows.length - previousRows.length > MAX_FEED_ROWS_PER_WRITE) return false;
+    const added = nextRows.length - previousRows.length;
     const suffix = nextRows.slice(nextRows.length - previousRows.length);
-    return suffix.every(
+    const preserved = suffix.every(
       (value, index) => feedRowPreserved(previousRows[index], value, mutableFields),
     );
+    if (!preserved) return "mutation";
+    return added > MAX_FEED_ROWS_PER_WRITE ? "too_many_new_rows" : null;
   }
   // Once the rolling window is full, only an unchanged prefix of the previous
   // window may remain after newly prepended rows push the oldest tail out.
-  // Cap a single write so a client cannot erase the entire feed by fabricating
-  // a full replacement window.
-  for (let added = 0; added <= MAX_FEED_ROWS_PER_WRITE; added += 1) {
+  // Search the whole window so a legitimate oversized offline batch can be
+  // reported separately from a forged replacement of existing history.
+  for (let added = 0; added < nextRows.length; added += 1) {
     const retained = nextRows.length - added;
     if (retained <= 0) break;
     if (nextRows.slice(added).every(
       (value, index) => feedRowPreserved(previousRows[index], value, mutableFields),
     )) {
-      return true;
+      return added > MAX_FEED_ROWS_PER_WRITE ? "too_many_new_rows" : null;
     }
   }
-  return false;
+  return "mutation";
 }
 
 /**
@@ -355,18 +359,31 @@ export function warehouseHistoryMutationIssue(
   role: string,
 ) {
   if (role === "owner") return null;
+  const auditFeedIssue = rollingHistoryIssue(
+    previous.auditLog,
+    next.auditLog,
+    2_000,
+    NO_MUTABLE_FEED_FIELDS,
+  );
+  const notificationFeedIssue = rollingHistoryIssue(
+    previous.notifications,
+    next.notifications,
+    2_000,
+    MUTABLE_NOTIFICATION_FIELDS,
+  );
+  if (auditFeedIssue === "too_many_new_rows" || notificationFeedIssue === "too_many_new_rows") {
+    return {
+      status: 403 as const,
+      error: `За одну синхронизацию можно добавить не более ${MAX_FEED_ROWS_PER_WRITE} новых записей журнала. Подключите устройство к серверу и повторите синхронизацию меньшими пакетами`,
+    };
+  }
   if (
     !mutableHistoryPreserved(previous.docs, next.docs)
     || !mutableHistoryPreserved(previous.extIssues, next.extIssues)
     || !immutableHistoryPreserved(previous.stockTransfers, next.stockTransfers)
     || !immutableHistoryPreserved(previous.inventoryActs, next.inventoryActs)
-    || !rollingHistoryPreserved(previous.auditLog, next.auditLog, 2_000, NO_MUTABLE_FEED_FIELDS)
-    || !rollingHistoryPreserved(
-      previous.notifications,
-      next.notifications,
-      2_000,
-      MUTABLE_NOTIFICATION_FIELDS,
-    )
+    || auditFeedIssue === "mutation"
+    || notificationFeedIssue === "mutation"
   ) {
     return {
       status: 403 as const,

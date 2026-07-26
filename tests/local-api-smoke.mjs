@@ -658,10 +658,14 @@ try {
   const history = await request("/api/state/history", { headers: ownerHeaders });
   assert.ok(history.data.revisions.length >= 2);
   assert.ok(history.data.revisions.length <= 500);
+  assert.ok(history.data.revisions.every((entry) => Number(entry.sizeBytes) > 0));
+  assert.ok(history.data.revisions.every((entry) => !Number.isNaN(Date.parse(entry.archivedAt))));
   const targetRevision = history.data.revisions.find(
     (entry) => entry.revision < currentBeforeRestore.data.revision,
   ).revision;
   const archived = await request(`/api/state/history?revision=${targetRevision}`, { headers: ownerHeaders });
+  assert.ok(Number(archived.data.sizeBytes) > 0);
+  assert.ok(!Number.isNaN(Date.parse(archived.data.archivedAt)));
   await request("/api/state/history", {
     method: "POST",
     headers: { cookie: roleCookies.admin, "content-type": "application/json" },
