@@ -40,4 +40,9 @@ class WebAppInterface(
     fun saveRemoteState(json: String, schemaVersion: Int, revision: Long): Boolean {
         return store.saveRemote(json, schemaVersion, revision)
     }
+
+    @JavascriptInterface
+    fun reportRemoteStateRejected(reason: String) {
+        store.markSyncError(null, reason)
+    }
 }

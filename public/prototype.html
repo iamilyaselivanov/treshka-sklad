@@ -2876,88 +2876,42 @@ const ROLES = {
   rabotnik:{label:'Работник (старший на посту)', desc:'Доступ только к своему посту', rights:['Создание акта дефектовки на своём посту','Создание акта выполненных работ','Списание израсходованных материалов'], restricted:['Создание карточек и категорий недоступно','Создание постов недоступно','Переназначение ответственных недоступно','Закрытие актов с расхождением недоступно']},
 };
 // Безопасный старт: после каждого запуска пользователь входит как работник.
-// Повышение до кладовщика/администратора выполняется только через ПИН.
+// Повышение прав возможно только после серверного входа под нужным аккаунтом.
 let currentRole = 'rabotnik';
 let currentUserPost = 'ТЭЧ'; // пост, к которому привязан текущий пользователь с ролью «Работник»
 function isRabotnikRestrictedToPost(){ return currentRole==='rabotnik'; }
 function canSeeDoc(d){ return !isRabotnikRestrictedToPost() || d.post===currentUserPost; }
 
-// ================= ПИН на переключение привилегированных ролей (#5 ревью) =================
-// ВАЖНО: это сдерживающая мера в рамках клиентского прототипа, а НЕ настоящая
-// авторизация. Полноценное разграничение прав требует серверного логина
-// сотрудника (см. комментарии к персистентности — тот же принцип: клиент не
-// может быть источником правды). Значения ниже — плейсхолдер; в реальной
-// эксплуатации ПИН должен задаваться администратором и не лежать в коде.
-const ROLE_PINS = { admin:'21208', kladovshik:'21208' };
+// Legacy builds used a shared hard-coded PIN here. Keeping any client-side
+// secret would let a user recover it from the APK, so offline mode can only
+// downgrade to worker; privileged roles come exclusively from server login.
+const ROLE_PINS = Object.freeze({});
 
 function requestRoleSwitch(role){
   if(role === currentRole){ return; }
-  const pin = ROLE_PINS[role];
-  if(!pin){ setRole(role); return; } // роль без ПИНа (рабочий) — переключаем сразу
-  const layer = $('sheetLayer');
-  layer.innerHTML = `
-    <div class="sheet-backdrop" onclick="if(event.target===this) closeSheet()">
-      <div class="sheet">
-        <div class="handle"></div>
-        <div class="sec" style="margin-top:0">ПИН роли «${esc(ROLES[role].label)}»</div>
-        <div class="fld"><input id="rolePinInput" type="password" inputmode="numeric" placeholder="Введите ПИН" autofocus></div>
-        <div id="rolePinErr" class="s" style="color:var(--red);display:none;margin:4px 0">Неверный ПИН</div>
-        <button class="btn primary" onclick="confirmRoleSwitch('${role}')">Подтвердить</button>
-      </div>
-    </div>`;
-  const inp = $('rolePinInput');
-  if(inp) inp.addEventListener('keydown', e=>{ if(e.key==='Enter') confirmRoleSwitch(role); });
+  if(role==='rabotnik'){ setRole(role); return true; }
+  toast('Привилегированная роль назначается только после входа по логину и паролю');
+  logAction('Отклонена локальная смена роли', 'Попытка переключиться на «'+(ROLES[role]?.label||role)+'»');
+  return false;
 }
 function confirmRoleSwitch(role){
-  const entered = ($('rolePinInput')||{}).value || '';
-  if(entered === ROLE_PINS[role]){
-    closeSheet();
-    setRole(role);
-  } else {
-    const err = $('rolePinErr');
-    if(err) err.style.display = 'block';
-    logAction('Неверный ПИН при попытке смены роли', 'Попытка переключиться на «'+ROLES[role].label+'»');
-  }
+  return requestRoleSwitch(role);
 }
 
 // Раньше <select> "Мой пост" менял currentUserPost НАПРЯМУЮ (onchange без
 // какой-либо проверки) — любой, у кого открыта роль «Работник», мог сам
 // назначить себя на ЛЮБОЙ пост, полностью обходя ограничение "работник
 // видит и создаёт акты только по своему посту" (canSeeDoc()/isRabotnikRestrictedToPost()).
-// Смена поста работника теперь требует того же ПИН администратора, что и
-// переключение на привилегированную роль (см. requestRoleSwitch выше) — та
-// же сдерживающая мера, применённая последовательно.
+// Назначение поста также является серверной операцией владельца/администратора.
 function requestPostSwitch(newPost){
   if(newPost === currentUserPost) return;
-  views.roles(); // сбрасывает <select> обратно к текущему посту, пока ПИН не подтверждён
-  const layer = $('sheetLayer');
-  layer.innerHTML = `
-    <div class="sheet-backdrop" onclick="if(event.target===this) closeSheet()">
-      <div class="sheet">
-        <div class="handle"></div>
-        <div class="sec" style="margin-top:0">ПИН администратора для смены поста работника</div>
-        <div class="fld"><input id="postPinInput" type="password" inputmode="numeric" placeholder="Введите ПИН" autofocus></div>
-        <div id="postPinErr" class="s" style="color:var(--red);display:none;margin:4px 0">Неверный ПИН</div>
-        <button class="btn primary" onclick="confirmPostSwitch('${esc(newPost)}')">Подтвердить</button>
-      </div>
-    </div>`;
-  const inp = $('postPinInput');
-  if(inp) inp.addEventListener('keydown', e=>{ if(e.key==='Enter') confirmPostSwitch(newPost); });
+  views.roles();
+  toast('Пост назначает владелец или администратор в аккаунте сотрудника');
+  logAction('Отклонена локальная смена поста', currentUserPost+' → '+newPost);
+  return false;
 }
 function confirmPostSwitch(newPost){
-  const entered = ($('postPinInput')||{}).value || '';
-  if(entered === ROLE_PINS.admin){
-    closeSheet();
-    const prevPost = currentUserPost;
-    currentUserPost = newPost;
-    toast('Пост работника: '+newPost);
-    views.roles();
-    logAction('Смена поста работника', prevPost+' → '+newPost);
-  } else {
-    const err = $('postPinErr');
-    if(err) err.style.display = 'block';
-    logAction('Неверный ПИН при попытке сменить пост работника', 'Попытка переключиться на «'+newPost+'»');
-  }
+  return requestPostSwitch(newPost);
 }
 
 const auditLog = [
@@ -3012,15 +2966,21 @@ function logAction(action, detail, post, itemId){
 
 function deepClone(value){ return JSON.parse(JSON.stringify(value)); }
 function restoreArray(target, snapshot){ target.length=0; target.push(...snapshot); }
-function runStockTransaction(label, action){
-  const snapshot={items:deepClone(items),posts:deepClone(posts),docs:deepClone(docs),extIssues:deepClone(extIssues),stockTransfers:deepClone(stockTransfers),inventoryActs:deepClone(inventoryActs),auditLog:deepClone(auditLog),notifications:deepClone(notifications),cycleCount:deepClone(cycleCount)};
+function runStockTransaction(label, action, options={}){
+  const snapshot={items:deepClone(items),posts:deepClone(posts),extIssues:deepClone(extIssues),stockTransfers:deepClone(stockTransfers),auditLog:deepClone(auditLog),notifications:deepClone(notifications)};
+  if(options.docs)snapshot.docs=deepClone(docs);
+  if(options.inventoryActs)snapshot.inventoryActs=deepClone(inventoryActs);
+  if(options.cycleCount)snapshot.cycleCount=deepClone(cycleCount);
   try{
     const result=action();
     if(result===false) throw new Error('Операция отклонена');
     return true;
   }catch(e){
-    restoreArray(items,snapshot.items);restoreArray(posts,snapshot.posts);restoreArray(docs,snapshot.docs);restoreArray(extIssues,snapshot.extIssues);
-    restoreArray(stockTransfers,snapshot.stockTransfers);restoreArray(inventoryActs,snapshot.inventoryActs);restoreArray(auditLog,snapshot.auditLog);restoreArray(notifications,snapshot.notifications);cycleCount=snapshot.cycleCount;
+    restoreArray(items,snapshot.items);restoreArray(posts,snapshot.posts);restoreArray(extIssues,snapshot.extIssues);
+    restoreArray(stockTransfers,snapshot.stockTransfers);restoreArray(auditLog,snapshot.auditLog);restoreArray(notifications,snapshot.notifications);
+    if(snapshot.docs)restoreArray(docs,snapshot.docs);
+    if(snapshot.inventoryActs)restoreArray(inventoryActs,snapshot.inventoryActs);
+    if(Object.prototype.hasOwnProperty.call(snapshot,'cycleCount'))cycleCount=snapshot.cycleCount;
     console.error('Транзакция отменена: '+label,e);
     toast('Операция отменена: остатки не изменены');
     return false;
@@ -3263,11 +3223,22 @@ window.onNativeSyncStatus=function(raw){
 };
 window.onNativeRemoteState=function(raw,revision){
   try{
+    const previousPayload=JSON.stringify(serializeAppState());
     const incoming=JSON.parse(raw);
     if(!applyAppState(incoming)){_nativeSyncStatus.lastError='Сервер прислал несовместимую схему; локальные данные сохранены';return false;}
     const migratedPayload=JSON.stringify(serializeAppState());
-    const storage=nativeStorageBridge();
+    // Проверяем именно методы приёма удалённого снимка. Общий helper требует
+    // saveState(), хотя изолированный/обновляемый Android-мост может уже
+    // предоставить saveRemoteState() и reportRemoteStateRejected().
+    const storage=(typeof window!=='undefined'&&window.AndroidStorage)?window.AndroidStorage:null;
     if(!storage||typeof storage.saveRemoteState!=='function'||!storage.saveRemoteState(migratedPayload,APP_SCHEMA_VERSION,revision)){
+      // saveRemoteState can reject a stale callback after native sync has
+      // already advanced. Restore the exact pre-callback graph so JavaScript
+      // and SQLite cannot silently diverge.
+      applyAppState(JSON.parse(previousPayload));
+      if(storage&&typeof storage.reportRemoteStateRejected==='function'){
+        storage.reportRemoteStateRejected('Нативное хранилище отклонило серверный снимок; локальные данные восстановлены');
+      }
       _nativeSyncStatus.lastError='Не удалось атомарно сохранить серверный снимок';return false;
     }
     _lastSavedPayload=migratedPayload;_saveIsHealthy=true;_nativeSyncStatus.serverRevision=revision;
@@ -3985,7 +3956,7 @@ newDefekt(){
       </select><button class="fbtn" style="margin:0" onclick="startNativeScan('defekt')" title="Сканировать QR карточки">▣</button></div></div>
     <div class="fld"><label>Наименование изделия <span class="req">*</span></label><input id="f_item_name" placeholder="Например, Антенна направленная АН-9" oninput="checkDefekt()"></div>
     <div class="fld"><label>Серийный номер (если есть)</label><input id="f_serial" placeholder="Можно оставить пустым" oninput="checkDefekt()"></div>
-    <label class="card static" style="display:flex;align-items:center;gap:10px;cursor:pointer"><input id="f_create_card" type="checkbox" onchange="$('f_create_wrap').style.display=this.checked?'block':'none'"><span>Создать складскую карточку для этого изделия</span></label>
+    <label class="card static" style="display:flex;align-items:center;gap:10px;cursor:${canManageCatalog()?'pointer':'not-allowed'}"><input id="f_create_card" type="checkbox" ${canManageCatalog()?'':'disabled'} onchange="$('f_create_wrap').style.display=this.checked?'block':'none'"><span>Создать складскую карточку для этого изделия${canManageCatalog()?'':' (только администратор или кладовщик)'}</span></label>
     <div id="f_create_wrap" style="display:none"><div class="fld"><label>Категория новой карточки</label><select id="f_create_cat">${categoriesList.filter(c=>c!=='Комплектующие').map(c=>`<option>${esc(c)}</option>`).join('')}</select></div><div class="fld"><label>Единица измерения</label><input id="f_create_unit" value="шт"></div></div>
     <div class="fld"><label>Дата поступления <span class="req">*</span></label><input id="f_date" type="text" inputmode="numeric" placeholder="ДД.ММ.ГГГГ" value="${todayStr()}" oninput="checkDefekt()"></div>
     <div class="fld"><label>Подразделение, откуда поступило <span class="req">*</span></label><input id="f_from" placeholder="Объект, подразделение, поставщик…" oninput="checkDefekt()"></div>
@@ -5660,7 +5631,7 @@ function performWorkClose(d, note){
     repaired.history.push({d:todayStr(), type:'in', text:`${d.serial&&d.serial!=='—'?'№'+d.serial+' ':''}возвращено на склад после ремонта (${d.no})`, q:`+1 ${repaired.unit}`});
   }
   logAction('Акт выполненных работ закрыт', `${d.no}: ${d.item}, списано ${d.materials.length} позиций материалов${note?' · '+note:''}`, d.post);
-  });
+  },{docs:true});
   if(!closed)return false;
   toast('✓ Акт закрыт: материалы списаны');
   setTimeout(()=>go('docs'), 900);
@@ -5671,9 +5642,9 @@ function onDefektItemChange(){
   const selected=item($('f_itemid').value);
   if(selected){
     $('f_item_name').value=selected.name;$('f_item_name').readOnly=true;
-    $('f_create_card').checked=false;$('f_create_card').disabled=true;$('f_create_wrap').style.display='none';
+    if($('f_create_card')){$('f_create_card').checked=false;$('f_create_card').disabled=true;}$('f_create_wrap').style.display='none';
   }else{
-    $('f_item_name').readOnly=false;$('f_create_card').disabled=false;
+    $('f_item_name').readOnly=false;if($('f_create_card'))$('f_create_card').disabled=!canManageCatalog();
   }
   checkDefekt();
 }
@@ -5717,7 +5688,7 @@ function submitDefekt(){
   let itemId = $('f_itemid') && $('f_itemid').value ? $('f_itemid').value : null;
   if(itemId&&!item(itemId)){toast('Выбранная складская карточка не существует');return;}
   if(!itemId&&$('f_create_card')?.checked){
-    if(!canManageCatalog()){toast('Создавать карточки товара может только администратор');return false;}
+    if(!canManageCatalog()){toast('Создавать карточки товара может только администратор или кладовщик');return false;}
     const unit=$('f_create_unit').value.trim()||'шт',topCat=$('f_create_cat').value;
     const newItem={id:nextItemInternalId(),icon:CAT_ICON[topCat]||'📦',name:itemLabel,sku:nextGeneratedSku(),topCat,unit,stock:0,min:0,abc:'C',desc:'Создано из акта дефектовки',posts:{},ext:0,history:[{d:todayStr(),type:'in',text:'Карточка создана из акта дефектовки',q:`+0 ${unit}`}]};
     items.push(newItem);itemId=newItem.id;

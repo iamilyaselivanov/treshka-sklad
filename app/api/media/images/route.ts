@@ -3,17 +3,11 @@ import { requireUser } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
-type MediaBucket = {
-  put(key: string, value: ArrayBuffer | ArrayBufferView, options?: { httpMetadata?: { contentType?: string } }): Promise<unknown>;
-  get(key: string): Promise<{ body: ReadableStream; httpMetadata?: { contentType?: string }; size?: number } | null>;
-  delete(key: string): Promise<void>;
-};
-
 const MAX_IMAGE_BYTES = 500_000;
 const IMAGE_PATTERN = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/;
 
 function bucket() {
-  return (env as typeof env & { MEDIA?: MediaBucket }).MEDIA ?? null;
+  return env.MEDIA ?? null;
 }
 
 function keyFromRequest(request: Request) {

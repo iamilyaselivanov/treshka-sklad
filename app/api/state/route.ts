@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { audit, requireUser } from "@/lib/auth";
+import type { SessionUser } from "@/lib/auth";
 import { warehouseDeletionPolicy, warehouseItemIds } from "@/lib/warehouse-state";
 import type { WarehouseState } from "@/lib/warehouse-state";
 
@@ -12,9 +13,13 @@ type StateRow = {
   updated_by: string;
 };
 
-const MAX_STATE_BYTES = 4 * 1024 * 1024;
+type StateMetaRow = Omit<StateRow, "payload">;
+
+const MAX_STATE_BYTES = 1_500_000;
 const MAX_COLLECTION_ITEMS = 50_000;
 const MAX_AUDIT_LOG_ITEMS = 2_000;
+const MAX_NOTIFICATION_ITEMS = 2_000;
+const MAX_INVENTORY_ACT_ITEMS = 5_000;
 const REQUIRED_COLLECTIONS = ["items", "posts", "docs"] as const;
 const OPTIONAL_COLLECTIONS = [
   "extIssues",
@@ -44,12 +49,19 @@ function normalizedState(value: unknown): WarehouseState | null {
   delete state.currentUserPost;
   delete state.savedAt;
   if (Array.isArray(state.auditLog)) state.auditLog = state.auditLog.slice(0, MAX_AUDIT_LOG_ITEMS);
+  if (Array.isArray(state.notifications)) state.notifications = state.notifications.slice(0, MAX_NOTIFICATION_ITEMS);
+  if (Array.isArray(state.inventoryActs)) state.inventoryActs = state.inventoryActs.slice(0, MAX_INVENTORY_ACT_ITEMS);
   return state;
+}
+
+function stateEtag(revision: number, user: SessionUser) {
+  const authorizationScope = encodeURIComponent(`${user.id}|${user.role}|${user.assignment}`);
+  return `W/"warehouse-main-${revision}-${authorizationScope}"`;
 }
 
 export async function GET(request: Request) {
   const auth = await requireUser(request);
-  if (auth.response) return auth.response;
+  if (auth.response || !auth.user) return auth.response;
   const row = await env.DB.prepare(
     "SELECT revision, payload, updated_at, updated_by FROM warehouse_full_state WHERE state_key = 'main'",
   ).first<StateRow>();
@@ -59,7 +71,7 @@ export async function GET(request: Request) {
       { headers: { "cache-control": "no-store" } },
     );
   }
-  const etag = `W/"warehouse-main-${row.revision}"`;
+  const etag = stateEtag(row.revision, auth.user);
   if (request.headers.get("if-none-match") === etag) {
     return new Response(null, {
       status: 304,
@@ -110,11 +122,11 @@ export async function PUT(request: Request) {
   const payload = JSON.stringify(state);
   const sizeBytes = new TextEncoder().encode(payload).byteLength;
   if (sizeBytes > MAX_STATE_BYTES) {
-    return Response.json({ error: "Данные склада превышают безопасный размер 4 МБ" }, { status: 413 });
+    return Response.json({ error: "Данные склада превышают безопасный размер 1,5 МБ" }, { status: 413 });
   }
   const current = await env.DB.prepare(
-    "SELECT revision, payload, updated_at, updated_by FROM warehouse_full_state WHERE state_key = 'main'",
-  ).first<StateRow>();
+    "SELECT revision, updated_at, updated_by FROM warehouse_full_state WHERE state_key = 'main'",
+  ).first<StateMetaRow>();
   if (
     (expectedRevision === 0 && current)
     || (expectedRevision > 0 && current?.revision !== expectedRevision)
@@ -130,7 +142,12 @@ export async function PUT(request: Request) {
       { status: 409, headers: { "cache-control": "no-store" } },
     );
   }
-  if (current?.payload === payload) {
+  const unchanged = current
+    ? await env.DB.prepare(
+      "SELECT 1 AS matches FROM warehouse_full_state WHERE state_key = 'main' AND revision = ? AND payload = ?",
+    ).bind(current.revision, payload).first<{ matches: number }>()
+    : null;
+  if (current && unchanged) {
     return Response.json(
       {
         revision: current.revision,
@@ -141,7 +158,7 @@ export async function PUT(request: Request) {
       {
         headers: {
           "cache-control": "no-store",
-          etag: `W/"warehouse-main-${current.revision}"`,
+          etag: stateEtag(current.revision, auth.user),
         },
       },
     );
@@ -201,36 +218,50 @@ export async function PUT(request: Request) {
         SET revision = ?, payload = ?, updated_at = ?, updated_by = ?
         WHERE state_key = 'main' AND revision = ?
       `).bind(revision, payload, updatedAt, auth.user.callsign, expectedRevision);
-  const results = await env.DB.batch([
-    stateWrite,
-    env.DB.prepare(
-       `DELETE FROM warehouse_state_items
-       WHERE state_key = 'main'
-         AND EXISTS (
-           SELECT 1 FROM warehouse_full_state
-           WHERE state_key = 'main' AND revision = ?
-         )
-         AND item_id NOT IN (
-           SELECT TRIM(CAST(json_extract(value, '$.id') AS TEXT))
-           FROM warehouse_full_state,
-                json_each(warehouse_full_state.payload, '$.items')
-           WHERE warehouse_full_state.state_key = 'main'
-             AND warehouse_full_state.revision = ?
-             AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''
-         )`,
-    ).bind(revision, revision),
-    env.DB.prepare(
-      `INSERT OR IGNORE INTO warehouse_state_items (state_key, item_id)
-       SELECT warehouse_full_state.state_key,
-              TRIM(CAST(json_extract(value, '$.id') AS TEXT))
-       FROM warehouse_full_state,
-            json_each(warehouse_full_state.payload, '$.items')
-       WHERE warehouse_full_state.state_key = 'main'
-         AND warehouse_full_state.revision = ?
-         AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''`,
-    ).bind(revision),
-  ]);
-  const result = results[0];
+  let result;
+  try {
+    const results = await env.DB.batch([
+      stateWrite,
+      env.DB.prepare(
+         `DELETE FROM warehouse_state_items
+         WHERE state_key = 'main'
+           AND EXISTS (
+             SELECT 1 FROM warehouse_full_state
+             WHERE state_key = 'main' AND revision = ?
+           )
+           AND item_id NOT IN (
+             SELECT TRIM(CAST(json_extract(value, '$.id') AS TEXT))
+             FROM warehouse_full_state,
+                  json_each(warehouse_full_state.payload, '$.items')
+             WHERE warehouse_full_state.state_key = 'main'
+               AND warehouse_full_state.revision = ?
+               AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''
+           )`,
+      ).bind(revision, revision),
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO warehouse_state_items (state_key, item_id)
+         SELECT warehouse_full_state.state_key,
+                TRIM(CAST(json_extract(value, '$.id') AS TEXT))
+         FROM warehouse_full_state,
+              json_each(warehouse_full_state.payload, '$.items')
+         WHERE warehouse_full_state.state_key = 'main'
+           AND warehouse_full_state.revision = ?
+           AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''`,
+      ).bind(revision),
+    ]);
+    result = results[0];
+  } catch (error) {
+    console.error("warehouse state write failed", error);
+    try {
+      await audit(auth.user, "state_write_failed", `${sizeBytes} байт · исходная ревизия ${expectedRevision}`);
+    } catch (auditError) {
+      console.error("warehouse state failure audit failed", auditError);
+    }
+    return Response.json(
+      { error: "Сервер не смог сохранить снимок. Данные на устройстве не сброшены; повторите позже" },
+      { status: 507, headers: { "cache-control": "no-store" } },
+    );
+  }
   if (Number(result.meta?.changes ?? 0) !== 1) {
     const current = await env.DB.prepare(
       "SELECT revision, updated_at, updated_by FROM warehouse_full_state WHERE state_key = 'main'",
@@ -253,6 +284,6 @@ export async function PUT(request: Request) {
   );
   return Response.json(
     { revision, sizeBytes, updatedAt },
-    { headers: { etag: `W/"warehouse-main-${revision}"` } },
+    { headers: { etag: stateEtag(revision, auth.user) } },
   );
 }

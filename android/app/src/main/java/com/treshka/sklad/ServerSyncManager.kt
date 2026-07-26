@@ -19,10 +19,10 @@ class ServerSyncManager(
     companion object {
         private const val TAG = "ServerSync"
         private const val ROLE_REFRESH_INTERVAL_MS = 5 * 60 * 1_000L
-        private val SERVER_ROLES = setOf("owner", "admin", "storekeeper", "worker")
     }
     private val executor = Executors.newSingleThreadScheduledExecutor()
     private val running = AtomicBoolean(false)
+    private val rerunRequested = AtomicBoolean(false)
     private val retryScheduled = AtomicBoolean(false)
     @Volatile private var lastRoleRefreshAt = 0L
     @Volatile private var callbackOwner: Any? = null
@@ -111,6 +111,7 @@ class ServerSyncManager(
             return
         }
         store.updateServerRole(role)
+        store.markSyncOk()
         lastRoleRefreshAt = now
     }
 
@@ -121,11 +122,11 @@ class ServerSyncManager(
 
     private fun responseServerRole(responseJson: JSONObject): String? {
         val user = responseJson.optJSONObject("user") ?: return null
-        val role = user.optString("role").trim()
-        if (role.isBlank()) return null
-        if (role !in SERVER_ROLES) {
-            Log.w(TAG, "unknown server role '$role'; native privileges reduced to worker")
-            return "worker"
+        if (!user.has("role") || user.isNull("role")) return null
+        val rawRole = user.getString("role")
+        val role = SyncPolicy.normalizeServerRole(rawRole) ?: return null
+        if (!SyncPolicy.isKnownServerRole(rawRole)) {
+            Log.w(TAG, "unknown server role '$rawRole'; native privileges reduced to worker")
         }
         return role
     }
@@ -199,6 +200,11 @@ class ServerSyncManager(
     }
 
     private fun loadAuthoritativeSnapshot(config: SyncConfig): Pair<String, Long> {
+        // The snapshot parked at the moment of the conflict is sufficient for
+        // an offline "accept server" decision. If the server has moved since,
+        // the next pull advances from this revision; a local requeue still gets
+        // a safe 409 rather than overwriting the newer server state.
+        store.pendingRemoteSnapshot()?.let { return it }
         val response = requestJson(
             "${config.baseUrl}/v1/sync/pull?afterRevision=0",
             "GET",
@@ -274,7 +280,10 @@ class ServerSyncManager(
     }
 
     fun syncNow() {
-        if (!running.compareAndSet(false, true)) return
+        if (!running.compareAndSet(false, true)) {
+            rerunRequested.set(true)
+            return
+        }
         executor.execute {
             try {
                 syncLoop()
@@ -285,6 +294,7 @@ class ServerSyncManager(
             } finally {
                 running.set(false)
                 onStatusCallback(store.syncStatusJson())
+                if (rerunRequested.getAndSet(false)) syncNow()
             }
         }
     }
@@ -320,10 +330,7 @@ class ServerSyncManager(
             }
             if (response.code !in 200..299) {
                 val message = "HTTP ${response.code}: ${response.body.take(300)}"
-                val retryable = response.code == 408
-                    || response.code == 425
-                    || response.code == 429
-                    || response.code >= 500
+                val retryable = SyncPolicy.isRetryableHttp(response.code)
                 if (retryable) {
                     store.markSyncError(pending.mutationId, message)
                     scheduleRetry(pending.attempts)
@@ -338,7 +345,7 @@ class ServerSyncManager(
             }
             adoptServerRole(response.body)
             val revision = JSONObject(response.body).getLong("revision")
-            store.markMutationApplied(pending.mutationId, revision)
+            store.markMutationApplied(pending.mutationId, pending.baseRevision, revision)
             config = store.getSyncConfig() ?: return
         }
 
@@ -356,6 +363,7 @@ class ServerSyncManager(
             if (response.code == 200) {
                 adoptServerRole(response.body)
                 val json = JSONObject(response.body)
+                var nativePersistencePending = false
                 if (!json.optBoolean("unchanged", false) && json.has("payload")) {
                     val payload = json.getJSONObject("payload").toString()
                     val revision = json.getLong("revision")
@@ -363,9 +371,14 @@ class ServerSyncManager(
                         store.savePendingRemoteSnapshot(payload, revision)
                     } else {
                         store.clearPendingRemoteSnapshot()
+                        nativePersistencePending = true
                         onRemoteStateCallback(payload, revision)
                     }
                 }
+                // saveRemoteState() marks success only after WebView migration
+                // and SQLite persistence. Do not pre-emptively clear an error
+                // while that asynchronous callback is still pending.
+                if (!nativePersistencePending) store.markSyncOk()
             } else if (response.code !in 200..299) {
                 store.markSyncError(null, "Pull HTTP ${response.code}")
             }
@@ -375,8 +388,7 @@ class ServerSyncManager(
 
     private fun scheduleRetry(attempt: Int) {
         if (!retryScheduled.compareAndSet(false, true)) return
-        val exponent = (attempt - 1).coerceIn(0, 6)
-        val delaySeconds = (5L * (1L shl exponent)).coerceAtMost(300L)
+        val delaySeconds = SyncPolicy.retryDelaySeconds(attempt)
         executor.schedule({
             retryScheduled.set(false)
             syncNow()

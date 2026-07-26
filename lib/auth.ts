@@ -18,10 +18,10 @@ const SESSION_COOKIE = "treshka_session";
 const SESSION_SECONDS = 60 * 60 * 24 * 7;
 const AUDIT_RETENTION_DAYS = 180;
 const AUDIT_MAX_ROWS = 5_000;
-// A normal warehouse snapshot may be close to the 4 MiB route limit. Drain
-// rejected requests up to the same envelope so Cloudflare can reuse the
+// Drain rejected warehouse writes up to the same envelope as /api/state so
+// Cloudflare can reuse the
 // connection, while still refusing to consume an unbounded hostile stream.
-const MAX_REJECTED_BODY_DRAIN_BYTES = 4 * 1024 * 1024 + 64 * 1024;
+const MAX_REJECTED_BODY_DRAIN_BYTES = 1_500_000 + 64 * 1024;
 
 type ThrottleRow = {
   blocked_until: string | null;
@@ -58,7 +58,7 @@ export async function recordThrottleFailure(
   now = new Date(),
 ) {
   const blockedUntil = new Date(now.getTime() + blockMs).toISOString();
-  await env.DB.prepare(
+  const row = await env.DB.prepare(
     `INSERT INTO login_throttle (login, failures, blocked_until, last_attempt_at)
      VALUES (?, 1, CASE WHEN 1 >= ? THEN ? ELSE NULL END, ?)
      ON CONFLICT(login) DO UPDATE SET
@@ -67,7 +67,8 @@ export async function recordThrottleFailure(
          WHEN login_throttle.failures + 1 >= ? THEN ?
          ELSE login_throttle.blocked_until
        END,
-       last_attempt_at = excluded.last_attempt_at`,
+       last_attempt_at = excluded.last_attempt_at
+     RETURNING blocked_until`,
   ).bind(
     key,
     maxFailures,
@@ -75,7 +76,8 @@ export async function recordThrottleFailure(
     now.toISOString(),
     maxFailures,
     blockedUntil,
-  ).run();
+  ).first<{ blocked_until: string | null }>();
+  return Boolean(row?.blocked_until && Date.parse(row.blocked_until) > now.getTime());
 }
 
 export async function clearThrottle(key: string) {

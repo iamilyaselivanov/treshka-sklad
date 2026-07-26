@@ -196,6 +196,7 @@ class MainActivity : AppCompatActivity() {
             owner = this,
             onStatus = { json ->
                 runOnUiThread {
+                    if (isFinishing || isDestroyed || !::webView.isInitialized) return@runOnUiThread
                     webView.evaluateJavascript(
                         "window.onNativeSyncStatus && window.onNativeSyncStatus(${jsStringLiteral(json)});",
                         null,
@@ -204,6 +205,7 @@ class MainActivity : AppCompatActivity() {
             },
             onRemoteState = { payload, revision ->
                 runOnUiThread {
+                    if (isFinishing || isDestroyed || !::webView.isInitialized) return@runOnUiThread
                     webView.evaluateJavascript(
                         "window.onNativeRemoteState && window.onNativeRemoteState(${jsStringLiteral(payload)}, $revision);",
                         null,
@@ -811,7 +813,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         if (::serverSyncManager.isInitialized) serverSyncManager.clearCallbacks(this)
-        if (::webView.isInitialized) webView.destroy()
+        if (::webView.isInitialized) {
+            webView.stopLoading()
+            (webView.parent as? ViewGroup)?.removeView(webView)
+            webView.removeAllViews()
+            webView.destroy()
+        }
         super.onDestroy()
     }
 

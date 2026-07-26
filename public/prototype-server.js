@@ -15,7 +15,8 @@
     pendingMediaDeletes: new Set(),
     consecutiveFailures: 0,
     nextAttemptAt: 0,
-    lastServerState: null,
+    lastServerStateJson: "",
+    lastServerEtag: "",
   };
   const push = {
     registering: false,
@@ -288,6 +289,8 @@
     delete state.currentUserPost;
     delete state.savedAt;
     if (Array.isArray(state.auditLog)) state.auditLog = state.auditLog.slice(0, 2_000);
+    if (Array.isArray(state.notifications)) state.notifications = state.notifications.slice(0, 2_000);
+    if (Array.isArray(state.inventoryActs)) state.inventoryActs = state.inventoryActs.slice(0, 5_000);
     return state;
   }
 
@@ -468,7 +471,10 @@
       throw new Error("Сервер вернул несовместимые данные");
     }
     sync.revision = Number(snapshot.revision || 0);
-    sync.lastServerState = snapshot.state;
+    // Never retain references to the live application graph. applyAppState()
+    // intentionally reuses nested objects, so a reference cache would be
+    // mutated by later local edits and could no longer represent server truth.
+    sync.lastServerStateJson = JSON.stringify(snapshot.state);
     sync.lastUploaded = JSON.stringify(normalizedState());
     sync.lastError = null;
     rerenderCurrentView();
@@ -477,13 +483,16 @@
 
   async function fetchSnapshot() {
     const headers = {};
-    if (sync.revision > 0) headers["if-none-match"] = `W/"warehouse-main-${sync.revision}"`;
+    if (sync.lastServerEtag) headers["if-none-match"] = sync.lastServerEtag;
     const response = await fetchWithTimeout("/api/state", { cache: "no-store", headers });
     if (response.status === 304) {
+      if (!sync.lastServerStateJson) {
+        throw new Error("Сервер не вернул снимок для пустого клиентского кэша");
+      }
       noteSyncSuccess();
       return {
         revision: sync.revision,
-        state: sync.lastServerState,
+        state: JSON.parse(sync.lastServerStateJson),
         user: sync.user,
         unchanged: true,
       };
@@ -499,7 +508,8 @@
     // uploaded; otherwise an owner is misclassified as read-only and poll can
     // overwrite their offline work.
     adoptServerUser(data.user);
-    sync.lastServerState = data.state ?? null;
+    sync.lastServerStateJson = data.state == null ? "" : JSON.stringify(data.state);
+    sync.lastServerEtag = response.headers.get("etag") || "";
     noteSyncSuccess();
     return data;
   }
@@ -525,6 +535,11 @@
         response.status >= 400 && response.status < 500
         && response.status !== 408 && response.status !== 429
       ) {
+        if (response.status === 413) {
+          sync.lastError = data.error || "Снимок склада слишком велик";
+          toast("⚠ " + sync.lastError + ". Удалите лишние локальные уведомления или архивные данные.");
+          return false;
+        }
         const snapshot = await fetchSnapshot();
         applyRemoteSnapshot(snapshot, false);
         sync.lastError = data.error || "Сервер отклонил изменение";
@@ -534,6 +549,8 @@
       if (!response.ok) throw new Error(data.error || "Ошибка сохранения");
       sync.revision = data.revision;
       sync.lastUploaded = payload;
+      sync.lastServerStateJson = payload;
+      sync.lastServerEtag = response.headers.get("etag") || "";
       sync.lastError = null;
       noteSyncSuccess();
       void cleanupPendingMedia();

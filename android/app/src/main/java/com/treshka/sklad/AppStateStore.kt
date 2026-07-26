@@ -70,7 +70,7 @@ class AppStateStore(context: Context) :
     companion object {
         private const val TAG = "AppStateStore"
         private const val DB_NAME = "sklad_state.db"
-        private const val DB_VERSION = 6
+        private const val DB_VERSION = 7
         private const val STATE_TABLE = "app_state"
         private const val ROW_ID = 1L
         private const val MAX_CONFLICT_BACKUPS = 10
@@ -115,6 +115,22 @@ class AppStateStore(context: Context) :
         if (oldVersion < 6 && !hasColumn(db, "sync_config", "server_role")) {
             db.execSQL(
                 "ALTER TABLE sync_config ADD COLUMN server_role TEXT NOT NULL DEFAULT ''",
+            )
+        }
+        if (oldVersion < 7) {
+            // Builds predating base_revision persisted queued snapshots with
+            // DEFAULT 0 even when the device had already synchronized far past
+            // revision zero. Preserve the legacy claim-time behavior once,
+            // then keep every row's real base immutable while it is in flight.
+            db.execSQL(
+                """
+                UPDATE sync_outbox
+                SET base_revision = COALESCE(
+                    (SELECT server_revision FROM sync_config WHERE id=1),
+                    0
+                )
+                WHERE conflict=0 AND base_revision=0
+                """.trimIndent(),
             )
         }
     }
@@ -501,11 +517,19 @@ class AppStateStore(context: Context) :
     ).use { c -> if (c.moveToFirst()) c.getInt(0).coerceAtLeast(1) else 1 }
 
     @Synchronized
-    fun markMutationApplied(mutationId: String, revision: Long) {
+    fun markMutationApplied(mutationId: String, appliedBaseRevision: Long, revision: Long) {
         val db = writableDatabase
         db.beginTransaction()
         try {
             db.delete("sync_outbox", "mutation_id=?", arrayOf(mutationId))
+            // Every unconflicted row at the same base was created while the
+            // applied full snapshot was in flight. It already contains that
+            // snapshot, so advance it to the acknowledged revision instead of
+            // manufacturing a guaranteed false 409 on the next push.
+            db.execSQL(
+                "UPDATE sync_outbox SET base_revision=? WHERE conflict=0 AND base_revision=?",
+                arrayOf(revision, appliedBaseRevision),
+            )
             db.execSQL(
                 "UPDATE sync_config SET server_revision=MAX(server_revision, ?), last_sync_at=?, last_error=NULL WHERE id=1",
                 arrayOf(revision, System.currentTimeMillis()),
@@ -846,6 +870,14 @@ class AppStateStore(context: Context) :
                 arrayOf(error.take(1000), mutationId),
             )
         }
+    }
+
+    @Synchronized
+    fun markSyncOk() {
+        writableDatabase.execSQL(
+            "UPDATE sync_config SET last_sync_at=?, last_error=NULL WHERE id=1",
+            arrayOf(System.currentTimeMillis()),
+        )
     }
 
     @Synchronized

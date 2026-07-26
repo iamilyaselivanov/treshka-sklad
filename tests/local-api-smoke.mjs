@@ -278,6 +278,8 @@ try {
   sharedState.currentRole = "admin";
   sharedState.savedAt = "must-not-create-a-new-revision";
   sharedState.auditLog = Array.from({ length: 2_005 }, (_, index) => ({ marker: index }));
+  sharedState.notifications = Array.from({ length: 2_005 }, (_, index) => ({ id: `notification-${index}` }));
+  sharedState.inventoryActs = Array.from({ length: 5_005 }, (_, index) => ({ no: `inventory-${index}`, diffs: [] }));
   const rejectedLargeState = { ...sharedState, rejectedPadding: "x".repeat(128 * 1024) };
   await request("/api/state", {
     method: "PUT",
@@ -289,6 +291,13 @@ try {
     },
     body: JSON.stringify({ state: rejectedLargeState, expectedRevision: state.data.revision }),
   }, 403);
+  const oversizedState = { ...sharedState, rejectedPadding: "x".repeat(1_510_000) };
+  const oversizedWrite = await request("/api/state", {
+    method: "PUT",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({ state: oversizedState, expectedRevision: state.data.revision }),
+  }, 413);
+  assert.match(oversizedWrite.data.error, /1,5 МБ/);
   await request("/api/state", {
     method: "PUT",
     headers: { cookie: roleCookies.worker, "content-type": "application/json" },
@@ -332,13 +341,22 @@ try {
   assert.equal("currentRole" in sanitized.data.state, false);
   assert.equal("savedAt" in sanitized.data.state, false);
   assert.equal(sanitized.data.state.auditLog.length, 2_000);
+  assert.equal(sanitized.data.state.notifications.length, 2_000);
+  assert.equal(sanitized.data.state.inventoryActs.length, 5_000);
   const etag = sanitized.response.headers.get("etag");
-  assert.equal(etag, `W/"warehouse-main-${sanitized.data.revision}"`);
+  assert.match(etag, new RegExp(`^W/"warehouse-main-${sanitized.data.revision}-`));
   const notModified = await fetch(new URL("/api/state", baseUrl), {
     headers: { ...ownerHeaders, "if-none-match": etag },
   });
   assert.equal(notModified.status, 304);
   assert.equal(await notModified.text(), "");
+  const adminSnapshot = await request("/api/state", { headers: { cookie: roleCookies.admin } });
+  const adminEtag = adminSnapshot.response.headers.get("etag");
+  assert.notEqual(adminEtag, etag, "ETag must include the authenticated authorization scope");
+  const wrongAuthorizationScope = await fetch(new URL("/api/state", baseUrl), {
+    headers: { cookie: roleCookies.admin, "if-none-match": etag },
+  });
+  assert.equal(wrongAuthorizationScope.status, 200, "a role/account change must never reuse another identity's 304");
   const deletionProbeId = `delete-state-${suffix}`;
   const stateWithDeletionProbe = {
     ...sanitized.data.state,
@@ -468,8 +486,8 @@ try {
       { no: `MOVE-${suffix}`, type: "toPost", post: "ТЭЧ", items: [{ id: linkedProduct.data.product.id, q: 1 }] },
     ],
     inventoryActs: [
-      ...(stateAfterDeletion.data.state.inventoryActs ?? []),
       { no: `INV-${suffix}`, diffs: [{ id: linkedProduct.data.product.id, counted: 0 }] },
+      ...(stateAfterDeletion.data.state.inventoryActs ?? []),
     ],
   };
   const linkedSaved = await request("/api/state", {

@@ -86,7 +86,9 @@ test('loads without console/page errors and exposes all expected subsystems', as
     hasQrcode: typeof qrcode !== 'undefined',
     hasPersistence: typeof flushSave === 'function' && typeof loadAppStateOnStart === 'function',
     hasScan: typeof startNativeScan === 'function' && typeof onNativeScanResult === 'function',
-    hasRolePin: typeof requestRoleSwitch === 'function' && typeof ROLE_PINS === 'object',
+    hasRoleGuard: typeof requestRoleSwitch === 'function'
+      && typeof ROLE_PINS === 'object'
+      && Object.keys(ROLE_PINS).length === 0,
     hasNativeBack: typeof __handleNativeBack === 'function',
     hasFileBridge: typeof nativeFileBridge === 'function',
     hasPrintBridge: typeof nativePrintBridge === 'function',
@@ -205,7 +207,7 @@ test('#7 — schema migration refuses newer-than-known or unmigratable-older dat
   await ctx.close();
 });
 
-test('#5/#6 — server role overrides cached privileges; rabotnik cannot export the whole warehouse', async () => {
+test('#5/#6 — server role overrides cached privileges and offline mode cannot elevate with a shared PIN', async () => {
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => {
     const out = {};
@@ -213,7 +215,7 @@ test('#5/#6 — server role overrides cached privileges; rabotnik cannot export 
     const state = serializeAppState();
     out.rolePersisted = state.currentRole === 'rabotnik';
     window.treshkaServerRole = () => 'worker';
-    currentRole = 'rabotnik';
+    currentRole = 'admin';
     out.serverRoleOverridesCachedAdmin = applyAppState({ ...state, currentRole: 'admin' }) && currentRole === 'rabotnik';
     delete window.treshkaServerRole;
     currentRole = 'admin';
@@ -221,14 +223,10 @@ test('#5/#6 — server role overrides cached privileges; rabotnik cannot export 
     out.rabotnikNoPinNeeded = currentRole === 'rabotnik';
 
     currentRole = 'rabotnik';
-    requestRoleSwitch('admin');
-    out.pinSheetShown = document.getElementById('rolePinInput') !== null;
-    document.getElementById('rolePinInput').value = 'WRONG';
-    confirmRoleSwitch('admin');
-    out.wrongPinRejected = currentRole === 'rabotnik';
-    document.getElementById('rolePinInput').value = ROLE_PINS.admin;
-    confirmRoleSwitch('admin');
-    out.correctPinAccepted = currentRole === 'admin';
+    out.elevationRejected = requestRoleSwitch('admin') === false && currentRole === 'rabotnik';
+    out.pinSheetAbsent = document.getElementById('rolePinInput') === null;
+    out.legacyConfirmRejected = confirmRoleSwitch('admin') === false && currentRole === 'rabotnik';
+    out.noEmbeddedPin = Object.keys(ROLE_PINS).length === 0;
 
     currentRole = 'rabotnik';
     let toastMsg = '';
@@ -901,7 +899,7 @@ test('regression — applyAppState() is atomic: a malformed non-array field must
   await ctx.close();
 });
 
-test('regression — rabotnik can no longer freely reassign their own bound post without the admin PIN', async () => {
+test('regression — rabotnik can never reassign their bound post locally, including through the legacy PIN path', async () => {
   // Раньше <select id="postSwitchSelect"> менял currentUserPost НАПРЯМУЮ по
   // onchange — работник мог сам назначить себя на любой пост, полностью
   // обходя ограничение canSeeDoc()/isRabotnikRestrictedToPost().
@@ -911,27 +909,16 @@ test('regression — rabotnik can no longer freely reassign their own bound post
     currentUserPost = 'ТЭЧ';
     views.roles();
     const otherPost = posts.find((p) => p.name !== 'ТЭЧ').name;
-    requestPostSwitch(otherPost);
-    const postDuringPinPrompt = currentUserPost;
-    const sheetShown = !!document.querySelector('#postPinInput');
-    return { postDuringPinPrompt, sheetShown, otherPost };
+    const requestResult = requestPostSwitch(otherPost);
+    const postAfterRequest = currentUserPost;
+    const sheetAbsent = !document.querySelector('#postPinInput');
+    const confirmResult = confirmPostSwitch(otherPost);
+    return { requestResult, confirmResult, postAfterRequest, sheetAbsent, otherPost };
   });
-  assert.equal(r.sheetShown, true, 'requesting a post switch must show a PIN prompt, not apply immediately');
-  assert.equal(r.postDuringPinPrompt, 'ТЭЧ', 'currentUserPost must NOT change before the PIN is confirmed');
-
-  const wrong = await page.evaluate((otherPost) => {
-    confirmPostSwitch(otherPost);
-    return currentUserPost;
-  }, r.otherPost);
-  assert.equal(wrong, 'ТЭЧ', 'a missing/wrong PIN must not change the bound post');
-
-  const right = await page.evaluate((otherPost) => {
-    const inp = document.getElementById('postPinInput') || (() => { requestPostSwitch(otherPost); return document.getElementById('postPinInput'); })();
-    inp.value = ROLE_PINS.admin;
-    confirmPostSwitch(otherPost);
-    return currentUserPost;
-  }, r.otherPost);
-  assert.equal(right, r.otherPost, 'the correct admin PIN must allow the post reassignment to go through');
+  assert.equal(r.requestResult, false);
+  assert.equal(r.confirmResult, false);
+  assert.equal(r.sheetAbsent, true, 'the removed PIN flow must not be rendered');
+  assert.equal(r.postAfterRequest, 'ТЭЧ', 'only the server-side account assignment may change currentUserPost');
   await ctx.close();
 });
 
@@ -1467,6 +1454,99 @@ test('v1.3 — stock issue is atomic and rolls back every changed collection whe
   });
   assert.equal(r.ok, false);
   assert.deepEqual(r.after, r.before);
+  await ctx.close();
+});
+
+test('review c3db85a — rejected native remote save restores the pre-callback JavaScript state', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    const first = items[0];
+    const before = {
+      stock: first.stock,
+      docs: docs.length,
+      transfers: stockTransfers.length,
+    };
+    const incoming = JSON.parse(JSON.stringify(serializeAppState()));
+    incoming.items[0].stock = before.stock + 999;
+    incoming.docs = [];
+    incoming.stockTransfers = [];
+    let reported = '';
+    window.AndroidStorage = {
+      saveRemoteState: () => false,
+      reportRemoteStateRejected: (reason) => { reported = reason; },
+    };
+    const ok = window.onNativeRemoteState(JSON.stringify(incoming), 999);
+    return {
+      ok,
+      reported,
+      before,
+      after: {
+        stock: items[0].stock,
+        docs: docs.length,
+        transfers: stockTransfers.length,
+      },
+    };
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.reported, /локальные данные восстановлены/);
+  assert.deepEqual(r.after, r.before, 'a stale native callback must not leave WebView memory ahead of SQLite');
+  await ctx.close();
+});
+
+test('review c3db85a — privileged workflow guards reject direct calls and work-close rollback restores its document', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    const template = JSON.parse(JSON.stringify(docs.find((entry) => entry.kind === 'work')));
+    template.no = 'АВР-GUARD-ROLLBACK';
+    template.status = 'Ожидает приёмки на склад';
+    template.itemId = null;
+    template.materials = [{ id: '__missing_item__', q: 1 }];
+    docs.push(template);
+
+    currentRole = 'admin';
+    const deniedClose = performWorkClose(template) === false
+      && docs.find((entry) => entry.no === template.no)?.status === 'Ожидает приёмки на склад';
+
+    currentRole = 'kladovshik';
+    const failedClose = performWorkClose(template) === false;
+    const documentRolledBack = docs.find((entry) => entry.no === template.no)?.status === 'Ожидает приёмки на склад';
+
+    currentRole = 'rabotnik';
+    views.newDefekt();
+    const cardCount = items.length;
+    const docCount = docs.length;
+    document.getElementById('f_order').value = 'З-GUARD-CARD';
+    document.getElementById('f_item_name').value = 'Запрещённая карточка';
+    document.getElementById('f_create_card').checked = true;
+    document.getElementById('f_date').value = '26.07.2026';
+    document.getElementById('f_from').value = 'Тест';
+    document.getElementById('f_post').value = currentUserPost;
+    document.getElementById('f_callsign').value = 'Тест';
+    document.getElementById('f_fault').value = 'Тест';
+    document.getElementById('f_defects').value = 'Тест';
+    document.getElementById('f_verdict').value = 'Ремонтопригодно';
+    const deniedCard = submitDefekt() === false && items.length === cardCount && docs.length === docCount;
+
+    const actsBefore = inventoryActs.length;
+    cycleCount = null;
+    const deniedInventoryStart = startCycleCount() === false && cycleCount === null;
+    cycleCount = { counts: {} };
+    const deniedCount = setCount(items[0].id, '1') === false
+      && Object.keys(cycleCount.counts).length === 0;
+    const deniedInventoryFinish = finishCycleCount() === false && inventoryActs.length === actsBefore;
+    cycleCount = null;
+
+    return {
+      deniedClose,
+      failedClose,
+      documentRolledBack,
+      deniedCard,
+      deniedInventoryStart,
+      deniedCount,
+      deniedInventoryFinish,
+    };
+  });
+  for (const [name, value] of Object.entries(r)) assert.equal(value, true, `${name} must be enforced`);
   await ctx.close();
 });
 

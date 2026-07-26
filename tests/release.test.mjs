@@ -47,7 +47,9 @@ test("server release keeps the complete warehouse interface and prescribed posts
     assert.match(prototype, new RegExp(post));
   }
   assert.match(stateRoute, /warehouse_full_state/);
-  assert.match(stateRoute, /MAX_STATE_BYTES/);
+  assert.match(stateRoute, /MAX_STATE_BYTES = 1_500_000/);
+  assert.match(stateRoute, /stateEtag\(revision: number, user: SessionUser\)/);
+  assert.match(stateRoute, /status: 507/);
   assert.match(stateRoute, /expectedRevision/);
   assert.match(stateRoute, /currentRevision/);
 });
@@ -78,6 +80,18 @@ test("server accounts support permanent-password creation and protected deletion
   assert.doesNotMatch(bridge, /fetch\("\/api\/auth\/status"/);
 });
 
+test("clean-checkout CI typechecks assets and compiles the Android application", async () => {
+  const [workflow, assetTypes, eslintConfig] = await Promise.all([
+    text(".github/workflows/ci.yml"),
+    text("types/assets.d.ts"),
+    text("eslint.config.mjs"),
+  ]);
+  assert.match(assetTypes, /declare module "\*\.css"/);
+  assert.match(workflow, /android:\s*[\s\S]*\.\/gradlew testDebugUnitTest/);
+  assert.match(workflow, /npm ci[\s\S]*npm run db:check[\s\S]*npm test/);
+  assert.doesNotMatch(eslintConfig, /"build\/\*\*"/);
+});
+
 test("security hardening keeps state writes privileged and recovery throttling global", async () => {
   const [stateRoute, recoveryRoute, auth, productsRoute, migration] = await Promise.all([
     text("app/api/state/route.ts"),
@@ -98,7 +112,8 @@ test("security hardening keeps state writes privileged and recovery throttling g
   assert.match(auth, /failures = login_throttle\.failures \+ 1/);
   assert.match(auth, /DELETE FROM login_throttle WHERE login = \? AND last_attempt_at = \?/);
   assert.match(auth, /fetchSite !== "same-origin" && fetchSite !== "none"/);
-  assert.match(auth, /MAX_REJECTED_BODY_DRAIN_BYTES = 4 \* 1024 \* 1024 \+ 64 \* 1024/);
+  assert.match(auth, /MAX_REJECTED_BODY_DRAIN_BYTES = 1_500_000 \+ 64 \* 1024/);
+  assert.match(auth, /RETURNING blocked_until/);
   assert.doesNotMatch(`${auth}\n${stateRoute}\n${productsRoute}`, /CREATE TABLE IF NOT EXISTS/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS `warehouse_full_state`/);
 });
@@ -137,13 +152,15 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.match(browserSync, /sync\.conflict \|\| !canUploadState\(\)/);
   assert.match(androidStore, /SyncTokenVault/);
   assert.match(androidStore, /AndroidKeyStore/);
-  assert.match(androidStore, /DB_VERSION = 6/);
+  assert.match(androidStore, /DB_VERSION = 7/);
   assert.match(androidStore, /base_revision INTEGER NOT NULL DEFAULT 0/);
   assert.match(androidStore, /conflict INTEGER NOT NULL DEFAULT 0/);
   assert.match(androidStore, /fun claimNextPending\(\)/);
   assert.match(androidStore, /arrayOf\("mutation_id", "payload", "schema_version", "attempts", "base_revision"\)/);
   assert.match(androidStore, /UPDATE sync_outbox SET attempts=\? WHERE mutation_id=\? AND conflict=0/);
   assert.doesNotMatch(androidStore, /SET attempts=\?, base_revision=\?/);
+  assert.match(androidStore, /UPDATE sync_outbox SET base_revision=\? WHERE conflict=0 AND base_revision=\?/);
+  assert.match(androidStore, /WHERE conflict=0 AND base_revision=0/);
   assert.match(androidStore, /db\.delete\("sync_outbox", "attempts = 0 AND conflict = 0"/);
   assert.doesNotMatch(androidStore, /fun markMutationAttempted\(/);
   assert.match(androidSync, /store\.markMutationConflicted\(pending\.mutationId, message\)/);
@@ -171,11 +188,22 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.match(androidSync, /\/v1\/auth\/status/);
   assert.match(androidSync, /Сервер входа не вернул обязательное поле user\.role/);
   assert.match(androidSync, /store\.updateServerRole\(role\)/);
+  assert.match(androidSync, /SyncPolicy\.normalizeServerRole\(rawRole\)/);
+  assert.match(androidSync, /!SyncPolicy\.isKnownServerRole\(rawRole\)/);
   assert.match(androidSync, /native privileges reduced to worker/);
-  assert.match(androidStore, /server_revision=MAX\(server_revision, \?\)/);
+  assert.equal(
+    (androidStore.match(/server_revision=MAX\(server_revision, \?\)/g) ?? []).length,
+    4,
+    "every one of the four revision writes must remain monotonic",
+  );
+  assert.doesNotMatch(androidStore, /SET server_revision=\?/);
   assert.doesNotMatch(androidStore, /SET server_role=\?, last_error=NULL/);
   assert.match(browserSync, /if \(roleChanged && typeof window\.onTreshkaServerRoleChanged/);
-  assert.match(browserSync, /installServerPrivilegeGuards\(\)/);
+  assert.equal(
+    (browserSync.match(/^\s*installServerPrivilegeGuards\(\);\s*$/gm) ?? []).length,
+    2,
+    "privilege guards must run both at script start and after account controls are installed",
+  );
   assert.match(serverContract, /not implemented in this repository/);
   assert.match(androidSync, /store\.clearServerRole\("Сессия сервера истекла/);
   assert.match(androidStore, /"serverRoleUnknown"/);
@@ -187,14 +215,22 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.match(androidSync, /store\.requeueConflictedMutation\(id, authoritative\.second\)/);
   assert.match(androidSync, /ConflictRequeueResult\.SERVER_ADVANCED/);
   assert.match(androidSync, /pending\.baseRevision/);
+  assert.match(androidSync, /markMutationApplied\(pending\.mutationId, pending\.baseRevision, revision\)/);
+  assert.match(androidSync, /rerunRequested\.set\(true\)/);
+  assert.match(androidSync, /if \(rerunRequested\.getAndSet\(false\)\) syncNow\(\)/);
+  assert.match(androidSync, /store\.pendingRemoteSnapshot\(\)\?\.let \{ return it \}/);
+  assert.match(androidSync, /user\.isNull\("role"\)/);
   assert.doesNotMatch(androidSync, /store\.updateServerRevision/);
   assert.match(androidStore, /remoteRevision > baseRevision/);
   assert.match(androidStore, /db\.delete\("sync_remote_pending", "id=1"/);
-  assert.match(androidSync, /val retryable = response\.code == 408/);
+  assert.match(androidSync, /val retryable = SyncPolicy\.isRetryableHttp\(response\.code\)/);
   assert.match(androidSync, /store\.markMutationConflicted\(pending\.mutationId, message\)/);
   assert.doesNotMatch(androidSync, /scheduleRetry\(pending\.attempts, pending\.mutationId\)/);
   assert.doesNotMatch(androidStore, /releaseConflictedMutations/);
   assert.match(browserSync, /adoptServerUser\(data\.user\)/);
+  assert.match(browserSync, /lastServerStateJson/);
+  assert.doesNotMatch(browserSync, /lastServerState:\s*null/);
+  assert.match(browserSync, /sync\.lastServerStateJson = payload/);
   assert.match(browserSync, /Локальное изменение отменено/);
   assert.match(activity, /uri\.host != APP_HOST/);
   assert.match(manifest, /android:allowBackup="false"/);
