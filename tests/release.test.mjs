@@ -103,12 +103,13 @@ test("clean-checkout CI typechecks assets and compiles the Android application",
 });
 
 test("security hardening keeps state writes privileged and recovery throttling global", async () => {
-  const [stateRoute, recoveryRoute, auth, productsRoute, migration] = await Promise.all([
+  const [stateRoute, recoveryRoute, auth, productsRoute, migration, http] = await Promise.all([
     text("app/api/state/route.ts"),
     text("app/api/auth/recover-owner/route.ts"),
     text("lib/auth.ts"),
     text("app/api/products/route.ts"),
     text("drizzle/0003_warehouse_full_state.sql"),
+    text("lib/http.ts"),
   ]);
   assert.match(stateRoute, /requireUser\(request, \["owner", "admin", "storekeeper"\]\)/);
   assert.match(stateRoute, /warehouseDeletionPolicy\(previous, state, auth\.user\.role\)/);
@@ -129,6 +130,7 @@ test("security hardening keeps state writes privileged and recovery throttling g
   assert.match(auth, /fetchSite !== "same-origin" && fetchSite !== "none"/);
   assert.match(auth, /MAX_REJECTED_BODY_DRAIN_BYTES = 1_500_000 \+ 64 \* 1024/);
   assert.match(auth, /RETURNING failures, blocked_until/);
+  assert.match(http, /await drainReaderBounded\(reader\);\s*throw new RequestBodyTooLargeError\(\)/);
   assert.match(await text("app/api/auth/login/route.ts"), /DUMMY_PASSWORD_HASH/);
   assert.doesNotMatch(`${auth}\n${stateRoute}\n${productsRoute}`, /CREATE TABLE IF NOT EXISTS/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS `warehouse_full_state`/);
@@ -589,9 +591,10 @@ test("destructive recovery points survive thinning and the ordinary row cap", ()
 });
 
 test("inventory archive stays within D1 row limits and allocates numbers atomically", async () => {
-  const [inventoryRoute, stateRoute, browserSync] = await Promise.all([
+  const [inventoryRoute, stateRoute, historyRoute, browserSync] = await Promise.all([
     text("app/api/inventory/acts/route.ts"),
     text("app/api/state/route.ts"),
+    text("app/api/state/history/route.ts"),
     text("public/prototype-server.js"),
   ]);
   assert.match(inventoryRoute, /MAX_ACT_BYTES = 1_800_000/);
@@ -606,6 +609,10 @@ test("inventory archive stays within D1 row limits and allocates numbers atomica
   assert.match(stateRoute, /header_json AS headerJson/);
   assert.match(stateRoute, /nextInventoryActHeaders\.get\(actId\) !== headerJson/);
   assert.match(stateRoute, /previousItemIds\.length === 0 && Number\(productCount\?\.count/);
+  assert.match(stateRoute, /state\.inventoryActs\.some\(\(value\) => !stateRecord\(value\)\)/);
+  assert.match(stateRoute, /inventory_entry\.type = 'object'/);
+  assert.match(historyRoute, /inventory_entry\.type = 'object'/);
+  assert.match(historyRoute, /if \(!auth\.user\) \{\s*return Response\.json/);
   assert.match(stateRoute, /state_history_mutation_rejected/);
   assert.match(browserSync, /data\.terminal === true/);
   assert.match(browserSync, /recoverPendingInventoryActs/);

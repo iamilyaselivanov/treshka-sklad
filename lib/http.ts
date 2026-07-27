@@ -51,9 +51,10 @@ export async function readJsonObject(
       if (!reader) return null;
       const declaredLength = Number(request.headers.get("content-length"));
       if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
-        // Reject a declared oversized body before reading it. Cloudflare's
-        // request proxy owns the transport and can discard the body without
-        // making this Worker spend CPU/time draining several megabytes.
+        // Workerd must see the body consumed before the 413 response or it may
+        // tear down the keep-alive connection. Bound both bytes and time so a
+        // dishonest/slow sender cannot hold a Worker indefinitely.
+        await drainReaderBounded(reader);
         throw new RequestBodyTooLargeError();
       }
       const decoder = new TextDecoder();

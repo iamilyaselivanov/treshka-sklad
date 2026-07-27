@@ -118,6 +118,9 @@ export const warehouseStateInventoryActs = sqliteTable(
   {
     stateKey: text("state_key").notNull(),
     actId: text("act_id").notNull(),
+    // Exact compact JSON is an inexpensive change detector, not the final
+    // authorization decision. Different key order only selects the safe,
+    // semantic full-policy comparison in app/api/state/route.ts.
     headerJson: text("header_json").notNull().default(""),
   },
   (table) => [

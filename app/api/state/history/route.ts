@@ -30,7 +30,10 @@ type RevisionRow = {
 
 export async function GET(request: Request) {
   const auth = await requireUser(request, ["owner", "admin"]);
-  if (auth.response || !auth.user) return auth.response;
+  if (auth.response) return auth.response;
+  if (!auth.user) {
+    return Response.json({ error: "Требуется авторизация" }, { status: 401 });
+  }
   const requestedRevision = new URL(request.url).searchParams.get("revision");
   if (requestedRevision != null) {
     const revision = Number(requestedRevision);
@@ -93,7 +96,10 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   const auth = await requireUser(request, ["owner"]);
-  if (auth.response || !auth.user) return auth.response;
+  if (auth.response) return auth.response;
+  if (!auth.user) {
+    return Response.json({ error: "Требуется авторизация" }, { status: 401 });
+  }
   let body: Record<string, unknown> | null;
   try {
     body = await readJsonObject(request, 4_096);
@@ -199,13 +205,14 @@ export async function POST(request: Request) {
       env.DB.prepare(
         `INSERT INTO warehouse_state_inventory_acts (state_key, act_id, header_json)
          SELECT warehouse_full_state.state_key,
-                TRIM(CAST(json_extract(value, '$.id') AS TEXT)),
-                json(value)
+                TRIM(CAST(json_extract(inventory_entry.value, '$.id') AS TEXT)),
+                json(inventory_entry.value)
          FROM warehouse_full_state,
-              json_each(warehouse_full_state.payload, '$.inventoryActs')
+              json_each(warehouse_full_state.payload, '$.inventoryActs') AS inventory_entry
          WHERE warehouse_full_state.state_key = 'main'
            AND warehouse_full_state.revision = ?
-           AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''
+           AND inventory_entry.type = 'object'
+           AND TRIM(CAST(json_extract(inventory_entry.value, '$.id') AS TEXT)) <> ''
          ON CONFLICT(state_key, act_id) DO UPDATE
          SET header_json = excluded.header_json`,
       ).bind(revision),

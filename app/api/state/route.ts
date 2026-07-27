@@ -123,6 +123,12 @@ function normalizedState(value: unknown): WarehouseState | null {
   for (const key of OPTIONAL_COLLECTIONS) {
     if (state[key] != null && (!Array.isArray(state[key]) || state[key].length > MAX_COLLECTION_ITEMS)) return null;
   }
+  if (
+    Array.isArray(state.inventoryActs)
+    && state.inventoryActs.some((value) => !stateRecord(value))
+  ) {
+    return null;
+  }
   if (!validCycleCountDraft(state.cycleCountDraft) || !validCycleCountDrafts(state.cycleCountDrafts)) {
     return null;
   }
@@ -456,6 +462,11 @@ export async function PUT(request: Request) {
       || (previousItemIds.length === 0 && Number(productCount?.count ?? 0) > 0)
     );
     const needsHistoryPolicyCheck = auth.user.role !== "owner";
+    // header_json is an exact compact JSON representation. A harmless key
+    // reordering can differ byte-for-byte and enter the safe full-policy path,
+    // but only semantic history checks decide whether the write is rejected.
+    // A legacy empty header from migration 0013 likewise takes this slow path
+    // once and is refreshed by the successful index upsert below.
     const previousInventoryActHeaders = new Map(
       (indexedActs.results ?? []).map((row) => [row.actId, row.headerJson]),
     );
@@ -639,13 +650,14 @@ export async function PUT(request: Request) {
       env.DB.prepare(
         `INSERT INTO warehouse_state_inventory_acts (state_key, act_id, header_json)
          SELECT warehouse_full_state.state_key,
-                TRIM(CAST(json_extract(value, '$.id') AS TEXT)),
-                json(value)
+                TRIM(CAST(json_extract(inventory_entry.value, '$.id') AS TEXT)),
+                json(inventory_entry.value)
          FROM warehouse_full_state,
-              json_each(warehouse_full_state.payload, '$.inventoryActs')
+              json_each(warehouse_full_state.payload, '$.inventoryActs') AS inventory_entry
          WHERE warehouse_full_state.state_key = 'main'
            AND warehouse_full_state.revision = ?
-           AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''
+           AND inventory_entry.type = 'object'
+           AND TRIM(CAST(json_extract(inventory_entry.value, '$.id') AS TEXT)) <> ''
          ON CONFLICT(state_key, act_id) DO UPDATE
          SET header_json = excluded.header_json`,
       ).bind(revision),
