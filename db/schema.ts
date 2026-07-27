@@ -111,6 +111,30 @@ export const warehouseStateItems = sqliteTable(
   ],
 );
 
+export const inventoryActCounters = sqliteTable("inventory_act_counters", {
+  scope: text("scope").primaryKey(),
+  value: integer("value").notNull().default(0),
+});
+
+export const inventoryActArchive = sqliteTable(
+  "inventory_act_archive",
+  {
+    id: text("id").primaryKey(),
+    number: text("number").notNull().unique(),
+    payload: text("payload").notNull(),
+    startedAt: text("started_at").notNull(),
+    finishedAt: text("finished_at").notNull(),
+    actorUserId: text("actor_user_id").notNull(),
+    actorCallsign: text("actor_callsign").notNull(),
+    actorRole: text("actor_role").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    index("inventory_act_archive_finished_idx").on(table.finishedAt),
+    index("inventory_act_archive_actor_idx").on(table.actorUserId),
+  ],
+);
+
 export const pushDevices = sqliteTable(
   "push_devices",
   {

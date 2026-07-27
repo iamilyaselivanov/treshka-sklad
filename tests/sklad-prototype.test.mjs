@@ -1330,23 +1330,147 @@ test('v1.3 — only an administrator can reassign a post responsible person', as
 
 test('review round — inventory completion creates and displays a persistent inventory act', async () => {
   const { ctx, page } = await newPage();
-  const r = await page.evaluate(() => {
+  const r = await page.evaluate(async () => {
     currentRole = 'admin';
     views.inventory();
     startCycleCount();
     items.forEach((i) => setCount(i.id, String(i.stock)));
-    finishCycleCount();
+    const completed = await finishCycleCount();
     return {
+      completed,
       cycleFinished: cycleCount === null,
       acts: inventoryActs.length,
       no: inventoryActs[0]?.no,
       rendered: document.getElementById('content').textContent.includes(inventoryActs[0]?.no || 'NO-ACT'),
+      allLinesArchived: Object.values(inventoryActDetailCache)[0]?.lines?.length === items.length,
+      summaryIsCompact: !Array.isArray(inventoryActs[0]?.lines),
     };
   });
+  assert.equal(r.completed, true);
   assert.equal(r.cycleFinished, true);
   assert.equal(r.acts, 1);
   assert.match(r.no, /^ИНВ-/);
   assert.equal(r.rendered, true);
+  assert.equal(r.allLinesArchived, true);
+  assert.equal(r.summaryIsCompact, true);
+  await ctx.close();
+});
+
+test('inventory — storekeeper draft persists, bulk fill preserves counted rows and QR warns before replacing a repeat', async () => {
+  const { ctx, page, pageErrors } = await newPage();
+  const beforeReload = await page.evaluate(() => {
+    currentRole = 'kladovshik';
+    const started = startCycleCount();
+    const first = items[0];
+    const firstValue = Number(first.stock) + 2;
+    setCount(first.id, String(firstValue));
+    requestConfirmRemaining();
+    runInventoryConfirm();
+    const firstAfterBulk = cycleCount.counts[first.id];
+    const allFilled = cycleCount.itemIds.every((id) => cycleCount.counts[id] !== undefined);
+    const serializedHasDraft = serializeAppState().cycleCountDraft?.id === cycleCount.id;
+
+    _pendingScanTarget = 'count';
+    onNativeScanResult(`SKLAD-ITEM:${first.sku}`);
+    const repeatWarning = document.getElementById('sheetLayer').textContent.includes('уже считалась');
+    document.getElementById('inventoryScanQty').value = String(firstValue + 1);
+    applyCountFromSheet(first.id);
+    const confirmationShown = document.getElementById('sheetLayer').textContent.includes('Повторный пересчёт');
+    runInventoryConfirm();
+    return {
+      started,
+      id: cycleCount.id,
+      firstAfterBulk,
+      firstValue,
+      allFilled,
+      serializedHasDraft,
+      repeatWarning,
+      confirmationShown,
+      replacedValue: cycleCount.counts[first.id],
+      localDraft: JSON.parse(localStorage.getItem(CYCLE_COUNT_STORAGE_KEY) || 'null'),
+    };
+  });
+  assert.equal(beforeReload.started, true);
+  assert.equal(beforeReload.firstAfterBulk, beforeReload.firstValue, 'bulk confirmation must not overwrite an already counted row');
+  assert.equal(beforeReload.allFilled, true);
+  assert.equal(beforeReload.serializedHasDraft, true);
+  assert.equal(beforeReload.repeatWarning, true);
+  assert.equal(beforeReload.confirmationShown, true);
+  assert.equal(beforeReload.replacedValue, beforeReload.firstValue + 1);
+  assert.equal(beforeReload.localDraft.id, beforeReload.id);
+  assert.equal(beforeReload.localDraft.counts[beforeReload.localDraft.itemIds[0]], beforeReload.firstValue + 1);
+
+  await page.reload();
+  await page.waitForTimeout(250);
+  const afterReload = await page.evaluate(() => ({
+    id: cycleCount?.id,
+    needsResume: cycleCountNeedsResume,
+    count: cycleCount?.counts?.[cycleCount.itemIds[0]],
+  }));
+  assert.equal(afterReload.id, beforeReload.id);
+  assert.equal(afterReload.needsResume, true);
+  assert.equal(afterReload.count, beforeReload.firstValue + 1);
+  assert.equal(pageErrors.length, 0, `page errors: ${pageErrors.join('; ')}`);
+  await ctx.close();
+});
+
+test('inventory — completed act exports two exact sheets and prints every warehouse line with actor and scope', async () => {
+  const { ctx, page, pageErrors } = await newPage(() => {
+    window.__savedFiles = [];
+    window.__printCalls = [];
+    window.AndroidFiles = {
+      saveExportedFile: (base64, filename, mime) => {
+        window.__savedFiles.push({ base64, filename, mime });
+        return true;
+      },
+    };
+    window.AndroidPrint = {
+      printHtml: (html, job, format) => window.__printCalls.push({ html, job, format }),
+    };
+  });
+  const result = await page.evaluate(async () => {
+    currentRole = 'admin';
+    const originalXlsxDownload = xlsxDownload;
+    window.__inventorySheets = null;
+    xlsxDownload = (filename, sheets) => {
+      window.__inventorySheets = { filename, sheets: JSON.parse(JSON.stringify(sheets)) };
+      return originalXlsxDownload(filename, sheets);
+    };
+    startCycleCount();
+    items.forEach((entry, index) => setCount(entry.id, String(Number(entry.stock) + (index === 0 ? 1 : 0))));
+    const completed = await finishCycleCount();
+    const exported = await exportInventoryActExcel(0);
+    const printed = await printInventoryAct(0);
+    const detail = inventoryActDetailCache[inventoryActs[0].id];
+    return {
+      completed,
+      exported,
+      printed,
+      sheets: window.__inventorySheets,
+      files: window.__savedFiles.map(({ filename, mime }) => ({ filename, mime })),
+      print: window.__printCalls[0],
+      itemCount: items.length,
+      lineCount: detail.lines.length,
+      actor: detail.actor,
+      summaryHasLines: Array.isArray(inventoryActs[0].lines),
+      adjusted: items[0].stock === detail.lines[0].counted,
+    };
+  });
+  assert.equal(result.completed, true);
+  assert.equal(result.exported, true);
+  assert.equal(result.printed, true);
+  assert.equal(result.summaryHasLines, false, 'shared snapshot must retain only the compact act header');
+  assert.equal(result.lineCount, result.itemCount);
+  assert.equal(result.adjusted, true);
+  assert.equal(result.actor.role, 'admin');
+  assert.deepEqual(result.sheets.sheets.map((sheet) => sheet.name), ['Акт', 'Позиции']);
+  assert.equal(result.sheets.sheets[1].rows.length, result.itemCount + 1);
+  assert.match(result.files[0].filename, /^ИНВ-.*_inventarizatsiya\.xlsx$/);
+  assert.equal(result.print.format, 'a4');
+  assert.match(result.print.html, /только остатки основного склада/i);
+  assert.match(result.print.html, /Проводил:/);
+  assert.ok(result.print.html.includes(result.actor.name));
+  assert.equal(pageErrors.length, 0, `page errors: ${pageErrors.join('; ')}`);
   await ctx.close();
 });
 
@@ -1843,7 +1967,7 @@ test('review c3db85a — rejected native remote save restores the pre-callback J
 
 test('review c3db85a — privileged workflow guards reject direct calls and work-close rollback restores its document', async () => {
   const { ctx, page } = await newPage();
-  const r = await page.evaluate(() => {
+  const r = await page.evaluate(async () => {
     const source = JSON.parse(JSON.stringify(docs.find((entry) => entry.kind === 'work')));
     const valid = {
       ...source,
@@ -1898,7 +2022,7 @@ test('review c3db85a — privileged workflow guards reject direct calls and work
     cycleCount = { counts: {} };
     const deniedCount = setCount(items[0].id, '1') === false
       && Object.keys(cycleCount.counts).length === 0;
-    const deniedInventoryFinish = finishCycleCount() === false && inventoryActs.length === actsBefore;
+    const deniedInventoryFinish = await finishCycleCount() === false && inventoryActs.length === actsBefore;
     cycleCount = null;
 
     return {

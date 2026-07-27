@@ -45,6 +45,13 @@
   // source for the server-connected application.
   currentRole = "rabotnik";
   window.treshkaServerRole = () => sync.user?.role || null;
+  window.treshkaServerUser = () => sync.user ? {
+    id: sync.user.id,
+    login: sync.user.login,
+    name: sync.user.callsign,
+    role: sync.user.role,
+    assignment: sync.user.assignment || "",
+  } : null;
   installServerPrivilegeGuards();
   if (typeof updateNavForRole === "function") updateNavForRole();
 
@@ -815,6 +822,35 @@
     list: () => stateHistoryRequest(),
     get: (revision) => stateHistoryRequest("?revision=" + encodeURIComponent(Number(revision))),
     restore: performStateRestore,
+  };
+
+  async function inventoryActRequest(path = "", init = {}) {
+    const response = await fetchWithTimeout("/api/inventory/acts" + path, {
+      cache: "no-store",
+      ...init,
+    }, 30_000);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(data.error || "Не удалось сохранить акт инвентаризации");
+      error.status = response.status;
+      throw error;
+    }
+    return data;
+  }
+
+  window.treshkaInventoryActs = {
+    create: async (act) => {
+      const data = await inventoryActRequest("", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(act),
+      });
+      return data.act;
+    },
+    get: async (id) => {
+      const data = await inventoryActRequest("?id=" + encodeURIComponent(String(id || "")));
+      return data.act;
+    },
   };
 
   window.treshkaServerSync = {

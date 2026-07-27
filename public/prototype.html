@@ -3107,6 +3107,7 @@ function serializeAppState(){
     itemSeq, categoriesList, componentSubcats, currentRole, currentUserPost, currentAccountId,
     accountSeq, notificationSeq, documentSeq, externalIssueSeq, accounts, notifications,
     items, posts, docs, extIssues, stockTransfers, inventoryActs, auditLog,
+    cycleCountDraft: cycleCountServerDraft,
   };
 }
 
@@ -3198,6 +3199,13 @@ function applyAppState(saved){
     if(!Array.isArray(stockTransfersNext)) return false;
     const inventoryActsNext = s.inventoryActs!=null ? s.inventoryActs : [];
     if(!Array.isArray(inventoryActsNext)) return false;
+    const remoteCycleDraft=s.cycleCountDraft==null?null:s.cycleCountDraft;
+    if(remoteCycleDraft&&!validCycleCountDraft(remoteCycleDraft))return false;
+    const localCycleDraft=loadCycleCountLocal();
+    const cycleCountNext=localCycleDraft&&(!remoteCycleDraft
+      || Date.parse(localCycleDraft.updatedAt||localCycleDraft.startedAt)>=Date.parse(remoteCycleDraft.updatedAt||remoteCycleDraft.startedAt))
+      ? localCycleDraft
+      : remoteCycleDraft;
     const accountsNext=s.accounts!=null?s.accounts:[];
     const notificationsNext=s.notifications!=null?s.notifications:[];
     if(!Array.isArray(accountsNext)||!Array.isArray(notificationsNext)) return false;
@@ -3238,6 +3246,10 @@ function applyAppState(saved){
     notificationSeq=typeof s.notificationSeq==='number'?s.notificationSeq:0;
     documentSeq=documentSeqNext;
     externalIssueSeq=externalIssueSeqNext;
+    cycleCount=cycleCountNext?deepClone(cycleCountNext):null;
+    cycleCountServerDraft=remoteCycleDraft?deepClone(remoteCycleDraft):null;
+    cycleCountNeedsResume=!!cycleCount;
+    saveCycleCountLocal();
     return true;
   }catch(e){
     console.error('applyAppState: сохранённые данные повреждены, in-memory демо-данные НЕ затёрты:', e);
@@ -3392,7 +3404,75 @@ function loadAppStateOnStart(){
 }
 
 /* ================= ИНВЕНТАРИЗАЦИЯ ================= */
+const CYCLE_COUNT_STORAGE_KEY='treshka.cycleCount.v1';
+const INVENTORY_ACT_CACHE_KEY='treshka.inventoryActs.v1';
 let cycleCount = null;
+let cycleCountServerDraft = null;
+let cycleCountNeedsResume = false;
+let inventoryListMode = 'pending';
+let _inventoryConfirmAction = null;
+let inventoryActDetailCache = {};
+try{
+  const cached=JSON.parse(localStorage.getItem(INVENTORY_ACT_CACHE_KEY)||'{}');
+  if(cached&&typeof cached==='object'&&!Array.isArray(cached))inventoryActDetailCache=cached;
+}catch(e){console.warn('Локальный кэш актов инвентаризации повреждён',e);}
+function validCycleCountDraft(draft){
+  if(!draft||typeof draft!=='object'||Array.isArray(draft)
+    ||typeof draft.id!=='string'||!draft.id
+    ||!Number.isFinite(Date.parse(draft.startedAt||''))
+    ||!draft.actor||typeof draft.actor!=='object'||Array.isArray(draft.actor)
+    ||!String(draft.actor.id||draft.actor.login||'').trim()||!String(draft.actor.role||'').trim()
+    ||!Array.isArray(draft.itemIds)||draft.itemIds.length>50_000
+    ||!draft.books||typeof draft.books!=='object'||Array.isArray(draft.books)
+    ||!draft.counts||typeof draft.counts!=='object'||Array.isArray(draft.counts))return false;
+  const ids=draft.itemIds.map(value=>String(value||'').trim());
+  const idSet=new Set(ids);
+  if(ids.some(id=>!id)||idSet.size!==ids.length||Number(draft.positions)!==ids.length)return false;
+  if(Object.keys(draft.books).length!==ids.length
+    ||!ids.every(id=>Number.isSafeInteger(Number(draft.books[id]))&&Number(draft.books[id])>=0))return false;
+  return Object.entries(draft.counts).every(([id,value])=>
+    idSet.has(id)&&Number.isSafeInteger(Number(value))&&Number(value)>=0);
+}
+function saveCycleCountLocal(){
+  try{
+    if(cycleCount)localStorage.setItem(CYCLE_COUNT_STORAGE_KEY,JSON.stringify(cycleCount));
+    else localStorage.removeItem(CYCLE_COUNT_STORAGE_KEY);
+  }catch(e){console.warn('Не удалось локально сохранить черновик инвентаризации',e);}
+}
+function loadCycleCountLocal(){
+  try{
+    const parsed=JSON.parse(localStorage.getItem(CYCLE_COUNT_STORAGE_KEY)||'null');
+    return validCycleCountDraft(parsed)?parsed:null;
+  }catch{return null;}
+}
+function stageCycleCountForServer(){
+  if(cycleCount)cycleCount.serverSavedAt=new Date().toISOString();
+  cycleCountServerDraft=cycleCount?deepClone(cycleCount):null;
+  flushSave();
+  return true;
+}
+function cacheInventoryAct(act){
+  if(!act?.id)return;
+  inventoryActDetailCache[act.id]=act;
+  const entries=Object.values(inventoryActDetailCache)
+    .sort((a,b)=>Date.parse(b.finishedAt||0)-Date.parse(a.finishedAt||0))
+    .slice(0,25);
+  inventoryActDetailCache=Object.fromEntries(entries.map(value=>[value.id,value]));
+  try{localStorage.setItem(INVENTORY_ACT_CACHE_KEY,JSON.stringify(inventoryActDetailCache));}catch(e){console.warn('Не удалось закэшировать акт',e);}
+}
+async function inventoryActDetail(summary){
+  if(!summary)return null;
+  if(Array.isArray(summary.lines))return summary;
+  if(summary.id&&inventoryActDetailCache[summary.id])return inventoryActDetailCache[summary.id];
+  const bridge=window.treshkaInventoryActs;
+  if(bridge&&typeof bridge.get==='function'){
+    const act=await bridge.get(summary.id);
+    cacheInventoryAct(act);
+    return act;
+  }
+  return {...summary,lines:Array.isArray(summary.diffs)?summary.diffs:[]};
+}
+setInterval(()=>{if(cycleCount)stageCycleCountForServer();},30_000);
 
 /* ================= НАВИГАЦИЯ ================= */
 const stack = [];
@@ -3432,6 +3512,21 @@ function canAdminister(){
 }
 function canManageCatalog(){ return canAdminister() || currentRole==='kladovshik'; }
 function canDeleteCatalogItem(){ return canAdminister(); }
+function canConductInventory(){
+  const hasServerRoleProvider=typeof window!=='undefined'&&typeof window.treshkaServerRole==='function';
+  if(hasServerRoleProvider)return ['owner','admin','storekeeper'].includes(serverActorRole());
+  return currentRole==='admin'||currentRole==='kladovshik';
+}
+function inventoryActor(){
+  try{
+    if(typeof window.treshkaServerUser==='function'){
+      const user=window.treshkaServerUser();
+      return user&&user.id?{id:user.id,login:user.login||'',name:user.name||user.login||'',role:user.role||''}:null;
+    }
+  }catch(e){console.warn('Не удалось получить серверного пользователя',e);}
+  const account=accounts.find(a=>a.id===currentAccountId);
+  return {id:account?.id||'offline-demo',login:account?.login||'offline-demo',name:account?.callsign||account?.login||ROLES[currentRole].label,role:currentRole};
+}
 const item = id => items.find(i=>i.id===id);
 const fmtQ = (i,q) => `${q} ${esc(i.unit)}`;
 
@@ -3530,9 +3625,10 @@ function toast(msg){
    Вне Android-обёртки (предпросмотр в обычном браузере) показывается прежний
    демо-экран — камеру браузера сознательно не используем, чтобы не давать
    иллюзию рабочего сканирования там, где реального моста нет. */
-let _pendingScanTarget = null; // 'fab' | 'defekt' — куда вернуть результат сканирования
+let _pendingScanTarget = null; // 'fab' | 'defekt' | 'count' — куда вернуть результат сканирования
 
 function startNativeScan(target){
+  if(target==='count'&&cycleCount)saveCycleCountLocal();
   _pendingScanTarget = target;
   if(window.AndroidScanner && typeof window.AndroidScanner.requestScan === 'function'){
     const layer=$('sheetLayer');
@@ -3555,7 +3651,12 @@ function onNativeScanResult(rawValue){
   const m = /^SKLAD-ITEM:(.+)$/.exec(String(rawValue||''));
   const code = m ? m[1] : null;
   const it = code ? items.find(x=>x.sku===code || x.id===code) : null;
-  if(target==='defekt'){
+  if(target==='count'){
+    if(!cycleCount){toast('⚠ Черновик инвентаризации не найден');return;}
+    if(!it){toast('⚠ QR-код не распознан как карточка склада');return;}
+    inventoryScanFeedback();
+    openCountSheet(it.id);
+  } else if(target==='defekt'){
     if(it){ if($('f_itemid')) $('f_itemid').value = it.id; if(typeof onDefektItemChange==='function') onDefektItemChange(); if(typeof checkDefekt==='function') checkDefekt(); toast('📷 QR распознан: '+it.name); }
     else toast('⚠ QR-код не привязан к карточке склада');
   } else {
@@ -4053,11 +4154,11 @@ more(){
         <div style="color:var(--muted)">›</div>
       </div>
     </div>
-    <div class="card" onclick="${currentRole==='admin'?'render({fn:views.inventory})':'toast(\'Доступно только администратору\')'}">
+    <div class="card" onclick="${canConductInventory()?'render({fn:views.inventory})':'toast(\'Доступно владельцу, администратору или кладовщику\')'}">
       <div class="row">
         <div class="icbox">🔢</div>
         <div class="grow"><div class="t">Инвентаризация</div><div class="s">Пересчёт остатков сканером, акт расхождений</div></div>
-        <div style="color:var(--muted)">${currentRole==='admin'?'›':'🔒'}</div>
+        <div style="color:var(--muted)">${canConductInventory()?'›':'🔒'}</div>
       </div>
     </div>
     <div class="card" onclick="render({fn:views.audit})">
@@ -4123,31 +4224,59 @@ audit(){
 
 inventory(){
   setHdr('Инвентаризация', cycleCount?'Идёт пересчёт':'Сверка факта с базой', true, false);
+  if(!canConductInventory()){
+    $('content').innerHTML='<div class="progress-note bad">Проводить инвентаризацию может только владелец, администратор или кладовщик.</div>';
+    return;
+  }
   if(!cycleCount){
     $('content').innerHTML = `
-      <div class="progress-note">Инвентаризация фиксирует фактический остаток по каждой позиции (сканированием QR или вручную) и сравнивает с учётными данными. Расхождения формируют акт.</div>
+      <div class="progress-note"><b>Пересчёт основного склада.</b> Остатки на постах и выданное на сторону не проверяются. Каждая позиция фиксируется в итоговом акте, включая совпавшие остатки.</div>
       <button class="btn primary" onclick="startCycleCount()">▶ Начать инвентаризацию склада</button>
-      ${inventoryActs.length?`<div class="sec">Последние акты</div>${inventoryActs.slice(0,10).map((a,i)=>`<div class="card" onclick="openInventoryAct(${i})"><div class="row"><div class="icbox">🔢</div><div class="grow"><div class="t">${a.no}</div><div class="s">${a.date} · расхождений ${a.diffs.length}</div></div><span class="chip green">Закрыт</span></div></div>`).join('')}`:''}
+      <button class="btn ghost" onclick="exportInventorySnapshotExcel()">⤓ Выгрузить текущие учётные остатки</button>
+      ${inventoryActs.length?`<div class="sec">Последние акты</div>${inventoryActs.slice(0,20).map((a,i)=>`<div class="card" onclick="openInventoryAct(${i})"><div class="row"><div class="icbox">🔢</div><div class="grow"><div class="t">${esc(a.no)}</div><div class="s">${esc(inventoryMoment(a.finishedAt||a.date))} · расхождений ${Number(a.totals?.mismatched??a.diffs?.length??0)}</div></div><span class="chip green">Закрыт</span></div></div>`).join('')}`:''}
     `;
     return;
   }
-  const done = Object.keys(cycleCount.counts).length;
+  if(cycleCountNeedsResume){
+    const counted=Object.keys(cycleCount.counts||{}).length;
+    $('content').innerHTML=`
+      <div class="progress-note">Найден незавершённый пересчёт от ${esc(inventoryMoment(cycleCount.startedAt))}. Сосчитано ${counted} из ${Number(cycleCount.positions)||items.length} позиций.</div>
+      <button class="btn primary" onclick="continueCycleCount()">Продолжить пересчёт</button>
+      <button class="btn ghost" onclick="requestRestartCycleCount()">Начать заново</button>`;
+    return;
+  }
+  const expectedIds=Array.isArray(cycleCount.itemIds)?cycleCount.itemIds:items.map(i=>i.id);
+  const expectedSet=new Set(expectedIds);
+  const catalogChanged=expectedIds.length!==items.length||items.some(i=>!expectedSet.has(i.id));
+  const done = expectedIds.filter(id=>cycleCount.counts[id]!==undefined).length;
+  const sourceItems=items.filter(i=>expectedSet.has(i.id)&&(inventoryListMode==='done'
+    ? cycleCount.counts[i.id]!==undefined
+    : cycleCount.counts[i.id]===undefined));
+  const remaining=expectedIds.length-done;
   $('content').innerHTML = `
-    <div class="progress-note" id="inventoryProgress">Сосчитано позиций: ${done} из ${items.length}. Можно вводить вручную или сканером.</div>
-    ${items.map(i=>{
+    <div class="progress-note"><b>Пересчёт основного склада.</b> Остатки на постах не проверяются.</div>
+    ${catalogChanged?'<div class="progress-note bad">Справочник товаров изменился после начала пересчёта. Чтобы не сформировать неполный акт, отмените этот черновик и начните заново.</div>':''}
+    <div class="progress-note" id="inventoryProgress">Сосчитано позиций: ${done} из ${expectedIds.length}. Черновик сохраняется на устройстве сразу и синхронизируется с сервером.</div>
+    <div class="seg"><button class="${inventoryListMode==='pending'?'on':''}" onclick="setInventoryListMode('pending')">Не пересчитано (${remaining})</button><button class="${inventoryListMode==='done'?'on':''}" onclick="setInventoryListMode('done')">Пересчитано (${done})</button></div>
+    <button class="btn primary" onclick="saveDraftAndScan()">▣ Сканировать QR</button>
+    ${remaining?`<button class="btn ghost" onclick="requestConfirmRemaining()">✓ Подтвердить оставшиеся по учёту (${remaining})</button>`:''}
+    <button class="btn ghost" onclick="stageCycleCountForServer();toast('✓ Черновик сохранён')">Сохранить черновик сейчас</button>
+    ${sourceItems.map(i=>{
       const counted = cycleCount.counts[i.id];
+      const postTotal=Object.values(i.posts||{}).reduce((sum,value)=>sum+(Number(value)||0),0);
       return `
       <div class="card static">
         <div class="row">
           <div class="icbox">${i.icon}</div>
-          <div class="grow"><div class="t">${esc(i.name)}</div><div class="s">${esc(i.sku)} · учёт: ${i.stock} ${i.unit}</div></div>
-          <input ${quantityInputAttrs()} style="width:70px;text-align:right;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:8px 6px;font-weight:700"
-            placeholder="${i.stock}" value="${counted??''}" oninput="setCount('${i.id}', this.value)">
+          <div class="grow"><div class="t">${esc(i.name)}</div><div class="s">${esc(i.sku)} · склад: ${i.stock} ${esc(i.unit)} · посты: ${postTotal} · сторона: ${Number(i.ext)||0}</div></div>
+          <input type="text" inputmode="numeric" autocomplete="off" pattern="[0-9]*" style="width:70px;text-align:right;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:8px 6px;font-weight:700"
+            placeholder="${Number(cycleCount.books?.[i.id]??i.stock)||0}" value="${counted??''}" oninput="normalizeQuantityInput(this);setCount('${i.id}',this.value)">
         </div>
+        <button class="fbtn" style="width:100%;margin-top:8px" onclick="setCountAndRefresh('${i.id}',${Number(cycleCount.books?.[i.id]??i.stock)||0})">✓ Соответствует учёту</button>
       </div>`;}).join('')}
-    <button class="btn green" id="finishCountBtn" onclick="finishCycleCount()">✓ Завершить и сформировать акт</button>
-    <div class="s" id="inventoryRemaining" style="text-align:center;margin:4px 0">${done<items.length?'Осталось пересчитать: '+(items.length-done):'Все позиции заполнены'}</div>
-    <button class="btn ghost" onclick="cycleCount=null; render({fn:views.inventory},false)">Отменить инвентаризацию</button>
+    <button class="btn green" id="finishCountBtn" ${catalogChanged?'disabled':''} onclick="finishCycleCount()">✓ Завершить и сформировать акт</button>
+    <div class="s" id="inventoryRemaining" style="text-align:center;margin:4px 0">${remaining?'Осталось пересчитать: '+remaining:'Все позиции заполнены'}</div>
+    <button class="btn ghost" onclick="requestCancelCycleCount()">Отменить инвентаризацию</button>
   `;
 },
 
@@ -5554,6 +5683,46 @@ function printDoc(no){
   const html = d.kind==='defekt' ? buildDefektPrintHtml(d, title) : buildWorkActPrintHtml(d, title);
   printHtmlDocument(html, sanitizeFilename(title));
 }
+function buildInventoryPrintHtml(act){
+  const lines=Array.isArray(act.lines)?act.lines:[];
+  const totals=act.totals||{};
+  const rows=lines.map((line,index)=>`<tr>
+    <td class="colnum">${index+1}</td><td>${esc(line.sku)}</td><td>${esc(line.name)}</td>
+    <td>${esc(line.unit||'')}</td><td class="colqty">${Number(line.book)}</td>
+    <td class="colqty">${Number(line.counted)}</td><td class="colqty">${Number(line.delta)>0?'+':''}${Number(line.delta)}</td>
+  </tr>`).join('');
+  const actor=act.actor?.name||act.actor?.login||'—';
+  return `<html><head><title>${esc(act.no)}</title><style>${PRINT_DOC_STYLE}
+    .inventory td,.inventory th{font-size:10pt;padding:3pt}.inventory .colnum{width:1cm}.inventory .colqty{width:1.8cm}
+  </style></head><body>
+    <h1>АКТ ИНВЕНТАРИЗАЦИИ № ${esc(act.no)}</h1>
+    <div class="sub">основного склада</div>
+    <p>Начало: ${esc(inventoryMoment(act.startedAt))}<br>Завершение: ${esc(inventoryMoment(act.finishedAt))}<br>Проводил: ${esc(actor)} (${esc(act.actor?.role||'—')})</p>
+    <p><b>Область проверки:</b> только остатки основного склада. Товары на постах и на стороне в пересчёт не входят.</p>
+    <table class="inventory"><tr><th class="colnum">№</th><th>Артикул</th><th>Наименование</th><th>Ед.</th><th class="colqty">Учёт</th><th class="colqty">Факт</th><th class="colqty">Разница</th></tr>${rows}</table>
+    <p><b>Итого:</b> позиций ${Number(totals.positions??lines.length)}; совпало ${Number(totals.matched??lines.filter(line=>line.delta===0).length)}; расхождений ${Number(totals.mismatched??lines.filter(line=>line.delta!==0).length)}; излишек ${Number(totals.surplus??0)}; недостача ${Number(totals.shortage??0)}.</p>
+    <table class="sigtable"><tr><td class="sighead">Провёл:</td><td class="sighead">Утвердил:</td></tr>
+      <tr><td>${esc(actor)}</td><td>${esc(ACT_HANDOVER_SIGNER.title)}</td></tr>
+      <tr><td class="sigline">______________ ____________________</td><td class="sigline">______________ ${esc(ACT_HANDOVER_SIGNER.name)}</td></tr>
+      <tr><td class="sighint">(подпись)&nbsp;&nbsp;&nbsp;&nbsp;(ФИО)</td><td class="sighint">(подпись)&nbsp;&nbsp;&nbsp;&nbsp;(ФИО)</td></tr>
+    </table>
+    <script>window.onload=()=>window.print();<\/script>
+  </body></html>`;
+}
+async function printInventoryAct(index){
+  const summary=inventoryActs[index];
+  if(!summary)return false;
+  try{
+    const act=await inventoryActDetail(summary);
+    if(!act||!Array.isArray(act.lines))throw new Error('Полные строки акта недоступны');
+    printHtmlDocument(buildInventoryPrintHtml(act),sanitizeFilename(act.no)+'_inventory','a4');
+    logAction('Печать акта инвентаризации',act.no);
+    return true;
+  }catch(e){
+    toast('⚠ '+(e.message||'Не удалось подготовить печатную форму'));
+    return false;
+  }
+}
 
 function addMat(no){
   const id=$('addSel').value, q=parseQuantity($('addQty').value);
@@ -5916,50 +6085,301 @@ function mapServerRoleToClientRole(role){
 }
 window.mapServerRoleToClientRole=mapServerRoleToClientRole;
 
-function startCycleCount(){
-  if(currentRole!=='admin'){toast('Инвентаризацию может проводить только администратор');return false;}
-  cycleCount = {counts:{}};
-  logAction('Инвентаризация начата', 'Полный пересчёт основного склада');
-  render({fn:views.inventory}, false);
+function inventoryMoment(value){
+  const date=new Date(value||'');
+  return Number.isNaN(date.getTime())?String(value||'—'):date.toLocaleString('ru-RU');
 }
-function setCount(id, val){
-  if(currentRole!=='admin'||!cycleCount){toast('Инвентаризация недоступна');return false;}
-  const v = parseQuantity(val, true);
-  if(v===null){ toast('Введите целое неотрицательное количество'); delete cycleCount.counts[id]; return; }
-  cycleCount.counts[id] = v;
-  const done=Object.keys(cycleCount.counts).length;
-  if($('inventoryProgress'))$('inventoryProgress').textContent=`Сосчитано позиций: ${done} из ${items.length}. Можно вводить вручную или сканером.`;
-  if($('inventoryRemaining'))$('inventoryRemaining').textContent=done<items.length?`Осталось пересчитать: ${items.length-done}`:'Все позиции заполнены';
+function showInventoryConfirm(title,body,confirmText,action){
+  _inventoryConfirmAction=typeof action==='function'?action:null;
+  $('sheetLayer').innerHTML=`<div class="sheet-backdrop" onclick="if(event.target===this) closeInventoryConfirm()"><div class="sheet">
+    <div class="handle"></div><div class="sec" style="margin-top:0">${esc(title)}</div>
+    <div class="progress-note">${esc(body)}</div>
+    <button class="btn primary" onclick="runInventoryConfirm()">${esc(confirmText)}</button>
+    <button class="btn ghost" onclick="closeInventoryConfirm()">Отмена</button>
+  </div></div>`;
 }
-function finishCycleCount(){
-  if(currentRole!=='admin'||!cycleCount){toast('Инвентаризация недоступна');return false;}
-  const counted = Object.keys(cycleCount.counts).length;
-  if(counted < items.length){ toast('Пересчитайте все позиции перед завершением: осталось '+(items.length-counted)); return; }
-  const diffs = items.map(i=>{
-    const counted = cycleCount.counts[i.id];
-    if(counted===undefined) return null;
-    const delta = counted - i.stock;
-    return delta!==0 ? {i, counted, delta} : null;
-  }).filter(Boolean);
-  const act={no:'ИНВ-'+String(inventoryActs.length+1).padStart(4,'0'),date:nowTimeStr(),diffs:diffs.map(({i,counted,delta})=>({id:i.id,name:i.name,sku:i.sku,book:i.stock,counted,delta}))};
-  diffs.forEach(({i,counted,delta})=>{
-    i.history.push({d:todayStr(), type: delta>0?'in':'off', text:'Корректировка по инвентаризации', q:`${delta>0?'+':''}${delta} ${i.unit}`});
-    i.stock = counted;
-    adjustLots(i, delta);
+function closeInventoryConfirm(){_inventoryConfirmAction=null;closeSheet();}
+function runInventoryConfirm(){
+  const action=_inventoryConfirmAction;
+  _inventoryConfirmAction=null;
+  closeSheet();
+  if(action)action();
+}
+function continueCycleCount(){
+  if(!cycleCount)return false;
+  cycleCountNeedsResume=false;
+  saveCycleCountLocal();
+  render({fn:views.inventory},false);
+  return true;
+}
+function clearCycleCountDraft(){
+  cycleCount=null;
+  cycleCountServerDraft=null;
+  cycleCountNeedsResume=false;
+  saveCycleCountLocal();
+  flushSave();
+}
+function requestRestartCycleCount(){
+  showInventoryConfirm('Начать пересчёт заново','Текущий незавершённый черновик и уже введённые количества будут удалены.','Удалить черновик и начать',()=>{
+    clearCycleCountDraft();
+    startCycleCount();
   });
-  logAction('Инвентаризация завершена', diffs.length ? `Расхождений: ${diffs.length} позиций` : 'Расхождений не найдено, остатки подтверждены');
-  inventoryActs.unshift(act);
-  cycleCount = null;
-  toast('✓ Сформирован акт '+act.no);
-  openInventoryAct(0);
 }
-function openInventoryAct(index){
-  const a=inventoryActs[index];if(!a)return;
-  render({fn(){setHdr(a.no,'Акт инвентаризации · '+a.date,true,false);$('content').innerHTML=`
-    <div class="progress-note ok">✓ Инвентаризация завершена, остатки скорректированы</div>
-    <div class="card static"><div class="kv"><span class="k">Номер акта</span><span class="v">${a.no}</span></div><div class="kv"><span class="k">Дата</span><span class="v">${a.date}</span></div></div>
-    <div class="card static">${a.diffs.length?a.diffs.map(d=>`<div class="kv"><span class="k">${esc(d.name)} (${esc(d.sku)})</span><span class="v">${d.book} → ${d.counted} (${d.delta>0?'+':''}${d.delta})</span></div>`).join(''):'<div class="s">Расхождений не обнаружено</div>'}</div>
-    <button class="btn ghost" onclick="exportInventoryExcel()">⤓ Экспорт в Excel</button>`;}});
+function requestCancelCycleCount(){
+  showInventoryConfirm('Отменить инвентаризацию','Все результаты незавершённого пересчёта будут удалены. Остатки склада не изменятся.','Отменить пересчёт',()=>{
+    clearCycleCountDraft();
+    logAction('Инвентаризация отменена','Черновик пересчёта удалён');
+    render({fn:views.inventory},false);
+  });
+}
+function setInventoryListMode(mode){
+  inventoryListMode=mode==='done'?'done':'pending';
+  render({fn:views.inventory},false);
+}
+function startCycleCount(){
+  if(!canConductInventory()){toast('Инвентаризацию может проводить владелец, администратор или кладовщик');return false;}
+  if(cycleCount){
+    cycleCountNeedsResume=true;
+    render({fn:views.inventory},false);
+    return false;
+  }
+  const actor=inventoryActor();
+  if(!actor){toast('Нет связи с серверной учётной записью');return false;}
+  const now=new Date().toISOString();
+  cycleCount={
+    id:newBusinessRecordId('inventory'),
+    scope:'warehouse',
+    startedAt:now,
+    updatedAt:now,
+    actor,
+    positions:items.length,
+    itemIds:items.map(i=>i.id),
+    books:Object.fromEntries(items.map(i=>[i.id,Number(i.stock)||0])),
+    counts:{},
+  };
+  cycleCountNeedsResume=false;
+  inventoryListMode='pending';
+  saveCycleCountLocal();
+  stageCycleCountForServer();
+  logAction('Инвентаризация начата','Полный пересчёт основного склада');
+  render({fn:views.inventory},false);
+  return true;
+}
+function setCount(id,val){
+  if(!canConductInventory()||!cycleCount){toast('Инвентаризация недоступна');return false;}
+  const raw=String(val??'').trim();
+  if(raw===''){
+    delete cycleCount.counts[id];
+  }else{
+    const value=parseQuantity(raw,true);
+    if(value===null){toast('Введите целое неотрицательное количество');return false;}
+    cycleCount.counts[id]=value;
+  }
+  cycleCount.updatedAt=new Date().toISOString();
+  saveCycleCountLocal();
+  const expectedIds=Array.isArray(cycleCount.itemIds)?cycleCount.itemIds:items.map(i=>i.id);
+  const done=expectedIds.filter(itemId=>cycleCount.counts[itemId]!==undefined).length;
+  if($('inventoryProgress'))$('inventoryProgress').textContent=`Сосчитано позиций: ${done} из ${expectedIds.length}. Черновик сохранён на устройстве.`;
+  if($('inventoryRemaining'))$('inventoryRemaining').textContent=done<expectedIds.length?`Осталось пересчитать: ${expectedIds.length-done}`:'Все позиции заполнены';
+  return true;
+}
+function setCountAndRefresh(id,value){
+  if(!setCount(id,String(value)))return false;
+  render({fn:views.inventory},false);
+  return true;
+}
+function requestConfirmRemaining(){
+  if(!cycleCount)return false;
+  const expected=new Set(Array.isArray(cycleCount.itemIds)?cycleCount.itemIds:items.map(i=>i.id));
+  const missing=items.filter(i=>expected.has(i.id)&&cycleCount.counts[i.id]===undefined);
+  if(!missing.length)return true;
+  showInventoryConfirm('Подтвердить оставшиеся позиции',`Для ${missing.length} непересчитанных позиций будет записан учётный остаток на момент начала инвентаризации.`,`Подтвердить ${missing.length} позиций`,()=>{
+    missing.forEach(i=>{cycleCount.counts[i.id]=Number(cycleCount.books?.[i.id]??i.stock)||0;});
+    cycleCount.updatedAt=new Date().toISOString();
+    saveCycleCountLocal();
+    stageCycleCountForServer();
+    inventoryListMode='done';
+    render({fn:views.inventory},false);
+  });
+  return true;
+}
+function saveDraftAndScan(){
+  if(!cycleCount)return false;
+  saveCycleCountLocal();
+  stageCycleCountForServer();
+  startNativeScan('count');
+  return true;
+}
+function inventoryScanFeedback(){
+  try{if(navigator.vibrate)navigator.vibrate([45,35,45]);}catch{}
+  try{
+    const Context=window.AudioContext||window.webkitAudioContext;
+    if(Context){
+      const context=new Context(),osc=context.createOscillator(),gain=context.createGain();
+      osc.frequency.value=880;gain.gain.value=.05;osc.connect(gain);gain.connect(context.destination);
+      osc.start();osc.stop(context.currentTime+.09);osc.onended=()=>context.close();
+    }
+  }catch{}
+}
+function openCountSheet(id){
+  const i=item(id);
+  if(!i||!cycleCount){toast('Карточка товара не найдена');return false;}
+  const previous=cycleCount.counts[id];
+  const book=Number(cycleCount.books?.[id]??i.stock)||0;
+  const postTotal=Object.values(i.posts||{}).reduce((sum,value)=>sum+(Number(value)||0),0);
+  $('sheetLayer').innerHTML=`<div class="sheet-backdrop"><div class="sheet">
+    <div class="handle"></div><div class="sec" style="margin-top:0">Пересчёт по QR</div>
+    ${safePhotoSource(i.photo)?`<img src="${esc(i.photo)}" alt="" style="width:100%;max-height:160px;object-fit:contain;border-radius:12px;background:var(--panel)">`:''}
+    <div class="t" style="margin-top:10px">${esc(i.name)}</div>
+    <div class="s">${esc(i.sku)} · единица: ${esc(i.unit)}</div>
+    <div class="progress-note ${previous!==undefined?'bad':''}">${previous!==undefined?`Эта карточка уже считалась: ${previous} ${esc(i.unit)}. Новое значение потребует подтверждения.`:'Карточка ещё не пересчитана.'}</div>
+    <div class="card static"><div class="kv"><span class="k">Учёт на складе</span><span class="v">${book} ${esc(i.unit)}</span></div><div class="kv"><span class="k">На постах (не считаем)</span><span class="v">${postTotal}</span></div><div class="kv"><span class="k">На стороне (не считаем)</span><span class="v">${Number(i.ext)||0}</span></div></div>
+    <div class="fld"><label>Фактически на складе</label><input id="inventoryScanQty" ${quantityInputAttrs()} value="${previous??book}"></div>
+    <button class="btn primary" onclick="applyCountFromSheet('${i.id}')">Записать и сканировать дальше</button>
+    <button class="btn ghost" onclick="closeSheet()">Закрыть</button>
+  </div></div>`;
+  setTimeout(()=>$('inventoryScanQty')?.focus(),50);
+  return true;
+}
+function applyCountFromSheet(id){
+  if(!cycleCount)return false;
+  const value=parseQuantity($('inventoryScanQty')?.value,true);
+  if(value===null){toast('Введите целое неотрицательное количество');return false;}
+  const previous=cycleCount.counts[id];
+  const commit=()=>{
+    setCount(id,String(value));
+    closeSheet();
+    inventoryListMode='pending';
+    render({fn:views.inventory},false);
+    toast('✓ Количество сохранено');
+    if(window.AndroidScanner&&typeof window.AndroidScanner.requestScan==='function')setTimeout(()=>startNativeScan('count'),150);
+  };
+  if(previous!==undefined&&previous!==value){
+    showInventoryConfirm('Повторный пересчёт',`Ранее было записано ${previous}. Заменить результат на ${value}?`,'Заменить',commit);
+  }else commit();
+  return true;
+}
+function nextLocalInventoryNo(){
+  const max=inventoryActs.reduce((value,act)=>{
+    const match=/^ИНВ-0*(\d+)/i.exec(String(act.no||''));
+    return match?Math.max(value,Number(match[1])):value;
+  },0);
+  return `ИНВ-${String(max+1).padStart(6,'0')}/${documentNodeId}`;
+}
+async function finishCycleCount(){
+  if(!canConductInventory()||!cycleCount){toast('Инвентаризация недоступна');return false;}
+  const expectedIds=Array.isArray(cycleCount.itemIds)?cycleCount.itemIds:items.map(i=>i.id);
+  const currentIds=new Set(items.map(i=>i.id));
+  if(expectedIds.length!==items.length||expectedIds.some(id=>!currentIds.has(id))){
+    toast('Справочник товаров изменился. Сохраните результаты отдельно и начните пересчёт заново.');
+    return false;
+  }
+  if(expectedIds.some(id=>Number(item(id)?.stock)!==Number(cycleCount.books?.[id]??item(id)?.stock))){
+    toast('Учётные остатки изменились во время пересчёта. Начните инвентаризацию заново.');
+    return false;
+  }
+  const missing=expectedIds.filter(id=>cycleCount.counts[id]===undefined);
+  if(missing.length){toast('Пересчитайте все позиции перед завершением: осталось '+missing.length);return false;}
+  const actor=inventoryActor();
+  if(!actor){toast('Нет связи с серверной учётной записью');return false;}
+  const finishedAt=new Date().toISOString();
+  const lines=expectedIds.map(id=>{
+    const i=item(id);
+    if(!i)throw new Error('Состав склада изменился. Начните пересчёт заново.');
+    const book=Number(cycleCount.books?.[id]??i.stock)||0;
+    const counted=Number(cycleCount.counts[id]);
+    return {id:i.id,name:i.name,sku:i.sku,unit:i.unit,book,counted,delta:counted-book};
+  });
+  let fullAct={
+    id:cycleCount.id,
+    scope:'warehouse',
+    startedAt:cycleCount.startedAt,
+    finishedAt,
+    actor,
+    lines,
+  };
+  const button=$('finishCountBtn');
+  if(button){button.disabled=true;button.textContent='Формирую акт…';}
+  try{
+    const bridge=window.treshkaInventoryActs;
+    if(bridge&&typeof bridge.create==='function')fullAct=await bridge.create(fullAct);
+    else{
+      fullAct={...fullAct,no:nextLocalInventoryNo(),date:inventoryMoment(finishedAt),totals:{
+        positions:lines.length,
+        matched:lines.filter(line=>line.delta===0).length,
+        mismatched:lines.filter(line=>line.delta!==0).length,
+        surplus:lines.filter(line=>line.delta>0).reduce((sum,line)=>sum+line.delta,0),
+        shortage:lines.filter(line=>line.delta<0).reduce((sum,line)=>sum+Math.abs(line.delta),0),
+      }};
+    }
+  }catch(e){
+    if(button){button.disabled=false;button.textContent='✓ Завершить и сформировать акт';}
+    toast('⚠ '+(e.message||'Не удалось зарегистрировать акт на сервере'));
+    return false;
+  }
+  cacheInventoryAct(fullAct);
+  const diffs=fullAct.lines.filter(line=>line.delta!==0);
+  const summary={
+    id:fullAct.id,no:fullAct.no,scope:'warehouse',startedAt:fullAct.startedAt,finishedAt:fullAct.finishedAt,
+    date:fullAct.date||inventoryMoment(fullAct.finishedAt),actor:fullAct.actor,totals:fullAct.totals,diffs,
+  };
+  const success=runStockTransaction('завершение инвентаризации',()=>{
+    fullAct.lines.forEach(line=>{
+      const i=item(line.id);
+      if(!i)throw new Error('Карточка склада исчезла во время завершения');
+      if(line.delta){
+        i.history=i.history||[];
+        i.history.push({d:todayStr(),type:line.delta>0?'in':'off',text:`Корректировка по инвентаризации ${fullAct.no}`,q:`${line.delta>0?'+':''}${line.delta} ${i.unit}`});
+        i.stock=line.counted;
+        adjustLots(i,line.delta);
+      }
+    });
+    inventoryActs.unshift(summary);
+    logAction('Инвентаризация завершена',diffs.length?`Акт ${fullAct.no}: расхождений ${diffs.length}`:`Акт ${fullAct.no}: остатки подтверждены`);
+    cycleCount=null;
+    return true;
+  },{inventoryActs:true,cycleCount:true});
+  if(!success)return false;
+  cycleCountServerDraft=null;
+  cycleCountNeedsResume=false;
+  saveCycleCountLocal();
+  flushSave();
+  toast('✓ Сформирован акт '+fullAct.no);
+  await openInventoryAct(0);
+  return true;
+}
+async function openInventoryAct(index){
+  const summary=inventoryActs[index];if(!summary)return false;
+  render({fn(){
+    setHdr(summary.no,'Акт инвентаризации',true,false);
+    $('content').innerHTML='<div class="progress-note">Загрузка полного акта…</div>';
+  }});
+  try{
+    const act=await inventoryActDetail(summary);
+    if(!act)throw new Error('Акт не найден');
+    const lines=Array.isArray(act.lines)?act.lines:[];
+    const totals=act.totals||summary.totals||{};
+    setHdr(act.no,'Акт инвентаризации · '+inventoryMoment(act.finishedAt||act.date),true,false);
+    $('content').innerHTML=`
+      <div class="progress-note ok">✓ Инвентаризация основного склада завершена, остатки скорректированы</div>
+      <div class="card static">
+        <div class="kv"><span class="k">Номер акта</span><span class="v">${esc(act.no)}</span></div>
+        <div class="kv"><span class="k">Область</span><span class="v">Только основной склад</span></div>
+        <div class="kv"><span class="k">Начало</span><span class="v">${esc(inventoryMoment(act.startedAt))}</span></div>
+        <div class="kv"><span class="k">Завершение</span><span class="v">${esc(inventoryMoment(act.finishedAt))}</span></div>
+        <div class="kv"><span class="k">Проводил</span><span class="v">${esc(act.actor?.name||act.actor?.login||'—')}</span></div>
+        <div class="kv"><span class="k">Позиций</span><span class="v">${Number(totals.positions??lines.length)}</span></div>
+        <div class="kv"><span class="k">Расхождений</span><span class="v">${Number(totals.mismatched??lines.filter(line=>line.delta!==0).length)}</span></div>
+      </div>
+      <div class="sec">Все позиции</div>
+      <div class="card static">${lines.map(line=>`<div class="kv"><span class="k">${esc(line.name)} (${esc(line.sku)})</span><span class="v">${Number(line.book)} → ${Number(line.counted)} (${Number(line.delta)>0?'+':''}${Number(line.delta)})</span></div>`).join('')||'<div class="s">Строки акта недоступны</div>'}</div>
+      <button class="btn primary" onclick="printInventoryAct(${index})">Печать / PDF</button>
+      <button class="btn ghost" onclick="exportInventoryActExcel(${index})">⤓ Экспорт акта в Excel</button>`;
+    return true;
+  }catch(e){
+    $('content').innerHTML=`<div class="progress-note bad">⚠ ${esc(e.message||'Не удалось загрузить акт')}</div><button class="btn ghost" onclick="openInventoryAct(${index})">Повторить</button>`;
+    return false;
+  }
 }
 
 /* ================= ЭКСПОРТ В EXCEL (реальный .xlsx через SheetJS) ================= */
@@ -6121,12 +6541,47 @@ function exportWorkActExcel(no){
   if(ok) logAction('Экспорт акта работ в Excel', no, d.post);
   return ok;
 }
-function exportInventoryExcel(){
-  const rows=[['Артикул','Название','Учётный остаток','Ед.']];
+function exportInventorySnapshotExcel(){
+  const rows=[['Артикул','Название','Учётный остаток на основном складе','Ед.']];
   items.forEach(i=>rows.push([i.sku,i.name,i.stock,i.unit]));
-  const ok = xlsxDownload('inventarizatsiya.xlsx', [{name:'Инвентаризация', rows}]);
-  if(ok) logAction('Экспорт инвентаризации в Excel', `${items.length} позиций`);
+  const ok=xlsxDownload('ostatki_osnovnogo_sklada.xlsx',[{name:'Остатки склада',rows}]);
+  if(ok)logAction('Экспорт учётных остатков склада в Excel',`${items.length} позиций`);
   return ok;
+}
+function exportInventoryExcel(){return exportInventorySnapshotExcel();}
+async function exportInventoryActExcel(index){
+  const summary=inventoryActs[index];
+  if(!summary)return false;
+  try{
+    const act=await inventoryActDetail(summary);
+    const lines=Array.isArray(act?.lines)?act.lines:[];
+    const totals=act?.totals||summary.totals||{};
+    const infoRows=[
+      ['Акт инвентаризации',act.no],
+      ['Область','Только основной склад'],
+      ['Начало',inventoryMoment(act.startedAt)],
+      ['Завершение',inventoryMoment(act.finishedAt)],
+      ['Проводил',act.actor?.name||act.actor?.login||'—'],
+      ['Роль',act.actor?.role||'—'],
+      [],
+      ['Позиций',Number(totals.positions??lines.length)],
+      ['Совпало',Number(totals.matched??lines.filter(line=>line.delta===0).length)],
+      ['Расхождений',Number(totals.mismatched??lines.filter(line=>line.delta!==0).length)],
+      ['Излишек',Number(totals.surplus??0)],
+      ['Недостача',Number(totals.shortage??0)],
+    ];
+    const lineRows=[['№','Артикул','Наименование','Ед.','По учёту','Фактически','Отклонение']];
+    lines.forEach((line,idx)=>lineRows.push([idx+1,line.sku,line.name,line.unit,line.book,line.counted,line.delta]));
+    const ok=xlsxDownload(`${sanitizeFilename(act.no)}_inventarizatsiya.xlsx`,[
+      {name:'Акт',rows:infoRows},
+      {name:'Позиции',rows:lineRows},
+    ]);
+    if(ok)logAction('Экспорт акта инвентаризации в Excel',act.no);
+    return ok;
+  }catch(e){
+    toast('⚠ '+(e.message||'Не удалось выгрузить акт'));
+    return false;
+  }
 }
 
 /* ================= ЭКСПОРТ АКТА ВЫПОЛНЕННЫХ РАБОТ В .DOCX =================
@@ -6471,6 +6926,10 @@ function exportWorkActDocx(no){
 
 /* start */
 const _startupLoadResult = loadAppStateOnStart();
+if(!cycleCount){
+  const localDraft=loadCycleCountLocal();
+  if(localDraft){cycleCount=localDraft;cycleCountNeedsResume=true;}
+}
 $('mastVersion').textContent = 'v'+APP_VERSION;
 go('sklad');
 updateNavForRole();

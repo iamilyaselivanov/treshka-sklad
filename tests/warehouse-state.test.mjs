@@ -159,7 +159,7 @@ test("storekeeper may advance documents but cannot erase warehouse history", () 
     docs: [{ no: "АВР-1", status: "На согласовании", post: "ТЭЧ" }],
     extIssues: [{ no: "ВН-1", status: "Выдано", post: "ТЭЧ" }],
     stockTransfers: [{ no: "ПМ-1", post: "ТЭЧ", items: [] }],
-    inventoryActs: [{ no: "ИНВ-1", diffs: [] }],
+    inventoryActs: [{ id: "inventory-signed-1", no: "ИНВ-1", diffs: [] }],
     auditLog: [{ id: "audit-1", action: "Выдача", post: "ТЭЧ" }],
   });
   const advanced = state({
@@ -172,7 +172,31 @@ test("storekeeper may advance documents but cannot erase warehouse history", () 
   assert.equal(warehouseHistoryMutationIssue(previous, advanced, "storekeeper"), null);
   assert.equal(warehouseHistoryMutationIssue(previous, state(), "storekeeper")?.status, 403);
   assert.equal(warehouseHistoryMutationIssue(previous, state(), "admin")?.status, 403);
-  assert.equal(warehouseHistoryMutationIssue(previous, state(), "owner"), null);
+  assert.equal(
+    warehouseHistoryMutationIssue(previous, state(), "owner")?.status,
+    403,
+    "even the owner must not erase a server-signed inventory act",
+  );
+});
+
+test("inventory acts may be appended but existing headers are immutable for every role", () => {
+  const act = {
+    id: "inventory-immutable",
+    no: "ИНВ-000001",
+    startedAt: "2026-07-27T10:00:00.000Z",
+    finishedAt: "2026-07-27T10:05:00.000Z",
+    actor: { id: "owner", name: "Owner", role: "owner" },
+    totals: { positions: 1, matched: 1, mismatched: 0, surplus: 0, shortage: 0 },
+    diffs: [],
+  };
+  const previous = state({ inventoryActs: [act] });
+  const appended = state({ inventoryActs: [{ ...act, id: "inventory-next", no: "ИНВ-000002" }, act] });
+  assert.equal(warehouseHistoryMutationIssue(previous, appended, "owner"), null);
+  assert.equal(
+    warehouseHistoryMutationIssue(previous, state({ inventoryActs: [{ ...act, no: "ПОДМЕНА" }] }), "owner")?.status,
+    403,
+  );
+  assert.equal(warehouseHistoryMutationIssue(previous, state(), "owner")?.status, 403);
 });
 
 test("history comparison accepts schema defaults but rejects same-number replacement and field stripping", () => {

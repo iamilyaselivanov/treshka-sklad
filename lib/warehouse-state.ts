@@ -50,7 +50,7 @@ function archiveReference(value: unknown, itemId: string, item: Record<string, u
 
 function archiveHistoryCollection(
   value: unknown,
-  nestedKey: "items" | "diffs" | "materials",
+  nestedKey: "items" | "diffs" | "lines" | "materials",
   itemId: string,
   item: Record<string, unknown>,
 ) {
@@ -68,6 +68,7 @@ function historicalReferences(state: WarehouseState, itemId: string) {
   return [
     ...rows(state.stockTransfers).flatMap((value) => rows(record(value)?.items)),
     ...rows(state.inventoryActs).flatMap((value) => rows(record(value)?.diffs)),
+    ...rows(state.inventoryActs).flatMap((value) => rows(record(value)?.lines)),
     ...rows(state.docs).flatMap((value) => rows(record(value)?.materials)),
     ...rows(state.extIssues).flatMap((value) => rows(record(value)?.items)),
   ].filter((value) => identifier(value) === itemId);
@@ -151,6 +152,7 @@ export function projectWarehouseStateForUser(
     extIssues: rows(state.extIssues).filter((entry) => belongsToAssignment(entry, assignment)),
     stockTransfers: rows(state.stockTransfers).filter((entry) => belongsToAssignment(entry, assignment)),
     inventoryActs: [],
+    cycleCountDraft: null,
     auditLog: rows(state.auditLog).filter((entry) => belongsToAssignment(entry, assignment)),
     notifications: rows(state.notifications).filter((entry) => belongsToAssignment(entry, assignment)),
   };
@@ -287,6 +289,11 @@ function immutableHistoryPreserved(previousValue: unknown, nextValue: unknown) {
   return true;
 }
 
+function signedInventoryHistoryPreserved(previousValue: unknown, nextValue: unknown) {
+  const signed = rows(previousValue).filter((value) => identifier(value));
+  return immutableHistoryPreserved(signed, nextValue);
+}
+
 const MAX_FEED_ROWS_PER_WRITE = 200;
 const NO_MUTABLE_FEED_FIELDS = new Set<string>();
 const MUTABLE_NOTIFICATION_FIELDS = new Set(["read"]);
@@ -369,6 +376,15 @@ export function warehouseHistoryMutationIssue(
   next: WarehouseState,
   role: string,
 ) {
+  // Inventory acts are signed server records. Even the owner may append a new
+  // header, but an existing header can never be removed or rewritten through
+  // the shared-state endpoint.
+  if (!signedInventoryHistoryPreserved(previous.inventoryActs, next.inventoryActs)) {
+    return {
+      status: 403 as const,
+      error: "Нельзя удалять или изменять сформированные акты инвентаризации",
+    };
+  }
   if (role === "owner") return null;
   const auditFeedIssue = rollingHistoryIssue(
     previous.auditLog,
@@ -492,7 +508,12 @@ export function removeWarehouseItemFromState(state: WarehouseState, itemId: stri
       };
     }),
     stockTransfers: archiveHistoryCollection(state.stockTransfers, "items", itemId, item),
-    inventoryActs: archiveHistoryCollection(state.inventoryActs, "diffs", itemId, item),
+    inventoryActs: archiveHistoryCollection(
+      archiveHistoryCollection(state.inventoryActs, "diffs", itemId, item),
+      "lines",
+      itemId,
+      item,
+    ),
     docs: archiveHistoryCollection(state.docs, "materials", itemId, item),
     extIssues: archiveHistoryCollection(state.extIssues, "items", itemId, item),
   };

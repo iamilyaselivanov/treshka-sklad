@@ -62,6 +62,39 @@ function collectionLimitError(value: unknown) {
   return null;
 }
 
+function stateRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function validCycleCountDraft(value: unknown) {
+  if (value == null) return true;
+  const draft = stateRecord(value);
+  const counts = stateRecord(draft?.counts);
+  const books = stateRecord(draft?.books);
+  const actor = stateRecord(draft?.actor);
+  const itemIds = Array.isArray(draft?.itemIds)
+    ? draft.itemIds.map((itemId) => String(itemId ?? "").trim())
+    : [];
+  const itemIdSet = new Set(itemIds);
+  if (
+    !draft || !counts || !books || !actor
+    || itemIds.length > MAX_COLLECTION_ITEMS
+    || itemIds.some((itemId) => !itemId)
+    || itemIdSet.size !== itemIds.length
+    || Number(draft.positions) !== itemIds.length
+    || Object.keys(books).length !== itemIds.length
+    || Object.keys(counts).length > itemIds.length
+  ) return false;
+  if (!String(draft.id ?? "").trim() || !Number.isFinite(Date.parse(String(draft.startedAt ?? "")))) return false;
+  if (!String(actor.id ?? actor.login ?? "").trim() || !String(actor.role ?? "").trim()) return false;
+  if (!itemIds.every((itemId) =>
+    Number.isSafeInteger(Number(books[itemId])) && Number(books[itemId]) >= 0)) return false;
+  return Object.entries(counts).every(([id, quantity]) =>
+    itemIdSet.has(id) && Number.isSafeInteger(Number(quantity)) && Number(quantity) >= 0);
+}
+
 function normalizedState(value: unknown): WarehouseState | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const state = { ...(value as WarehouseState) };
@@ -74,6 +107,7 @@ function normalizedState(value: unknown): WarehouseState | null {
   for (const key of OPTIONAL_COLLECTIONS) {
     if (state[key] != null && (!Array.isArray(state[key]) || state[key].length > MAX_COLLECTION_ITEMS)) return null;
   }
+  if (!validCycleCountDraft(state.cycleCountDraft)) return null;
   // Права и аккаунты принадлежат серверной авторизации, а не общему снимку.
   // Их нельзя менять подменённым PUT /api/state.
   delete state.accounts;
@@ -82,6 +116,126 @@ function normalizedState(value: unknown): WarehouseState | null {
   delete state.currentUserPost;
   delete state.savedAt;
   return state;
+}
+
+async function inventoryCommitError(
+  previous: WarehouseState,
+  next: WarehouseState,
+  user: SessionUser,
+) {
+  const previousIds = new Set(
+    (Array.isArray(previous.inventoryActs) ? previous.inventoryActs : [])
+      .map((value) => String(stateRecord(value)?.id ?? "").trim())
+      .filter(Boolean),
+  );
+  const added = (Array.isArray(next.inventoryActs) ? next.inventoryActs : [])
+    .map(stateRecord)
+    .filter((value): value is Record<string, unknown> => {
+      const id = String(value?.id ?? "").trim();
+      return Boolean(value && id && !previousIds.has(id));
+    });
+  if (!added.length) return null;
+  if (!["owner", "admin", "storekeeper"].includes(user.role)) {
+    return { status: 403, error: "Проводить инвентаризацию может только владелец, администратор или кладовщик" };
+  }
+  if (added.length !== 1) {
+    return { status: 409, error: "За одну синхронизацию можно завершить только одну инвентаризацию" };
+  }
+  const header = added[0];
+  const id = String(header.id ?? "").trim();
+  if (!id || Array.isArray(header.lines)) {
+    return { status: 400, error: "Полные строки акта должны храниться в защищённом архиве, а не в снимке склада" };
+  }
+  const archived = await env.DB.prepare(
+    `SELECT payload, actor_user_id AS actorUserId
+     FROM inventory_act_archive WHERE id = ?`,
+  ).bind(id).first<{ payload: string; actorUserId: string }>();
+  if (!archived) {
+    return { status: 409, error: "Серверный архив акта инвентаризации не найден" };
+  }
+  let act: Record<string, unknown> | null = null;
+  try {
+    act = stateRecord(JSON.parse(archived.payload));
+  } catch {
+    // handled below
+  }
+  const lines = Array.isArray(act?.lines) ? act.lines.map(stateRecord) : [];
+  const previousItems = new Map(
+    (Array.isArray(previous.items) ? previous.items : [])
+      .map(stateRecord)
+      .filter((value): value is Record<string, unknown> => Boolean(value))
+      .map((value) => [String(value.id ?? "").trim(), value]),
+  );
+  const nextItems = new Map(
+    (Array.isArray(next.items) ? next.items : [])
+      .map(stateRecord)
+      .filter((value): value is Record<string, unknown> => Boolean(value))
+      .map((value) => [String(value.id ?? "").trim(), value]),
+  );
+  if (
+    !act || String(act.no ?? "") !== String(header.no ?? "")
+    || String(act.scope ?? "") !== String(header.scope ?? "")
+    || String(act.date ?? "") !== String(header.date ?? "")
+    || String(act.startedAt ?? "") !== String(header.startedAt ?? "")
+    || String(act.finishedAt ?? "") !== String(header.finishedAt ?? "")
+    || lines.length !== previousItems.size || nextItems.size !== previousItems.size
+  ) {
+    return { status: 409, error: "Акт не соответствует текущему справочнику склада" };
+  }
+  const archivedActor = stateRecord(act.actor);
+  const headerActor = stateRecord(header.actor);
+  const archivedTotals = stateRecord(act.totals);
+  const headerTotals = stateRecord(header.totals);
+  const archivedDiffs = Array.isArray(act.diffs) ? act.diffs.map(stateRecord) : [];
+  const headerDiffs = Array.isArray(header.diffs) ? header.diffs.map(stateRecord) : [];
+  if (
+    String(archivedActor?.id ?? "") !== archived.actorUserId
+    || String(headerActor?.id ?? "") !== archived.actorUserId
+    || String(headerActor?.login ?? "") !== String(archivedActor?.login ?? "")
+    || String(headerActor?.name ?? "") !== String(archivedActor?.name ?? "")
+    || String(headerActor?.role ?? "") !== String(archivedActor?.role ?? "")
+    || Number(headerTotals?.positions) !== Number(archivedTotals?.positions)
+    || Number(headerTotals?.matched) !== Number(archivedTotals?.matched)
+    || Number(headerTotals?.mismatched) !== Number(archivedTotals?.mismatched)
+    || Number(headerTotals?.surplus) !== Number(archivedTotals?.surplus)
+    || Number(headerTotals?.shortage) !== Number(archivedTotals?.shortage)
+    || headerDiffs.length !== archivedDiffs.length
+  ) {
+    return { status: 409, error: "Заголовок акта не соответствует защищённому серверному архиву" };
+  }
+  for (const line of lines) {
+    const itemId = String(line?.id ?? "").trim();
+    const before = previousItems.get(itemId);
+    const after = nextItems.get(itemId);
+    if (
+      !line || !before || !after
+      || String(before.name ?? "") !== String(line.name ?? "")
+      || String(before.sku ?? "") !== String(line.sku ?? "")
+      || String(before.unit ?? "") !== String(line.unit ?? "")
+      || Number(before.stock) !== Number(line.book)
+      || Number(after.stock) !== Number(line.counted)
+      || Number(line.delta) !== Number(line.counted) - Number(line.book)
+    ) {
+      return { status: 409, error: "Остатки не соответствуют строкам серверного акта инвентаризации" };
+    }
+  }
+  for (let index = 0; index < archivedDiffs.length; index += 1) {
+    const archivedDiff = archivedDiffs[index];
+    const headerDiff = headerDiffs[index];
+    if (
+      !archivedDiff || !headerDiff
+      || String(headerDiff.id ?? "") !== String(archivedDiff.id ?? "")
+      || String(headerDiff.name ?? "") !== String(archivedDiff.name ?? "")
+      || String(headerDiff.sku ?? "") !== String(archivedDiff.sku ?? "")
+      || String(headerDiff.unit ?? "") !== String(archivedDiff.unit ?? "")
+      || Number(headerDiff.book) !== Number(archivedDiff.book)
+      || Number(headerDiff.counted) !== Number(archivedDiff.counted)
+      || Number(headerDiff.delta) !== Number(archivedDiff.delta)
+    ) {
+      return { status: 409, error: "Расхождения в заголовке акта подменены" };
+    }
+  }
+  return null;
 }
 
 function stateEtag(revision: number, user: SessionUser) {
@@ -227,7 +381,9 @@ export async function PUT(request: Request) {
     const needsDeletionPolicyCheck = previousItemIds.length === 0
       || previousItemIds.some((itemId) => !nextItemIds.has(itemId));
     const needsHistoryPolicyCheck = auth.user.role !== "owner";
-    if (!needsDeletionPolicyCheck && !needsHistoryPolicyCheck) {
+    const needsInventoryPolicyCheck = Array.isArray(state.inventoryActs)
+      && state.inventoryActs.length > 0;
+    if (!needsDeletionPolicyCheck && !needsHistoryPolicyCheck && !needsInventoryPolicyCheck) {
       // Normal writes avoid reading and parsing the potentially 4 MB snapshot.
       // warehouse_state_items is maintained atomically with payload below.
     } else {
@@ -250,6 +406,13 @@ export async function PUT(request: Request) {
         return Response.json(
           { error: "Серверный снимок повреждён. Обратитесь к владельцу" },
           { status: 500 },
+        );
+      }
+      const inventoryIssue = await inventoryCommitError(previous, state, auth.user);
+      if (inventoryIssue) {
+        return Response.json(
+          { error: inventoryIssue.error, terminal: true, recover: "server" },
+          { status: inventoryIssue.status },
         );
       }
       const policy = warehouseHistoryMutationIssue(previous, state, auth.user.role)

@@ -293,6 +293,8 @@ test("build and local D1 bootstrap use the packaged Drizzle migrations", async (
   await text("dist/.openai/drizzle/0007_cold_khan.sql");
   await text("dist/.openai/drizzle/0008_assignment_key_invariant.sql");
   await text("dist/.openai/drizzle/0009_living_leo.sql");
+  await text("dist/.openai/drizzle/0010_optimal_ender_wiggin.sql");
+  await text("dist/.openai/drizzle/0011_dear_war_machine.sql");
 });
 
 test("database migrations build a clean schema and adopt the legacy runtime state table", async () => {
@@ -308,6 +310,7 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
     text("drizzle/0008_assignment_key_invariant.sql"),
     text("drizzle/0009_living_leo.sql"),
     text("drizzle/0010_optimal_ender_wiggin.sql"),
+    text("drizzle/0011_dear_war_machine.sql"),
   ]);
   const apply = (database, sql) => {
     for (const statement of sql.split("--> statement-breakpoint")) {
@@ -323,6 +326,8 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   assert.match(migrations[10], /ADD `size_bytes`/);
   assert.match(migrations[10], /ADD `archived_at`/);
   assert.match(migrations[10], /SET `size_bytes` = length\(`payload`\)/);
+  assert.match(migrations[11], /CREATE TABLE `inventory_act_archive`/);
+  assert.match(migrations[11], /CREATE TABLE `inventory_act_counters`/);
 
   const clean = new DatabaseSync(":memory:");
   for (const migration of migrations) apply(clean, migration);
@@ -330,7 +335,7 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   assert.deepEqual(
     clean.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all()
       .map((row) => row.name),
-    ["audit_log", "login_throttle", "products", "push_deliveries", "push_delivery_attempts", "push_devices", "push_events", "push_maintenance_state", "sessions", "users", "warehouse_full_state", "warehouse_state_items", "warehouse_state_revisions"],
+    ["audit_log", "inventory_act_archive", "inventory_act_counters", "login_throttle", "products", "push_deliveries", "push_delivery_attempts", "push_devices", "push_events", "push_maintenance_state", "sessions", "users", "warehouse_full_state", "warehouse_state_items", "warehouse_state_revisions"],
   );
   clean.close();
 
@@ -390,6 +395,7 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   apply(adopted, migrations[8]);
   apply(adopted, migrations[9]);
   apply(adopted, migrations[10]);
+  apply(adopted, migrations[11]);
   assert.deepEqual(
     adopted.prepare("SELECT item_id AS itemId FROM warehouse_state_items WHERE state_key='main'").all()
       .map((row) => row.itemId),

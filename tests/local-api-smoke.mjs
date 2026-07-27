@@ -303,7 +303,17 @@ try {
 
   const sharedState = state.data.state ?? {
     schemaVersion: 4,
-    items: [],
+    items: [{
+      id: `inventory-probe-${suffix}`,
+      name: "Позиция серверной инвентаризации",
+      sku: `INV-PROBE-${suffix}`,
+      unit: "шт",
+      stock: 3,
+      ext: 0,
+      posts: {},
+      lots: [],
+      history: [],
+    }],
     posts: [{ id: "post-test", name: "ТЭЧ", stock: [], repairs: [] }],
     docs: [],
     extIssues: [],
@@ -311,13 +321,119 @@ try {
     inventoryActs: [],
     auditLog: [],
   };
+  const inventoryBootstrap = await request("/api/state", {
+    method: "PUT",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({ state: sharedState, expectedRevision: state.data.revision }),
+  });
+  const inventoryId = `inventory-${crypto.randomUUID()}`;
+  const inventoryStartedAt = new Date(Date.now() - 60_000).toISOString();
+  const inventoryFinishedAt = new Date().toISOString();
+  const inventoryLines = sharedState.items.map((item, index) => ({
+    id: item.id,
+    name: item.name,
+    sku: item.sku,
+    unit: item.unit,
+    book: Number(item.stock),
+    counted: Number(item.stock) + (index === 0 ? 1 : 0),
+  }));
+  await request("/api/inventory/acts", {
+    method: "POST",
+    headers: { cookie: roleCookies.worker, "content-type": "application/json" },
+    body: JSON.stringify({
+      id: inventoryId,
+      startedAt: inventoryStartedAt,
+      finishedAt: inventoryFinishedAt,
+      lines: inventoryLines,
+    }),
+  }, 403);
+  const inventoryArchived = await request("/api/inventory/acts", {
+    method: "POST",
+    headers: { cookie: roleCookies.storekeeper, "content-type": "application/json" },
+    body: JSON.stringify({
+      id: inventoryId,
+      startedAt: inventoryStartedAt,
+      finishedAt: inventoryFinishedAt,
+      lines: inventoryLines,
+      actor: { id: "forged", role: "owner", name: "Подмена" },
+    }),
+  }, 201);
+  assert.match(inventoryArchived.data.act.no, /^ИНВ-\d{6}$/);
+  assert.equal(inventoryArchived.data.act.actor.role, "storekeeper");
+  assert.equal(inventoryArchived.data.act.actor.id, createdIds[1]);
+  assert.equal(inventoryArchived.data.act.lines.length, sharedState.items.length);
+  const inventoryRetry = await request("/api/inventory/acts", {
+    method: "POST",
+    headers: { cookie: roleCookies.storekeeper, "content-type": "application/json" },
+    body: JSON.stringify({
+      id: inventoryId,
+      startedAt: inventoryStartedAt,
+      finishedAt: inventoryFinishedAt,
+      lines: inventoryLines,
+    }),
+  });
+  assert.equal(inventoryRetry.data.idempotent, true);
+  assert.equal(inventoryRetry.data.act.no, inventoryArchived.data.act.no);
+  await request("/api/inventory/acts", {
+    method: "POST",
+    headers: { cookie: roleCookies.admin, "content-type": "application/json" },
+    body: JSON.stringify({
+      id: inventoryId,
+      startedAt: inventoryStartedAt,
+      finishedAt: inventoryFinishedAt,
+      lines: inventoryLines,
+    }),
+  }, 409);
+  const inventoryFetched = await request(`/api/inventory/acts?id=${encodeURIComponent(inventoryId)}`, {
+    headers: ownerHeaders,
+  });
+  assert.equal(inventoryFetched.data.act.id, inventoryId);
+  const inventoryHeader = { ...inventoryArchived.data.act };
+  delete inventoryHeader.lines;
+  const inventoryCommittedState = {
+    ...sharedState,
+    items: sharedState.items.map((item, index) => ({
+      ...item,
+      stock: inventoryLines[index].counted,
+    })),
+    inventoryActs: [inventoryHeader],
+  };
+  const forgedInventoryCommit = await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.storekeeper, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: {
+        ...inventoryCommittedState,
+        inventoryActs: [{
+          ...inventoryHeader,
+          totals: { ...inventoryHeader.totals, mismatched: 999 },
+        }],
+      },
+      expectedRevision: inventoryBootstrap.data.revision,
+    }),
+  }, 409);
+  assert.match(forgedInventoryCommit.data.error, /защищённому серверному архиву/);
+  const inventoryCommitted = await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.storekeeper, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: inventoryCommittedState,
+      expectedRevision: inventoryBootstrap.data.revision,
+    }),
+  });
+  Object.assign(sharedState, inventoryCommittedState);
+  state.data.revision = inventoryCommitted.data.revision;
+  state.data.state = sharedState;
   sharedState.accounts = [{ id: "must-not-be-stored", role: "owner" }];
   sharedState.currentAccountId = "must-not-be-stored";
   sharedState.currentRole = "admin";
   sharedState.savedAt = "must-not-create-a-new-revision";
   sharedState.auditLog = Array.from({ length: 2_000 }, (_, index) => ({ marker: index }));
   sharedState.notifications = Array.from({ length: 2_000 }, (_, index) => ({ id: `notification-${index}` }));
-  sharedState.inventoryActs = Array.from({ length: 5_000 }, (_, index) => ({ no: `inventory-${index}`, diffs: [] }));
+  sharedState.inventoryActs = [
+    inventoryHeader,
+    ...Array.from({ length: 4_999 }, (_, index) => ({ no: `inventory-${index}`, diffs: [] })),
+  ];
   const rejectedLargeState = { ...sharedState, rejectedPadding: "x".repeat(128 * 1024) };
   await request("/api/state", {
     method: "PUT",
@@ -586,7 +702,7 @@ try {
     ],
     inventoryActs: [
       { no: `INV-${suffix}`, diffs: [{ id: linkedProduct.data.product.id, counted: 0 }] },
-      ...(stateAfterDeletion.data.state.inventoryActs ?? []).slice(1),
+      ...(stateAfterDeletion.data.state.inventoryActs ?? []).slice(0, 4_999),
     ],
   };
   const linkedSaved = await request("/api/state", {
