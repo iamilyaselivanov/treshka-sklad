@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import {
@@ -301,22 +301,12 @@ test("build and local D1 bootstrap use the packaged Drizzle migrations", async (
 });
 
 test("database migrations build a clean schema and adopt the legacy runtime state table", async () => {
-  const migrations = await Promise.all([
-    text("drizzle/0000_unique_vampiro.sql"),
-    text("drizzle/0001_famous_the_hunter.sql"),
-    text("drizzle/0002_quick_bloodscream.sql"),
-    text("drizzle/0003_warehouse_full_state.sql"),
-    text("drizzle/0004_pale_thanos.sql"),
-    text("drizzle/0005_hard_moira_mactaggert.sql"),
-    text("drizzle/0006_special_peter_quill.sql"),
-    text("drizzle/0007_cold_khan.sql"),
-    text("drizzle/0008_assignment_key_invariant.sql"),
-    text("drizzle/0009_living_leo.sql"),
-    text("drizzle/0010_optimal_ender_wiggin.sql"),
-    text("drizzle/0011_dear_war_machine.sql"),
-    text("drizzle/0012_young_proemial_gods.sql"),
-    text("drizzle/0013_thin_radioactive_man.sql"),
-  ]);
+  const migrationNames = (await readdir(new URL("../drizzle/", import.meta.url)))
+    .filter((migrationName) => /^\d{4}_.+\.sql$/.test(migrationName))
+    .sort();
+  const migrations = await Promise.all(
+    migrationNames.map((migrationName) => text(`drizzle/${migrationName}`)),
+  );
   const apply = (database, sql) => {
     for (const statement of sql.split("--> statement-breakpoint")) {
       if (statement.trim()) database.exec(statement);
@@ -342,8 +332,9 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   assert.match(migrations[13], /SET `header_json` = COALESCE/);
   assert.match(migrations[13], /entry\.type = 'object'/);
   const releaseNotes = await text("RELEASE_NOTES.md");
-  const latestMigration = "0013_thin_radioactive_man.sql";
-  assert.match(releaseNotes, new RegExp(latestMigration.replace(".", "\\.")));
+  const latestMigration = migrationNames[migrationNames.length - 1];
+  const escapedLatestMigration = latestMigration.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  assert.match(releaseNotes, new RegExp(escapedLatestMigration));
 
   const clean = new DatabaseSync(":memory:");
   for (const migration of migrations) apply(clean, migration);
@@ -595,10 +586,11 @@ test("destructive recovery points survive thinning and the ordinary row cap", ()
 });
 
 test("inventory archive stays within D1 row limits and allocates numbers atomically", async () => {
-  const [inventoryRoute, stateRoute, historyRoute, browserSync] = await Promise.all([
+  const [inventoryRoute, stateRoute, historyRoute, productsRoute, browserSync] = await Promise.all([
     text("app/api/inventory/acts/route.ts"),
     text("app/api/state/route.ts"),
     text("app/api/state/history/route.ts"),
+    text("app/api/products/route.ts"),
     text("public/prototype-server.js"),
   ]);
   assert.match(inventoryRoute, /MAX_ACT_BYTES = 1_800_000/);
@@ -613,7 +605,11 @@ test("inventory archive stays within D1 row limits and allocates numbers atomica
   assert.match(stateRoute, /header_json AS headerJson/);
   assert.match(stateRoute, /nextInventoryActHeaders\.get\(actId\) !== headerJson/);
   assert.match(stateRoute, /previousItemIds\.length === 0 && Number\(productCount\?\.count/);
+  assert.match(stateRoute, /state\.items = \(state\.items as unknown\[\]\)\.filter/);
   assert.match(stateRoute, /state\.inventoryActs = state\.inventoryActs\.filter/);
+  assert.equal((stateRoute.match(/item_entry\.type = 'object'/g) ?? []).length, 2);
+  assert.equal((historyRoute.match(/item_entry\.type = 'object'/g) ?? []).length, 1);
+  assert.equal((productsRoute.match(/item_entry\.type = 'object'/g) ?? []).length, 2);
   assert.match(stateRoute, /inventory_entry\.type = 'object'/);
   assert.match(historyRoute, /inventory_entry\.type = 'object'/);
   assert.match(historyRoute, /if \(!auth\.user\) \{\s*return Response\.json/);

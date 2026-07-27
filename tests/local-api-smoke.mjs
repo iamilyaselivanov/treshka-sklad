@@ -340,6 +340,20 @@ try {
   inventoryBootstrap.data.revision = normalizedLegacyInventoryHistory.data.revision;
   const cleanedLegacyInventoryHistory = await request("/api/state", { headers: ownerHeaders });
   assert.deepEqual(cleanedLegacyInventoryHistory.data.state.inventoryActs, []);
+  const normalizedLegacyItems = await request("/api/state", {
+    method: "PUT",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: {
+        ...sharedState,
+        items: [...sharedState.items, "not-a-product", null, 42, []],
+      },
+      expectedRevision: inventoryBootstrap.data.revision,
+    }),
+  });
+  inventoryBootstrap.data.revision = normalizedLegacyItems.data.revision;
+  const cleanedLegacyItems = await request("/api/state", { headers: ownerHeaders });
+  assert.deepEqual(cleanedLegacyItems.data.state.items, sharedState.items);
   const inventoryId = `inventory-${crypto.randomUUID()}`;
   const inventoryStartedAt = new Date(Date.now() - 60_000).toISOString();
   const inventoryFinishedAt = new Date().toISOString();

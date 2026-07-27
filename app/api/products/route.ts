@@ -177,8 +177,9 @@ export async function DELETE(request: Request) {
                WHERE state_key = 'main' AND revision = ?
                  AND NOT EXISTS (
                    SELECT 1
-                   FROM json_each(warehouse_full_state.payload, '$.items')
-                   WHERE TRIM(CAST(json_extract(value, '$.id') AS TEXT)) = ?
+                   FROM json_each(warehouse_full_state.payload, '$.items') AS item_entry
+                   WHERE item_entry.type = 'object'
+                     AND TRIM(CAST(json_extract(item_entry.value, '$.id') AS TEXT)) = ?
                  )
              )`,
         ).bind(warehouseItemId, stateRow.revision + 1, warehouseItemId),
@@ -190,8 +191,9 @@ export async function DELETE(request: Request) {
                WHERE state_key = 'main' AND revision = ?
                  AND NOT EXISTS (
                    SELECT 1
-                   FROM json_each(warehouse_full_state.payload, '$.items')
-                   WHERE TRIM(CAST(json_extract(value, '$.id') AS TEXT)) = ?
+                   FROM json_each(warehouse_full_state.payload, '$.items') AS item_entry
+                   WHERE item_entry.type = 'object'
+                     AND TRIM(CAST(json_extract(item_entry.value, '$.id') AS TEXT)) = ?
                  )
              )`,
         ).bind(id, stateRow.revision + 1, warehouseItemId),

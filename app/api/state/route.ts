@@ -123,6 +123,12 @@ function normalizedState(value: unknown): WarehouseState | null {
   for (const key of OPTIONAL_COLLECTIONS) {
     if (state[key] != null && (!Array.isArray(state[key]) || state[key].length > MAX_COLLECTION_ITEMS)) return null;
   }
+  // Older or manually edited snapshots can contain scalar junk in this
+  // collection. Keep legitimate product records and repair the snapshot on its
+  // next write before D1 indexes try to extract object fields from each entry.
+  state.items = (state.items as unknown[]).filter(
+    (value) => Boolean(stateRecord(value)),
+  );
   if (Array.isArray(state.inventoryActs)) {
     // Releases before 48ec63f could persist nulls and numbers in this optional
     // history array. They are never legitimate act headers, so discard them
@@ -616,23 +622,25 @@ export async function PUT(request: Request) {
              WHERE state_key = 'main' AND revision = ?
            )
            AND item_id NOT IN (
-             SELECT TRIM(CAST(json_extract(value, '$.id') AS TEXT))
+             SELECT TRIM(CAST(json_extract(item_entry.value, '$.id') AS TEXT))
              FROM warehouse_full_state,
-                  json_each(warehouse_full_state.payload, '$.items')
+                  json_each(warehouse_full_state.payload, '$.items') AS item_entry
              WHERE warehouse_full_state.state_key = 'main'
                AND warehouse_full_state.revision = ?
-               AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''
+               AND item_entry.type = 'object'
+               AND TRIM(CAST(json_extract(item_entry.value, '$.id') AS TEXT)) <> ''
            )`,
       ).bind(revision, revision),
       env.DB.prepare(
         `INSERT OR IGNORE INTO warehouse_state_items (state_key, item_id)
          SELECT warehouse_full_state.state_key,
-                TRIM(CAST(json_extract(value, '$.id') AS TEXT))
+                TRIM(CAST(json_extract(item_entry.value, '$.id') AS TEXT))
          FROM warehouse_full_state,
-              json_each(warehouse_full_state.payload, '$.items')
+              json_each(warehouse_full_state.payload, '$.items') AS item_entry
          WHERE warehouse_full_state.state_key = 'main'
            AND warehouse_full_state.revision = ?
-           AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''`,
+           AND item_entry.type = 'object'
+           AND TRIM(CAST(json_extract(item_entry.value, '$.id') AS TEXT)) <> ''`,
       ).bind(revision),
       env.DB.prepare(
         `DELETE FROM warehouse_state_inventory_acts

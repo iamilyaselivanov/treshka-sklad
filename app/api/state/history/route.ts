@@ -187,12 +187,13 @@ export async function POST(request: Request) {
       env.DB.prepare(
         `INSERT OR IGNORE INTO warehouse_state_items (state_key, item_id)
          SELECT warehouse_full_state.state_key,
-                TRIM(CAST(json_extract(value, '$.id') AS TEXT))
+                TRIM(CAST(json_extract(item_entry.value, '$.id') AS TEXT))
          FROM warehouse_full_state,
-              json_each(warehouse_full_state.payload, '$.items')
+              json_each(warehouse_full_state.payload, '$.items') AS item_entry
          WHERE warehouse_full_state.state_key = 'main'
            AND warehouse_full_state.revision = ?
-           AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''`,
+           AND item_entry.type = 'object'
+           AND TRIM(CAST(json_extract(item_entry.value, '$.id') AS TEXT)) <> ''`,
       ).bind(revision),
       env.DB.prepare(
         `DELETE FROM warehouse_state_inventory_acts
