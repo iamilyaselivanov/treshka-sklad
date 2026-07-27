@@ -2,10 +2,15 @@ import { env } from "cloudflare:workers";
 import { audit, requireUser } from "@/lib/auth";
 import { readJsonObject, RequestBodyTooLargeError } from "@/lib/http";
 import {
+  STATE_HISTORY_CAP_SQL,
+  STATE_HISTORY_FULL_DETAIL_HOURS,
+  STATE_HISTORY_HOURLY_DAYS,
   STATE_HISTORY_LIST_LIMIT,
   STATE_HISTORY_MAX_ROWS,
+  STATE_HISTORY_PRUNE_SQL,
+  STATE_HISTORY_RETENTION_DAYS,
   stateHistoryArchiveTimestamp,
-  stateHistoryRetentionCutoff,
+  stateHistoryPruneBindings,
 } from "@/lib/state-history";
 
 export const dynamic = "force-dynamic";
@@ -55,7 +60,18 @@ export async function GET(request: Request) {
      ORDER BY archived_at DESC, revision DESC
      LIMIT ?`,
   ).bind(STATE_HISTORY_LIST_LIMIT).all();
-  return Response.json({ revisions: result.results ?? [] });
+  const revisions = result.results ?? [];
+  const oldest = revisions.at(-1) as { archivedAt?: string } | undefined;
+  return Response.json({
+    revisions,
+    oldestArchivedAt: oldest?.archivedAt ?? null,
+    retention: {
+      fullDetailHours: STATE_HISTORY_FULL_DETAIL_HOURS,
+      hourlyDays: STATE_HISTORY_HOURLY_DAYS,
+      maximumDays: STATE_HISTORY_RETENTION_DAYS,
+      maximumRows: STATE_HISTORY_MAX_ROWS,
+    },
+  });
 }
 
 export async function POST(request: Request) {
@@ -126,25 +142,8 @@ export async function POST(request: Request) {
          SET revision = ?, payload = ?, updated_at = ?, updated_by = ?
          WHERE state_key = 'main' AND revision = ?`,
       ).bind(revision, archived.payload, updatedAt, auth.user.callsign, expectedRevision),
-      env.DB.prepare(
-        `DELETE FROM warehouse_state_revisions
-         WHERE state_key = 'main'
-           AND archived_at < ?
-           AND revision <> (
-             SELECT MAX(revision) FROM warehouse_state_revisions
-             WHERE state_key = 'main'
-           )`,
-      ).bind(stateHistoryRetentionCutoff()),
-      env.DB.prepare(
-        `DELETE FROM warehouse_state_revisions
-         WHERE state_key = 'main'
-           AND revision NOT IN (
-             SELECT revision FROM warehouse_state_revisions
-             WHERE state_key = 'main'
-             ORDER BY archived_at DESC, revision DESC
-             LIMIT ?
-           )`,
-      ).bind(STATE_HISTORY_MAX_ROWS),
+      env.DB.prepare(STATE_HISTORY_PRUNE_SQL).bind(...stateHistoryPruneBindings()),
+      env.DB.prepare(STATE_HISTORY_CAP_SQL).bind(STATE_HISTORY_MAX_ROWS),
       env.DB.prepare(
         `DELETE FROM warehouse_state_items
          WHERE state_key = 'main'

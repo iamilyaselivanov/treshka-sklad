@@ -309,7 +309,10 @@ function feedRowPreserved(
   return true;
 }
 
-type RollingHistoryIssue = "mutation" | "too_many_new_rows" | null;
+type RollingHistoryIssue = {
+  kind: "mutation" | "too_many_new_rows";
+  addedRows: number;
+} | null;
 
 function rollingHistoryIssue(
   previousValue: unknown,
@@ -319,8 +322,12 @@ function rollingHistoryIssue(
 ): RollingHistoryIssue {
   const previousRows = rows(previousValue);
   const nextRows = rows(nextValue);
-  if (nextRows.length < previousRows.length) return "mutation";
-  if (nextRows.length > windowLimit) return "mutation";
+  if (nextRows.length < previousRows.length) {
+    return { kind: "mutation", addedRows: 0 };
+  }
+  if (nextRows.length > windowLimit) {
+    return { kind: "mutation", addedRows: Math.max(0, nextRows.length - previousRows.length) };
+  }
   if (previousRows.length < windowLimit) {
     // New feed rows are prepended. Before the window is full, every previous
     // row must remain as an unchanged suffix.
@@ -329,8 +336,10 @@ function rollingHistoryIssue(
     const preserved = suffix.every(
       (value, index) => feedRowPreserved(previousRows[index], value, mutableFields),
     );
-    if (!preserved) return "mutation";
-    return added > MAX_FEED_ROWS_PER_WRITE ? "too_many_new_rows" : null;
+    if (!preserved) return { kind: "mutation", addedRows: added };
+    return added > MAX_FEED_ROWS_PER_WRITE
+      ? { kind: "too_many_new_rows", addedRows: added }
+      : null;
   }
   // Once the rolling window is full, only an unchanged prefix of the previous
   // window may remain after newly prepended rows push the oldest tail out.
@@ -342,10 +351,12 @@ function rollingHistoryIssue(
     if (nextRows.slice(added).every(
       (value, index) => feedRowPreserved(previousRows[index], value, mutableFields),
     )) {
-      return added > MAX_FEED_ROWS_PER_WRITE ? "too_many_new_rows" : null;
+      return added > MAX_FEED_ROWS_PER_WRITE
+        ? { kind: "too_many_new_rows", addedRows: added }
+        : null;
     }
   }
-  return "mutation";
+  return { kind: "mutation", addedRows: 0 };
 }
 
 /**
@@ -371,10 +382,16 @@ export function warehouseHistoryMutationIssue(
     2_000,
     MUTABLE_NOTIFICATION_FIELDS,
   );
-  if (auditFeedIssue === "too_many_new_rows" || notificationFeedIssue === "too_many_new_rows") {
+  if (
+    auditFeedIssue?.kind === "too_many_new_rows"
+    || notificationFeedIssue?.kind === "too_many_new_rows"
+  ) {
     return {
       status: 403 as const,
       error: `За одну синхронизацию можно добавить не более ${MAX_FEED_ROWS_PER_WRITE} новых записей журнала. Подключите устройство к серверу и повторите синхронизацию меньшими пакетами`,
+      code: "too_many_new_rows" as const,
+      auditRowsAdded: auditFeedIssue?.addedRows ?? 0,
+      notificationRowsAdded: notificationFeedIssue?.addedRows ?? 0,
     };
   }
   if (
@@ -382,8 +399,8 @@ export function warehouseHistoryMutationIssue(
     || !mutableHistoryPreserved(previous.extIssues, next.extIssues)
     || !immutableHistoryPreserved(previous.stockTransfers, next.stockTransfers)
     || !immutableHistoryPreserved(previous.inventoryActs, next.inventoryActs)
-    || auditFeedIssue === "mutation"
-    || notificationFeedIssue === "mutation"
+    || auditFeedIssue?.kind === "mutation"
+    || notificationFeedIssue?.kind === "mutation"
   ) {
     return {
       status: 403 as const,

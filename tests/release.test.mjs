@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import {
+  STATE_HISTORY_CAP_SQL,
+  STATE_HISTORY_MAX_ROWS,
+  STATE_HISTORY_PRUNE_SQL,
+  stateHistoryPruneBindings,
+} from "../lib/state-history.ts";
 
 const text = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
@@ -451,19 +457,96 @@ test("state revision history is sampled, time-retained and shared by every write
   ]);
   assert.match(policy, /STATE_HISTORY_RETENTION_DAYS = 30/);
   assert.match(policy, /STATE_HISTORY_SAMPLE_INTERVAL_MS = 5 \* 60 \* 1_000/);
+  assert.match(policy, /STATE_HISTORY_FULL_DETAIL_HOURS = 24/);
+  assert.match(policy, /STATE_HISTORY_HOURLY_DAYS = 7/);
   assert.match(policy, /STATE_HISTORY_LIST_LIMIT = 500/);
   assert.match(policy, /STATE_HISTORY_MAX_ROWS = 500/);
   assert.match(stateRoute, /stateHistorySampleCutoff\(\)/);
   assert.match(stateRoute, /stateHistoryArchiveTimestamp\(\)/);
-  assert.match(stateRoute, /stateHistoryRetentionCutoff\(\)/);
-  assert.match(stateRoute, /LIMIT \?/);
-  assert.match(productRoute, /stateHistoryRetentionCutoff\(\)/);
+  assert.match(stateRoute, /STATE_HISTORY_PRUNE_SQL/);
+  assert.match(stateRoute, /stateHistoryPruneBindings\(\)/);
+  assert.match(stateRoute, /archived_at = \? AND revision = \?/);
+  assert.match(productRoute, /STATE_HISTORY_PRUNE_SQL/);
   assert.match(productRoute, /STATE_HISTORY_MAX_ROWS/);
   assert.match(historyRoute, /STATE_HISTORY_LIST_LIMIT/);
+  assert.match(historyRoute, /oldestArchivedAt/);
   assert.match(historyRoute, /size_bytes AS sizeBytes/);
   assert.match(historyRoute, /archived_at AS archivedAt/);
   assert.match(historyRoute, /status: 507/);
   assert.match(historyRoute, /item_id NOT IN \(SELECT id FROM products\)/);
+});
+
+test("state revision thinning keeps detailed, hourly and daily recovery points", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec(`
+    CREATE TABLE warehouse_state_revisions (
+      state_key TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      archived_at TEXT NOT NULL
+    )
+  `);
+  const insert = database.prepare(
+    "INSERT INTO warehouse_state_revisions (state_key, revision, archived_at) VALUES ('main', ?, ?)",
+  );
+  const now = Date.parse("2026-07-27T12:00:00.000Z");
+  let revision = 1;
+  for (
+    let timestamp = now - 31 * 24 * 60 * 60 * 1_000;
+    timestamp <= now;
+    timestamp += 5 * 60 * 1_000
+  ) {
+    insert.run(revision, new Date(timestamp).toISOString());
+    revision += 1;
+  }
+
+  database.prepare(STATE_HISTORY_PRUNE_SQL).run(...stateHistoryPruneBindings(now));
+  database.prepare(STATE_HISTORY_CAP_SQL).run(STATE_HISTORY_MAX_ROWS);
+
+  const count = Number(database.prepare(
+    "SELECT COUNT(*) AS count FROM warehouse_state_revisions WHERE state_key = 'main'",
+  ).get().count);
+  assert.ok(count >= 440 && count <= 500, `unexpected retained revision count: ${count}`);
+  assert.equal(Number(database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM warehouse_state_revisions
+    WHERE archived_at < ?
+  `).get(new Date(now - 30 * 24 * 60 * 60 * 1_000).toISOString()).count), 0);
+  assert.equal(Number(database.prepare(`
+    SELECT COUNT(*) AS count FROM (
+      SELECT substr(archived_at, 1, 13) AS bucket, COUNT(*) AS amount
+      FROM warehouse_state_revisions
+      WHERE archived_at >= ? AND archived_at < ?
+      GROUP BY bucket HAVING amount > 1
+    )
+  `).get(
+    new Date(now - 7 * 24 * 60 * 60 * 1_000).toISOString(),
+    new Date(now - 24 * 60 * 60 * 1_000).toISOString(),
+  ).count), 0);
+  assert.equal(Number(database.prepare(`
+    SELECT COUNT(*) AS count FROM (
+      SELECT substr(archived_at, 1, 10) AS bucket, COUNT(*) AS amount
+      FROM warehouse_state_revisions
+      WHERE archived_at >= ? AND archived_at < ?
+      GROUP BY bucket HAVING amount > 1
+    )
+  `).get(
+    new Date(now - 30 * 24 * 60 * 60 * 1_000).toISOString(),
+    new Date(now - 7 * 24 * 60 * 60 * 1_000).toISOString(),
+  ).count), 0);
+  database.close();
+});
+
+test("Android WebView exposes JavaScript alert and confirm dialogs for destructive actions", async () => {
+  const [activity, prototype] = await Promise.all([
+    text("android/app/src/main/java/com/treshka/sklad/MainActivity.kt"),
+    text("public/prototype.html"),
+  ]);
+  assert.match(activity, /override fun onJsAlert/);
+  assert.match(activity, /override fun onJsConfirm/);
+  assert.match(activity, /result\.confirm\(\)/);
+  assert.match(activity, /result\.cancel\(\)/);
+  assert.match(prototype, /id="restoreRevisionCode"/);
+  assert.match(prototype, /id="restoreRevisionButton" disabled/);
 });
 
 test("push notifications are server-addressed, durable and connected to Android FCM", async () => {

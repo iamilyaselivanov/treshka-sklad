@@ -4185,7 +4185,7 @@ async function renderStateHistory(){
     const data=await bridge.list();
     const revisions=Array.isArray(data.revisions)?data.revisions:[];
     $('content').innerHTML=`
-      <div class="progress-note">Сервер хранит не более 500 снимков и не дольше 30 дней. Восстановление доступно только владельцу.</div>
+      <div class="progress-note">Самый старый доступный снимок: ${esc(stateHistoryDate(data.oldestArchivedAt))}. Последние сутки хранятся подробно, затем остаётся один снимок в час и один в сутки. Восстановление доступно только владельцу.</div>
       ${revisions.map(row=>`<div class="card" onclick="renderStateRevision(${Number(row.revision)})">
         <div class="row"><div class="icbox">#${Number(row.revision)}</div><div class="grow"><div class="t">Ревизия ${Number(row.revision)}</div><div class="s">Архив: ${esc(stateHistoryDate(row.archivedAt))}</div><div class="s">Автор: ${esc(row.updatedBy||'—')} · ${stateHistorySize(row.sizeBytes)}</div></div><div style="color:var(--muted)">›</div></div>
       </div>`).join('')||'<div class="s" style="text-align:center;padding:32px">Архивных ревизий пока нет</div>'}`;
@@ -4219,17 +4219,26 @@ async function renderStateRevision(revision){
         <div class="s">Документов: ${archivedDocs.length} · внешних выдач: ${archivedIssues.length}</div>
         ${archivedItems.length?`<div class="s" style="margin-top:8px;color:var(--ink)">Первые позиции: ${archivedItems.slice(0,5).map(item=>esc(item&&item.name||item&&item.sku||'Без названия')).join(', ')}</div>`:''}
       </div>
-      ${bridge.canRestore()?`<div class="progress-note bad">Восстановление заменит текущее состояние склада этим снимком. Текущее состояние предварительно сохранится в архиве.</div><button class="btn primary" onclick="restoreStateRevision(${Number(data.revision)})">Восстановить ревизию ${Number(data.revision)}</button>`:'<div class="progress-note">Администратор может просматривать историю. Восстановление выполняет только владелец.</div>'}
+      ${bridge.canRestore()?`<div class="progress-note bad">Восстановление заменит текущее состояние склада этим снимком. Текущее состояние предварительно сохранится в архиве.</div>
+        <div class="fld"><label>Для подтверждения введите номер ревизии: ${Number(data.revision)}</label><input id="restoreRevisionCode" inputmode="numeric" autocomplete="off" oninput="validateStateRevisionRestore(${Number(data.revision)})" placeholder="${Number(data.revision)}"></div>
+        <button class="btn primary" id="restoreRevisionButton" disabled onclick="restoreStateRevision(${Number(data.revision)})">Восстановить ревизию ${Number(data.revision)}</button>`:'<div class="progress-note">Администратор может просматривать историю. Восстановление выполняет только владелец.</div>'}
       <button class="btn ghost" onclick="renderStateHistory()">Вернуться к списку</button>`;
   }catch(e){
     $('content').innerHTML=`<div class="progress-note bad">⚠ ${esc(e.message||'Не удалось открыть ревизию')}</div><button class="btn ghost" onclick="renderStateHistory()">Вернуться к списку</button>`;
   }
 }
+function validateStateRevisionRestore(revision){
+  const input=$('restoreRevisionCode'),button=$('restoreRevisionButton');
+  const matches=!!input&&input.value.trim()===String(Number(revision));
+  if(button)button.disabled=!matches;
+  return matches;
+}
 async function restoreStateRevision(revision){
   const bridge=stateHistoryBridge();
   if(!bridge||!bridge.canRestore()){toast('Восстанавливать ревизии может только владелец');return false;}
+  if(!validateStateRevisionRestore(revision)){toast(`Введите номер ревизии ${Number(revision)} для подтверждения`);return false;}
   if(!confirm(`Восстановить ревизию ${Number(revision)}? Текущее состояние склада будет заменено, но сохранится в архиве.`))return false;
-  const button=document.querySelector('button[onclick^="restoreStateRevision"]');
+  const button=$('restoreRevisionButton');
   if(button){button.disabled=true;button.textContent='Восстановление…';}
   try{
     const result=await bridge.restore(Number(revision));

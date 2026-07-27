@@ -643,6 +643,29 @@ try {
       expectedRevision: markedRead.data.revision,
     }),
   }, 403);
+  const overflowState = {
+    ...markedReadState,
+    auditLog: [
+      ...Array.from({ length: 201 }, (_, index) => ({ marker: `overflow-${index}` })),
+      ...(markedReadState.auditLog ?? []).slice(0, 1_799),
+    ],
+  };
+  await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.admin, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: overflowState,
+      expectedRevision: markedRead.data.revision,
+    }),
+  }, 403);
+  const overflowAudit = await request("/api/audit", { headers: ownerHeaders });
+  assert.ok(
+    overflowAudit.data.entries.some((entry) =>
+      entry.action === "state_feed_append_rejected"
+      && entry.details.includes("Роль admin")
+      && entry.details.includes("журнал: 201")),
+    "oversized offline feed batches must be attributed with role and row count",
+  );
   stateAfterDeletion = await request("/api/state", { headers: ownerHeaders });
   const parallelStates = [1, 2].map((marker) => ({
     ...stateAfterDeletion.data.state,

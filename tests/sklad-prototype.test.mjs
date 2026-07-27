@@ -79,6 +79,7 @@ async function newHttpServerPage({
   embeddedPhoto = false,
   mediaDelayMs = 0,
   emptyState = false,
+  historyRestoreStatus = 200,
 } = {}) {
   const ctx = await browser.newContext();
   const state = serverStateFixture();
@@ -154,16 +155,17 @@ async function newHttpServerPage({
         contentType: 'application/json',
         body: JSON.stringify(revision
           ? { ...metadata, state }
-          : { revisions: [metadata] }),
+          : { revisions: [metadata], oldestArchivedAt: metadata.archivedAt }),
       });
       return;
     }
     if (url.pathname === '/api/state/history' && request.method() === 'POST') {
       historyRestores += 1;
+      const status = role === 'owner' ? historyRestoreStatus : 403;
       await route.fulfill({
-        status: role === 'owner' ? 200 : 403,
+        status,
         contentType: 'application/json',
-        body: role === 'owner'
+        body: status === 200
           ? JSON.stringify({
             revision: 8,
             restoredFrom: Number(JSON.parse(request.postData() || '{}').revision),
@@ -2167,6 +2169,9 @@ test('server revision history is visible to admins and restorable only by the ow
   await owner.page.waitForFunction(() => document.getElementById('content').textContent.includes('Ревизия 6'));
   await owner.page.evaluate(() => renderStateRevision(6));
   await owner.page.waitForFunction(() => document.getElementById('content').textContent.includes('Восстановить ревизию 6'));
+  assert.equal(await owner.page.isDisabled('#restoreRevisionButton'), true);
+  await owner.page.fill('#restoreRevisionCode', '6');
+  assert.equal(await owner.page.isEnabled('#restoreRevisionButton'), true);
   owner.page.once('dialog', (dialog) => dialog.accept());
   assert.equal(await owner.page.evaluate(() => restoreStateRevision(6)), true);
   assert.equal(owner.counts().historyRestores, 1);
@@ -2182,4 +2187,13 @@ test('server revision history is visible to admins and restorable only by the ow
     false,
   );
   await admin.ctx.close();
+
+  const staleOwner = await newHttpServerPage({ role: 'owner', historyRestoreStatus: 409 });
+  await staleOwner.page.evaluate(() => renderStateRevision(6));
+  await staleOwner.page.fill('#restoreRevisionCode', '6');
+  staleOwner.page.once('dialog', (dialog) => dialog.accept());
+  assert.equal(await staleOwner.page.evaluate(() => restoreStateRevision(6)), false);
+  assert.equal(await staleOwner.page.evaluate(() => window.treshkaServerSync.status().revision), 8);
+  assert.ok(staleOwner.counts().stateGets >= 2, 'a stale restore must force-refresh current server state');
+  await staleOwner.ctx.close();
 });

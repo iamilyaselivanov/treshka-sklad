@@ -23,6 +23,7 @@ import android.util.Base64
 import android.util.Log
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
+import android.webkit.JsResult
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -845,6 +846,43 @@ class MainActivity : AppCompatActivity() {
      * защитная сетка на случай любого другого window.open() в прототипе.
      */
     private inner class PrintPopupChromeClient : WebChromeClient() {
+        override fun onJsAlert(
+            view: WebView?,
+            url: String?,
+            message: String?,
+            result: JsResult
+        ): Boolean {
+            if (isFinishing || isDestroyed) {
+                result.cancel()
+                return true
+            }
+            AlertDialog.Builder(this@MainActivity)
+                .setMessage(message.orEmpty())
+                .setPositiveButton(android.R.string.ok) { _, _ -> result.confirm() }
+                .setOnCancelListener { result.cancel() }
+                .show()
+            return true
+        }
+
+        override fun onJsConfirm(
+            view: WebView?,
+            url: String?,
+            message: String?,
+            result: JsResult
+        ): Boolean {
+            if (isFinishing || isDestroyed) {
+                result.cancel()
+                return true
+            }
+            AlertDialog.Builder(this@MainActivity)
+                .setMessage(message.orEmpty())
+                .setPositiveButton("Подтвердить") { _, _ -> result.confirm() }
+                .setNegativeButton(android.R.string.cancel) { _, _ -> result.cancel() }
+                .setOnCancelListener { result.cancel() }
+                .show()
+            return true
+        }
+
         override fun onCreateWindow(
             view: WebView,
             isDialog: Boolean,

@@ -3,9 +3,11 @@ import { audit, requireUser } from "@/lib/auth";
 import type { SessionUser } from "@/lib/auth";
 import { readJsonObject, RequestBodyTooLargeError } from "@/lib/http";
 import {
+  STATE_HISTORY_CAP_SQL,
   STATE_HISTORY_MAX_ROWS,
+  STATE_HISTORY_PRUNE_SQL,
   stateHistoryArchiveTimestamp,
-  stateHistoryRetentionCutoff,
+  stateHistoryPruneBindings,
   stateHistorySampleCutoff,
 } from "@/lib/state-history";
 import {
@@ -253,6 +255,18 @@ export async function PUT(request: Request) {
       const policy = warehouseHistoryMutationIssue(previous, state, auth.user.role)
         ?? warehouseDeletionPolicy(previous, state, auth.user.role);
       if (policy) {
+        if (
+          "code" in policy
+          && policy.code === "too_many_new_rows"
+          && "auditRowsAdded" in policy
+          && "notificationRowsAdded" in policy
+        ) {
+          await audit(
+            auth.user,
+            "state_feed_append_rejected",
+            `Роль ${auth.user.role} · журнал: ${Number(policy.auditRowsAdded) || 0} · уведомления: ${Number(policy.notificationRowsAdded) || 0}`,
+          ).catch((error) => console.error("warehouse feed rejection audit failed", error));
+        }
         return Response.json(
           { error: policy.error, terminal: true, recover: "server" },
           { status: policy.status },
@@ -290,24 +304,19 @@ export async function PUT(request: Request) {
       ).bind(archivedAt, stateHistorySampleCutoff()),
       stateWrite,
       env.DB.prepare(
-        `DELETE FROM warehouse_state_revisions
-         WHERE state_key = 'main'
-           AND archived_at < ?
-           AND revision <> (
-             SELECT MAX(revision) FROM warehouse_state_revisions
-             WHERE state_key = 'main'
-           )`,
-      ).bind(stateHistoryRetentionCutoff()),
+        `${STATE_HISTORY_PRUNE_SQL}
+         AND EXISTS (
+           SELECT 1 FROM warehouse_state_revisions
+           WHERE state_key = 'main' AND archived_at = ? AND revision = ?
+         )`,
+      ).bind(...stateHistoryPruneBindings(), archivedAt, expectedRevision),
       env.DB.prepare(
-        `DELETE FROM warehouse_state_revisions
-         WHERE state_key = 'main'
-           AND revision NOT IN (
-             SELECT revision FROM warehouse_state_revisions
-             WHERE state_key = 'main'
-             ORDER BY archived_at DESC, revision DESC
-             LIMIT ?
-           )`,
-      ).bind(STATE_HISTORY_MAX_ROWS),
+        `${STATE_HISTORY_CAP_SQL}
+         AND EXISTS (
+           SELECT 1 FROM warehouse_state_revisions
+           WHERE state_key = 'main' AND archived_at = ? AND revision = ?
+         )`,
+      ).bind(STATE_HISTORY_MAX_ROWS, archivedAt, expectedRevision),
       env.DB.prepare(
          `DELETE FROM warehouse_state_items
          WHERE state_key = 'main'

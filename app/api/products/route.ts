@@ -2,9 +2,11 @@ import { env } from "cloudflare:workers";
 import { audit, requireUser } from "@/lib/auth";
 import { readJsonObject } from "@/lib/http";
 import {
+  STATE_HISTORY_CAP_SQL,
   STATE_HISTORY_MAX_ROWS,
+  STATE_HISTORY_PRUNE_SQL,
   stateHistoryArchiveTimestamp,
-  stateHistoryRetentionCutoff,
+  stateHistoryPruneBindings,
 } from "@/lib/state-history";
 import {
   findWarehouseItemId,
@@ -165,25 +167,8 @@ export async function DELETE(request: Request) {
           stateRow.revision,
           id,
         ),
-        env.DB.prepare(
-          `DELETE FROM warehouse_state_revisions
-           WHERE state_key = 'main'
-             AND archived_at < ?
-             AND revision <> (
-               SELECT MAX(revision) FROM warehouse_state_revisions
-               WHERE state_key = 'main'
-             )`,
-        ).bind(stateHistoryRetentionCutoff()),
-        env.DB.prepare(
-          `DELETE FROM warehouse_state_revisions
-           WHERE state_key = 'main'
-             AND revision NOT IN (
-               SELECT revision FROM warehouse_state_revisions
-               WHERE state_key = 'main'
-               ORDER BY archived_at DESC, revision DESC
-               LIMIT ?
-             )`,
-        ).bind(STATE_HISTORY_MAX_ROWS),
+        env.DB.prepare(STATE_HISTORY_PRUNE_SQL).bind(...stateHistoryPruneBindings()),
+        env.DB.prepare(STATE_HISTORY_CAP_SQL).bind(STATE_HISTORY_MAX_ROWS),
         env.DB.prepare(
           `DELETE FROM warehouse_state_items
            WHERE state_key = 'main' AND item_id = ?

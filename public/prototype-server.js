@@ -771,18 +771,34 @@
     return data;
   }
 
-  async function restoreStateRevision(revision) {
+  async function performStateRestore(revision) {
     if (sync.user?.role !== "owner") {
       throw new Error("Восстанавливать ревизии может только владелец");
     }
-    const restored = await stateHistoryRequest("", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        revision: Number(revision),
-        expectedRevision: sync.revision,
-      }),
-    });
+    let restored;
+    try {
+      restored = await stateHistoryRequest("", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          revision: Number(revision),
+          expectedRevision: sync.revision,
+        }),
+      });
+    } catch (error) {
+      if (error?.status === 409) {
+        try {
+          sync.lastServerEtag = "";
+          const latest = await fetchSnapshot({ forceFull: true });
+          if (latest.state) applyRemoteSnapshot(latest, false);
+          error.message = "Склад изменился после открытия истории. Свежие данные уже загружены — проверьте ревизию и подтвердите восстановление ещё раз";
+        } catch (refreshError) {
+          console.warn("state restore conflict refresh failed", refreshError);
+          error.message = "Склад изменился после открытия истории. Не удалось автоматически обновить данные; проверьте связь с сервером";
+        }
+      }
+      throw error;
+    }
     // Re-read the canonical state immediately. The archived payload may have
     // contained references to product cards that the server deliberately
     // discarded while rebuilding the deletion guard index.
@@ -798,7 +814,7 @@
     canRestore: () => sync.user?.role === "owner",
     list: () => stateHistoryRequest(),
     get: (revision) => stateHistoryRequest("?revision=" + encodeURIComponent(Number(revision))),
-    restore: restoreStateRevision,
+    restore: performStateRestore,
   };
 
   window.treshkaServerSync = {
