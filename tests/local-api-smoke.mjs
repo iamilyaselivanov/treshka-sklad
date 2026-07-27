@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 const baseUrl = process.env.E2E_BASE_URL ?? "http://localhost:4316";
+const explorerUrl = process.env.E2E_EXPLORER_URL ?? "";
 const allowRemote = process.env.ALLOW_REMOTE_E2E === "1";
 const parsedBase = new URL(baseUrl);
 if (!allowRemote && !["localhost", "127.0.0.1", "::1"].includes(parsedBase.hostname)) {
@@ -31,6 +32,30 @@ async function request(path, init = {}, expected = 200) {
     `${init.method ?? "GET"} ${path}: expected ${expectedStatuses.join("/")} got ${response.status}: ${JSON.stringify(data)}`,
   );
   return { response, data, elapsedMs };
+}
+
+let localDatabaseId = "";
+async function executeLocalD1(sql, params = []) {
+  assert.ok(explorerUrl, "E2E_EXPLORER_URL is required for corruption recovery probes");
+  if (!localDatabaseId) {
+    const response = await fetch(`${explorerUrl}/d1/database`);
+    const data = await response.json();
+    assert.equal(response.ok, true, JSON.stringify(data));
+    localDatabaseId = String(data.result?.[0]?.uuid || "");
+    assert.ok(localDatabaseId, "Local Explorer did not expose the D1 database");
+  }
+  const response = await fetch(
+    `${explorerUrl}/d1/database/${encodeURIComponent(localDatabaseId)}/raw`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sql, params }),
+    },
+  );
+  const data = await response.json();
+  assert.equal(response.ok, true, JSON.stringify(data));
+  assert.equal(data.success, true, JSON.stringify(data));
+  return data.result?.[0] ?? null;
 }
 
 async function authenticateOwner() {
@@ -938,6 +963,8 @@ try {
   assert.deepEqual(parallelWrites.map((response) => response.status).sort(), [200, 409]);
   const currentBeforeRestore = await request("/api/state", { headers: ownerHeaders });
   const history = await request("/api/state/history", { headers: ownerHeaders });
+  assert.equal(history.data.currentRevision, currentBeforeRestore.data.revision);
+  assert.equal(history.data.currentUpdatedAt, currentBeforeRestore.data.updatedAt);
   assert.ok(history.data.revisions.length >= 2);
   assert.ok(history.data.revisions.length <= 500);
   assert.ok(history.data.revisions.every((entry) => Number(entry.sizeBytes) > 0));
@@ -966,6 +993,95 @@ try {
   assert.equal(restored.data.restoredFrom, targetRevision);
   const stateAfterRestore = await request("/api/state", { headers: ownerHeaders });
   assert.deepEqual(stateAfterRestore.data.state, archived.data.state);
+
+  const validDraft = {
+    id: `draft-${suffix}`,
+    startedAt: "2026-07-27T10:00:00.000Z",
+    actor: { id: auth.user.id, role: "owner", callsign: owner.callsign },
+    itemIds: [],
+    positions: 0,
+    books: {},
+    counts: {},
+  };
+  const stateWithMixedDrafts = {
+    ...stateAfterRestore.data.state,
+    cycleCountDrafts: {
+      [auth.user.id]: validDraft,
+      "broken-user": {
+        ...validDraft,
+        id: `broken-${suffix}`,
+        actor: { id: "someone-else", role: "storekeeper" },
+      },
+    },
+  };
+  await executeLocalD1(
+    "UPDATE warehouse_full_state SET payload = ? WHERE state_key = 'main'",
+    [JSON.stringify(stateWithMixedDrafts)],
+  );
+  const sanitizedMixedDrafts = await request("/api/state", { headers: ownerHeaders });
+  assert.deepEqual(sanitizedMixedDrafts.data.state.cycleCountDrafts, {
+    [auth.user.id]: validDraft,
+  });
+  await request("/api/state", { headers: ownerHeaders });
+  const sanitationAudit = await request("/api/audit", { headers: ownerHeaders });
+  assert.equal(
+    sanitationAudit.data.entries.filter((entry) =>
+      entry.action === "state_sanitized_on_read"
+      && entry.details.includes(`Ревизия ${sanitizedMixedDrafts.data.revision}`)).length,
+    1,
+    "repeated reads of one sanitized revision must produce one bounded audit entry",
+  );
+  const persistedSanitizedDrafts = await request("/api/state", {
+    method: "PUT",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: sanitizedMixedDrafts.data.state,
+      expectedRevision: sanitizedMixedDrafts.data.revision,
+    }),
+  });
+  const legacyArchive = structuredClone(sanitizedMixedDrafts.data.state);
+  delete legacyArchive.schemaVersion;
+  const legacyArchivePayload = JSON.stringify(legacyArchive);
+  await executeLocalD1(
+    `UPDATE warehouse_state_revisions
+     SET payload = ?, size_bytes = ?
+     WHERE state_key = 'main' AND revision = ?`,
+    [legacyArchivePayload, String(legacyArchivePayload.length), String(targetRevision)],
+  );
+  await executeLocalD1(
+    "UPDATE warehouse_full_state SET payload = ? WHERE state_key = 'main'",
+    ["{"],
+  );
+  const damagedOnce = await request("/api/state", { headers: ownerHeaders }, 500);
+  const damagedTwice = await request("/api/state", { headers: ownerHeaders }, 500);
+  assert.equal(damagedOnce.data.revision, persistedSanitizedDrafts.data.revision);
+  assert.equal(damagedOnce.data.recoverable, true);
+  assert.equal(damagedOnce.data.user.id, auth.user.id);
+  assert.equal(damagedTwice.data.revision, damagedOnce.data.revision);
+  const recoveryHistory = await request("/api/state/history", { headers: ownerHeaders });
+  assert.equal(recoveryHistory.data.currentRevision, damagedOnce.data.revision);
+  const corruptionAudit = await request("/api/audit", { headers: ownerHeaders });
+  assert.equal(
+    corruptionAudit.data.entries.filter((entry) =>
+      entry.action === "state_corrupted"
+      && entry.details.includes(`ревизию ${damagedOnce.data.revision}`)).length,
+    1,
+    "repeated reads of one corrupted revision must produce one bounded audit entry",
+  );
+  const recoveredDamagedState = await request("/api/state/history", {
+    method: "POST",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({
+      revision: targetRevision,
+      expectedRevision: recoveryHistory.data.currentRevision,
+    }),
+  });
+  assert.equal(recoveredDamagedState.data.currentStateDamaged, true);
+  assert.equal(recoveredDamagedState.data.legacySchemaAdjusted, true);
+  assert.match(recoveredDamagedState.data.warning, /Текущее состояние склада было повреждено/);
+  assert.match(recoveredDamagedState.data.warning, /текущей поддерживаемой версии схемы/);
+  const healthyAfterRecovery = await request("/api/state", { headers: ownerHeaders });
+  assert.equal(healthyAfterRecovery.data.state.schemaVersion, 4);
 
   const onePixelPng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
   await request("/api/media/images", {

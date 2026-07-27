@@ -9,8 +9,10 @@ import {
   warehouseItemDeletionIssue,
 } from "../lib/warehouse-state.ts";
 import {
+  CURRENT_WAREHOUSE_SCHEMA_VERSION,
   normalizedWarehouseState,
   prepareWarehouseStateRestore,
+  prunedCycleCountDrafts,
   sanitizedLegacyWarehouseState,
 } from "../lib/warehouse-state-normalization.ts";
 
@@ -58,19 +60,41 @@ test("shared state normalization removes legacy scalar rows without mutating the
   assert.equal(source.items.length, 5, "normalization must not mutate the caller's arrays");
 });
 
-test("legacy archive sanitation accepts missing schema and discards obsolete drafts", () => {
+test("legacy archive sanitation accepts missing schema and prunes drafts per account", () => {
+  const validDraft = {
+    id: "draft-valid",
+    startedAt: "2026-07-27T10:00:00.000Z",
+    actor: { id: "owner-1", role: "owner" },
+    itemIds: ["item-valid"],
+    positions: 1,
+    books: { "item-valid": 2 },
+    counts: { "item-valid": 1 },
+  };
   const archive = state({
     items: [{ id: "item-valid" }, "junk"],
     cycleCountDrafts: {
+      "owner-1": validDraft,
       broken: { actor: { id: "someone-else" }, itemIds: [], books: {}, counts: {} },
     },
   });
   delete archive.schemaVersion;
   const sanitized = sanitizedLegacyWarehouseState(archive);
   assert.ok(sanitized);
-  assert.equal(sanitized.schemaVersion, 1);
+  assert.equal(sanitized.schemaVersion, CURRENT_WAREHOUSE_SCHEMA_VERSION);
   assert.deepEqual(sanitized.items, [{ id: "item-valid" }]);
-  assert.equal("cycleCountDrafts" in sanitized, false);
+  assert.deepEqual(sanitized.cycleCountDrafts, { "owner-1": validDraft });
+  assert.deepEqual(prunedCycleCountDrafts(archive.cycleCountDrafts), { "owner-1": validDraft });
+  assert.deepEqual(
+    prunedCycleCountDrafts({
+      ...Object.fromEntries(Array.from({ length: 101 }, (_, index) => [
+        `broken-${index}`,
+        { ...validDraft, actor: { id: "someone-else", role: "worker" } },
+      ])),
+      "owner-1": validDraft,
+    }),
+    { "owner-1": validDraft },
+    "invalid rows before a valid draft must not consume the 100-account output limit",
+  );
 });
 
 test("restore preparation tolerates broken current state and reports discarded drafts", () => {

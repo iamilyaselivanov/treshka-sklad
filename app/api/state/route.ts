@@ -19,6 +19,7 @@ import {
 import type { WarehouseState } from "@/lib/warehouse-state";
 import {
   normalizedWarehouseState,
+  prunedCycleCountDrafts,
   sanitizedLegacyWarehouseState,
   stateRecord,
   validCycleCountDrafts,
@@ -43,6 +44,7 @@ const STATE_ETAG_VERSION = "v2";
 const MAX_AUDIT_LOG_ITEMS = 2_000;
 const MAX_NOTIFICATION_ITEMS = 2_000;
 const MAX_INVENTORY_ACT_ITEMS = 5_000;
+const STATE_CONDITION_AUDIT_WINDOW_MS = 15 * 60 * 1_000;
 
 const SPECIFIC_COLLECTION_LIMITS = {
   auditLog: MAX_AUDIT_LOG_ITEMS,
@@ -191,6 +193,21 @@ function stateEtag(revision: number, user: SessionUser) {
   return `W/"warehouse-main-${STATE_ETAG_VERSION}-${revision}-${authorizationScope}"`;
 }
 
+async function auditStateConditionOnce(
+  user: SessionUser,
+  action: string,
+  details: string,
+) {
+  const cutoff = new Date(Date.now() - STATE_CONDITION_AUDIT_WINDOW_MS).toISOString();
+  const recent = await env.DB.prepare(
+    `SELECT id
+     FROM audit_log
+     WHERE action = ? AND details = ? AND created_at >= ?
+     LIMIT 1`,
+  ).bind(action, details, cutoff).first<{ id: string }>();
+  if (!recent) await audit(user, action, details);
+}
+
 export async function GET(request: Request) {
   const auth = await requireUser(request);
   if (auth.response || !auth.user) return auth.response;
@@ -212,9 +229,16 @@ export async function GET(request: Request) {
   }
   try {
     const rawState = JSON.parse(row.payload);
-    const parsedState = normalizedWarehouseState(rawState)
-      ?? sanitizedLegacyWarehouseState(rawState);
+    const normalizedState = normalizedWarehouseState(rawState);
+    const parsedState = normalizedState ?? sanitizedLegacyWarehouseState(rawState);
     if (!parsedState) throw new Error("invalid state");
+    if (!normalizedState) {
+      await auditStateConditionOnce(
+        auth.user,
+        "state_sanitized_on_read",
+        `Ревизия ${row.revision} прочитана с безопасным восстановлением повреждённых полей`,
+      ).catch((error) => console.error("warehouse state sanitation audit failed", error));
+    }
     const projectedState = projectWarehouseStateForUser(parsedState, auth.user);
     const projectedPayload = JSON.stringify(projectedState);
     return Response.json(
@@ -230,9 +254,21 @@ export async function GET(request: Request) {
       { headers: { "cache-control": "no-store", etag } },
     );
   } catch {
-    await audit(auth.user, "state_corrupted", `Не удалось прочитать ревизию ${row.revision}`);
+    await auditStateConditionOnce(
+      auth.user,
+      "state_corrupted",
+      `Не удалось прочитать ревизию ${row.revision}`,
+    ).catch((error) => console.error("warehouse state corruption audit failed", error));
     return Response.json(
-      { error: "Серверный снимок повреждён. Обратитесь к владельцу, данные не перезаписаны" },
+      {
+        error: "Серверный снимок повреждён. Владелец может восстановить его из истории ревизий",
+        revision: row.revision,
+        updatedAt: row.updated_at,
+        updatedBy: row.updated_by,
+        recoverable: true,
+        user: auth.user,
+        partial: auth.user.role === "worker",
+      },
       { status: 500, headers: { "cache-control": "no-store" } },
     );
   }
@@ -307,18 +343,23 @@ export async function PUT(request: Request) {
   if (current?.cycleCountDrafts) {
     try {
       const parsedDrafts = JSON.parse(current.cycleCountDrafts);
+      mergedDrafts = validCycleCountDrafts(parsedDrafts)
+        ? { ...parsedDrafts as Record<string, unknown> }
+        : prunedCycleCountDrafts(parsedDrafts);
       if (!validCycleCountDrafts(parsedDrafts)) {
-        return Response.json(
-          { error: "Серверная карта черновиков инвентаризации повреждена" },
-          { status: 500 },
-        );
+        await auditStateConditionOnce(
+          auth.user,
+          "state_drafts_sanitized_on_write",
+          `Ревизия ${current.revision} содержала повреждённые черновики инвентаризации`,
+        ).catch((error) => console.error("warehouse draft sanitation audit failed", error));
       }
-      mergedDrafts = { ...parsedDrafts as Record<string, unknown> };
     } catch {
-      return Response.json(
-        { error: "Серверная карта черновиков инвентаризации повреждена" },
-        { status: 500 },
-      );
+      mergedDrafts = {};
+      await auditStateConditionOnce(
+        auth.user,
+        "state_drafts_sanitized_on_write",
+        `Ревизия ${current.revision} содержала нечитаемую карту черновиков инвентаризации`,
+      ).catch((error) => console.error("warehouse draft sanitation audit failed", error));
     }
   }
   delete mergedDrafts[auth.user.id];
@@ -417,7 +458,9 @@ export async function PUT(request: Request) {
       }
       let previous: WarehouseState | null = null;
       try {
-        previous = normalizedWarehouseState(JSON.parse(previousRow.payload));
+        const rawPrevious = JSON.parse(previousRow.payload);
+        previous = normalizedWarehouseState(rawPrevious)
+          ?? sanitizedLegacyWarehouseState(rawPrevious);
       } catch {
         // Never overwrite a damaged snapshot before an owner can export/recover it.
       }

@@ -654,6 +654,8 @@ test("inventory archive stays within D1 row limits and allocates numbers atomica
   assert.match(stateRoute, /normalizedWarehouseState\(rawState\)[\s\S]*sanitizedLegacyWarehouseState\(rawState\)/);
   assert.match(stateNormalization, /state\.items = \(state\.items as unknown\[\]\)\.filter/);
   assert.match(stateNormalization, /state\.inventoryActs = state\.inventoryActs\.filter/);
+  assert.match(stateNormalization, /function prunedCycleCountDrafts/);
+  assert.match(stateNormalization, /state\.schemaVersion = CURRENT_WAREHOUSE_SCHEMA_VERSION/);
   assert.match(stateNormalization, /function prepareWarehouseStateRestore/);
   assert.equal((stateRoute.match(/item_entry\.type = 'object'/g) ?? []).length, 2);
   assert.equal((historyRoute.match(/item_entry\.type = 'object'/g) ?? []).length, 1);
@@ -662,8 +664,14 @@ test("inventory archive stays within D1 row limits and allocates numbers atomica
   assert.match(historyRoute, /inventory_entry\.type = 'object'/);
   assert.match(historyRoute, /prepareWarehouseStateRestore\(archivedValue, currentValue\)/);
   assert.match(historyRoute, /currentStateDamaged/);
+  assert.match(historyRoute, /currentRevision: current\?\.revision \?\? 0/);
+  assert.match(historyRoute, /warnings\.join\(" · "\)/);
   assert.match(historyRoute, /if \(!auth\.user\) \{\s*return Response\.json/);
+  assert.match(stateRoute, /auditStateConditionOnce/);
+  assert.match(stateRoute, /recoverable: true/);
   assert.match(stateRoute, /state_history_mutation_rejected/);
+  assert.match(browserSync, /data\.recoverable === true/);
+  assert.match(browserSync, /sync\.recoveryRequired/);
   assert.match(browserSync, /data\.terminal === true/);
   assert.match(browserSync, /recoverPendingInventoryActs/);
 });

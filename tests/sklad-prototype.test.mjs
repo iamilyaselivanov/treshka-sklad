@@ -80,6 +80,7 @@ async function newHttpServerPage({
   mediaDelayMs = 0,
   emptyState = false,
   historyRestoreStatus = 200,
+  corruptedState = false,
 } = {}) {
   const ctx = await browser.newContext();
   const state = serverStateFixture();
@@ -92,6 +93,7 @@ async function newHttpServerPage({
   let mediaPosts = 0;
   let historyGets = 0;
   let historyRestores = 0;
+  const historyRestoreBodies = [];
   const putBodies = [];
   await ctx.route('http://treshka.test/**', async (route) => {
     const request = route.request();
@@ -106,6 +108,28 @@ async function newHttpServerPage({
     }
     if (url.pathname === '/api/state' && request.method() === 'GET') {
       stateGets += 1;
+      const responseRole = stateGets >= 2 && promoteToRole ? promoteToRole : role;
+      if (corruptedState && historyRestores === 0) {
+        await route.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            error: 'Серверный снимок повреждён. Владелец может восстановить его из истории ревизий',
+            revision: 7,
+            updatedAt: '2026-07-27T10:00:00.000Z',
+            recoverable: true,
+            partial: responseRole === 'worker',
+            user: {
+              id: 'test-promotable-user',
+              callsign: `Тест ${responseRole}`,
+              login: 'test-promotable-user',
+              role: responseRole,
+              assignment: responseRole === 'worker' ? 'ТЭЧ' : '',
+            },
+          }),
+        });
+        return;
+      }
       const forcedFullFetch = !request.headers()['if-none-match'];
       if (
         stateGets === 1
@@ -113,7 +137,6 @@ async function newHttpServerPage({
         || (stateGets > 2 && promoteToRole && forcedFullFetch)
         || (historyRestores > 0 && forcedFullFetch)
       ) {
-        const responseRole = stateGets >= 2 && promoteToRole ? promoteToRole : role;
         await route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -155,12 +178,18 @@ async function newHttpServerPage({
         contentType: 'application/json',
         body: JSON.stringify(revision
           ? { ...metadata, state }
-          : { revisions: [metadata], oldestArchivedAt: metadata.archivedAt }),
+          : {
+              revisions: [metadata],
+              oldestArchivedAt: metadata.archivedAt,
+              currentRevision: historyRestores > 0 ? 8 : 7,
+              currentUpdatedAt: '2026-07-27T10:00:00.000Z',
+            }),
       });
       return;
     }
     if (url.pathname === '/api/state/history' && request.method() === 'POST') {
       historyRestores += 1;
+      historyRestoreBodies.push(JSON.parse(request.postData() || '{}'));
       const status = role === 'owner' ? historyRestoreStatus : 403;
       await route.fulfill({
         status,
@@ -212,6 +241,7 @@ async function newHttpServerPage({
     ctx,
     page,
     counts: () => ({ stateGets, statePuts, mediaPosts, historyGets, historyRestores }),
+    historyRestoreBodies,
     putBodies,
   };
 }
@@ -2354,4 +2384,39 @@ test('server revision history is visible to admins and restorable only by the ow
   assert.equal(await staleOwner.page.evaluate(() => window.treshkaServerSync.status().revision), 8);
   assert.ok(staleOwner.counts().stateGets >= 2, 'a stale restore must force-refresh current server state');
   await staleOwner.ctx.close();
+});
+
+test('a corrupted live snapshot opens recoverable history without retrying or uploading local data', async () => {
+  const owner = await newHttpServerPage({ role: 'owner', corruptedState: true });
+  await owner.page.waitForFunction(() =>
+    document.getElementById('content').textContent.includes('Текущий снимок ревизии 7 повреждён'));
+  const initialGets = owner.counts().stateGets;
+  await owner.page.waitForTimeout(3_200);
+  assert.equal(owner.counts().stateGets, initialGets, 'damaged state must not trigger a 2.5-second GET loop');
+  assert.equal(owner.counts().statePuts, 0, 'local state must never overwrite a damaged server snapshot');
+  assert.deepEqual(
+    await owner.page.evaluate(() => window.treshkaServerSync.status()),
+    {
+      ready: true,
+      busy: false,
+      revision: 7,
+      payloadBytes: 0,
+      conflict: false,
+      partial: false,
+      lastError: 'Серверный снимок повреждён. Владелец может восстановить его из истории ревизий',
+      consecutiveFailures: 0,
+      nextAttemptAt: 0,
+      recoveryRequired: true,
+    },
+  );
+  await owner.page.evaluate(() => renderStateRevision(6));
+  await owner.page.fill('#restoreRevisionCode', '6');
+  owner.page.once('dialog', (dialog) => dialog.accept());
+  assert.equal(await owner.page.evaluate(() => restoreStateRevision(6)), true);
+  assert.equal(owner.historyRestoreBodies[0].expectedRevision, 7);
+  assert.equal(
+    await owner.page.evaluate(() => window.treshkaServerSync.status().recoveryRequired),
+    false,
+  );
+  await owner.ctx.close();
 });

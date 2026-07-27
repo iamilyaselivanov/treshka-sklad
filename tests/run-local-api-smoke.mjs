@@ -104,9 +104,17 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   if (!ready) throw new Error(`Local API did not start:\n${workerLog.slice(-8_000)}`);
+  const explorerUrl = workerLog.match(
+    /Local Explorer API is available at (http:\/\/[^\s]+\/cdn-cgi\/explorer\/api)/,
+  )?.[1];
+  if (!explorerUrl) throw new Error(`Local Explorer API was not announced:\n${workerLog.slice(-8_000)}`);
 
   run([path.join(root, "tests", "local-api-smoke.mjs")], {
-    env: { ...commonEnv, E2E_BASE_URL: baseUrl },
+    env: {
+      ...commonEnv,
+      E2E_BASE_URL: baseUrl,
+      E2E_EXPLORER_URL: explorerUrl,
+    },
   });
 } finally {
   if (worker && worker.exitCode === null) {

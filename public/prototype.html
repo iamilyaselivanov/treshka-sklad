@@ -4416,7 +4416,9 @@ async function renderStateHistory(){
   try{
     const data=await bridge.list();
     const revisions=Array.isArray(data.revisions)?data.revisions:[];
+    const recoveryRequired=typeof bridge.recoveryRequired==='function'&&bridge.recoveryRequired();
     $('content').innerHTML=`
+      ${recoveryRequired?`<div class="progress-note bad"><b>Текущий снимок ревизии ${Number(data.currentRevision)||'—'} повреждён.</b><br>${bridge.canRestore()?'Выберите исправную архивную ревизию и восстановите её. Автоматическая отправка локальных данных остановлена, чтобы не перезаписать сервер.':'Восстановление должен выполнить владелец. Автоматическая синхронизация остановлена.'}</div>`:''}
       <div class="progress-note">Самый старый доступный снимок: ${esc(stateHistoryDate(data.oldestArchivedAt))}. Последние сутки хранятся подробно, затем остаётся один снимок в час и один в сутки. Восстановление доступно только владельцу.</div>
       ${revisions.map(row=>`<div class="card" onclick="renderStateRevision(${Number(row.revision)})">
         <div class="row"><div class="icbox">#${Number(row.revision)}</div><div class="grow"><div class="t">Ревизия ${Number(row.revision)} ${row.pinned?'<span class="chip green">закреплена</span>':''}</div><div class="s">Архив: ${esc(stateHistoryDate(row.archivedAt))}</div><div class="s">Автор: ${esc(row.updatedBy||'—')} · ${stateHistorySize(row.sizeBytes)}</div></div><div style="color:var(--muted)">›</div></div>

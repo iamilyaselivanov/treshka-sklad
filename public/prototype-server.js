@@ -19,6 +19,7 @@
     lastServerEtag: "",
     partial: false,
     mediaMigrationPromise: null,
+    recoveryRequired: false,
   };
   const push = {
     registering: false,
@@ -530,10 +531,20 @@
         unchanged: true,
       };
     }
-    const data = await response.json();
+    const data = await response.json().catch(() => ({}));
     if (response.status === 401 || !data.user) {
       parent.postMessage({ type: "treshka-auth-required" }, location.origin);
       throw new Error("Требуется повторный вход");
+    }
+    if (!response.ok && data.recoverable === true && Number(data.revision) > 0) {
+      adoptServerUser(data.user);
+      sync.revision = Number(data.revision);
+      sync.partial = Boolean(data.partial);
+      sync.recoveryRequired = true;
+      sync.lastServerStateJson = "";
+      sync.lastServerEtag = "";
+      sync.lastError = data.error || "Серверный снимок повреждён";
+      return data;
     }
     if (!response.ok) throw new Error(data.error || "Не удалось получить склад");
     // The first request may fail while the device is offline. Adopt the user on
@@ -546,12 +557,13 @@
     if (data.state == null) sync.partial = Boolean(data.partial);
     sync.lastServerStateJson = data.state == null ? "" : JSON.stringify(data.state);
     sync.lastServerEtag = response.headers.get("etag") || "";
+    sync.recoveryRequired = false;
     noteSyncSuccess();
     return data;
   }
 
   async function uploadIfChanged() {
-    if (!sync.ready || sync.busy || sync.conflict || !canUploadState()) return false;
+    if (!sync.ready || sync.busy || sync.conflict || !canUploadState() || sync.recoveryRequired) return false;
     const state = normalizedState();
     const payload = JSON.stringify(state);
     if (payload === sync.lastUploaded) return true;
@@ -612,7 +624,7 @@
   }
 
   async function pollServer() {
-    if (!sync.ready || sync.busy || sync.conflict) return;
+    if (!sync.ready || sync.busy || sync.conflict || sync.recoveryRequired) return;
     sync.busy = true;
     try {
       const snapshot = await fetchSnapshot();
@@ -667,7 +679,7 @@
   }
 
   async function synchronize() {
-    if (!sync.ready || sync.busy || sync.conflict) return;
+    if (!sync.ready || sync.busy || sync.conflict || sync.recoveryRequired) return;
     if (Date.now() < sync.nextAttemptAt) return;
     // Re-read the native token even after a successful registration: FCM can
     // rotate it while the app is open.
@@ -729,6 +741,20 @@
   async function initialize() {
     try {
       const data = await fetchSnapshot();
+      if (data.recoverable === true) {
+        sync.ready = true;
+        sync.lastUploaded = "";
+        go("more");
+        if (["owner", "admin"].includes(sync.user?.role)) {
+          await renderStateHistory();
+        } else {
+          toast("⚠ Снимок склада повреждён. Восстановление должен выполнить владелец.");
+        }
+        // Keep a timer installed so synchronization resumes automatically
+        // after the owner restores a healthy revision from this screen.
+        sync.timer = window.setInterval(synchronize, 15_000);
+        return;
+      }
       sync.revision = data.revision || 0;
       sync.partial = Boolean(data.partial);
       if (data.state) {
@@ -791,6 +817,13 @@
     }
     let restored;
     try {
+      if (!Number.isInteger(sync.revision) || sync.revision < 1) {
+        const history = await stateHistoryRequest();
+        sync.revision = Number(history.currentRevision || 0);
+      }
+      if (!Number.isInteger(sync.revision) || sync.revision < 1) {
+        throw new Error("Сервер не сообщил номер текущей ревизии");
+      }
       restored = await stateHistoryRequest("", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -826,7 +859,14 @@
   window.treshkaStateHistory = {
     canView: () => !!sync.user && ["owner", "admin"].includes(sync.user.role),
     canRestore: () => sync.user?.role === "owner",
-    list: () => stateHistoryRequest(),
+    recoveryRequired: () => sync.recoveryRequired,
+    list: async () => {
+      const data = await stateHistoryRequest();
+      if (sync.recoveryRequired && Number(data.currentRevision) > 0) {
+        sync.revision = Number(data.currentRevision);
+      }
+      return data;
+    },
     get: (revision) => stateHistoryRequest("?revision=" + encodeURIComponent(Number(revision))),
     restore: performStateRestore,
   };
@@ -875,6 +915,7 @@
       lastError: sync.lastError,
       consecutiveFailures: sync.consecutiveFailures,
       nextAttemptAt: sync.nextAttemptAt,
+      recoveryRequired: sync.recoveryRequired,
     }),
     flush: synchronize,
     resolveConflict,

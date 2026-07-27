@@ -70,7 +70,7 @@ export async function GET(request: Request) {
       return Response.json({ error: "Архивная ревизия повреждена" }, { status: 500 });
     }
   }
-  const [result, oldest] = await Promise.all([
+  const [result, oldest, current] = await Promise.all([
     env.DB.prepare(
       `SELECT revision, updated_at AS updatedAt, updated_by AS updatedBy,
               size_bytes AS sizeBytes, archived_at AS archivedAt,
@@ -85,11 +85,18 @@ export async function GET(request: Request) {
        FROM warehouse_state_revisions
        WHERE state_key = 'main'`,
     ).first<{ archivedAt: string | null }>(),
+    env.DB.prepare(
+      `SELECT revision, updated_at AS updatedAt
+       FROM warehouse_full_state
+       WHERE state_key = 'main'`,
+    ).first<{ revision: number; updatedAt: string }>(),
   ]);
   const revisions = result.results ?? [];
   return Response.json({
     revisions,
     oldestArchivedAt: oldest?.archivedAt ?? null,
+    currentRevision: current?.revision ?? 0,
+    currentUpdatedAt: current?.updatedAt ?? null,
     retention: {
       fullDetailHours: STATE_HISTORY_FULL_DETAIL_HOURS,
       hourlyDays: STATE_HISTORY_HOURLY_DAYS,
@@ -266,6 +273,14 @@ export async function POST(request: Request) {
         ? ` · отброшено ссылок на удалённые карточки: ${discardedItemReferences}`
         : ""),
   ).catch((error) => console.error("warehouse state restore audit failed", error));
+  const warnings = [
+    currentStateDamaged
+      ? "Текущее состояние склада было повреждено; откат выполнен, текущие черновики инвентаризации отброшены"
+      : "",
+    prepared.legacySchemaAdjusted
+      ? "Старая архивная ревизия приведена к текущей поддерживаемой версии схемы"
+      : "",
+  ].filter(Boolean);
   return Response.json({
     revision,
     restoredFrom: targetRevision,
@@ -273,10 +288,6 @@ export async function POST(request: Request) {
     discardedItemReferences,
     legacySchemaAdjusted: prepared.legacySchemaAdjusted,
     currentStateDamaged,
-    warning: currentStateDamaged
-      ? "Текущее состояние склада было повреждено; откат выполнен, текущие черновики инвентаризации отброшены"
-      : prepared.legacySchemaAdjusted
-        ? "Старая архивная ревизия приведена к поддерживаемой версии схемы"
-        : undefined,
+    warning: warnings.length ? warnings.join(" · ") : undefined,
   });
 }
