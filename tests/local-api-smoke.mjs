@@ -429,6 +429,51 @@ try {
   state.data.state = sharedState;
   const pendingAfterCommit = await request("/api/inventory/acts", { headers: ownerHeaders });
   assert.deepEqual(pendingAfterCommit.data.pending, []);
+  const foreignPendingId = `inventory-owner-${crypto.randomUUID()}`;
+  const ownerPending = await request("/api/inventory/acts", {
+    method: "POST",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({
+      id: foreignPendingId,
+      startedAt: inventoryStartedAt,
+      finishedAt: new Date().toISOString(),
+      lines: inventoryCommittedState.items.map((item) => ({
+        id: item.id,
+        name: item.name,
+        sku: item.sku,
+        unit: item.unit,
+        book: Number(item.stock),
+        counted: Number(item.stock),
+      })),
+    }),
+  }, 201);
+  assert.equal(ownerPending.data.act.actor.id, auth.user.id);
+  const pendingHiddenFromOtherStorekeeper = await request("/api/inventory/acts", {
+    headers: { cookie: roleCookies.storekeeper },
+  });
+  assert.deepEqual(pendingHiddenFromOtherStorekeeper.data.pending, []);
+  const pendingVisibleToManager = await request("/api/inventory/acts", { headers: ownerHeaders });
+  assert.equal(pendingVisibleToManager.data.pending[0].id, foreignPendingId);
+  for (const [field, replacement] of [
+    ["no", "ИНВ-ПОДМЕНА"],
+    ["actor", { ...inventoryHeader.actor, name: "Подменённый автор" }],
+    ["totals", { ...inventoryHeader.totals, mismatched: 999 }],
+  ]) {
+    const forgedHeader = { ...inventoryHeader, [field]: replacement };
+    const forgedExistingInventoryAct = await request("/api/state", {
+      method: "PUT",
+      headers: { ...ownerHeaders, "content-type": "application/json" },
+      body: JSON.stringify({
+        state: { ...inventoryCommittedState, inventoryActs: [forgedHeader] },
+        expectedRevision: inventoryCommitted.data.revision,
+      }),
+    }, 403);
+    assert.match(
+      forgedExistingInventoryAct.data.error,
+      /сформированные акты инвентаризации/,
+      `owner must not rewrite signed inventory header field ${field}`,
+    );
+  }
   const ownerInventoryWipe = await request("/api/state", {
     method: "PUT",
     headers: { ...ownerHeaders, "content-type": "application/json" },
@@ -438,6 +483,55 @@ try {
     }),
   }, 403);
   assert.match(ownerInventoryWipe.data.error, /сформированные акты инвентаризации/);
+  const draftFor = (userId, role) => ({
+    id: `draft-${userId}`,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    positions: inventoryCommittedState.items.length,
+    itemIds: inventoryCommittedState.items.map((item) => item.id),
+    books: Object.fromEntries(inventoryCommittedState.items.map((item) => [item.id, Number(item.stock)])),
+    counts: {},
+    actor: { id: userId, login: userId, role },
+  });
+  const ownerDraft = draftFor(auth.user.id, "owner");
+  const ownerDraftSaved = await request("/api/state", {
+    method: "PUT",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: {
+        ...inventoryCommittedState,
+        cycleCountDrafts: { [auth.user.id]: ownerDraft },
+      },
+      expectedRevision: inventoryCommitted.data.revision,
+    }),
+  });
+  const storekeeperBeforeDraft = await request("/api/state", {
+    headers: { cookie: roleCookies.storekeeper },
+  });
+  assert.deepEqual(storekeeperBeforeDraft.data.state.cycleCountDrafts, {});
+  const storekeeperDraft = draftFor(createdIds[1], "storekeeper");
+  const storekeeperDraftSaved = await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.storekeeper, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: {
+        ...storekeeperBeforeDraft.data.state,
+        cycleCountDrafts: { [createdIds[1]]: storekeeperDraft },
+      },
+      expectedRevision: ownerDraftSaved.data.revision,
+    }),
+  });
+  const ownerDraftView = await request("/api/state", { headers: ownerHeaders });
+  assert.deepEqual(Object.keys(ownerDraftView.data.state.cycleCountDrafts), [auth.user.id]);
+  assert.equal(ownerDraftView.data.state.cycleCountDrafts[auth.user.id].id, ownerDraft.id);
+  const storekeeperDraftView = await request("/api/state", {
+    headers: { cookie: roleCookies.storekeeper },
+  });
+  assert.deepEqual(Object.keys(storekeeperDraftView.data.state.cycleCountDrafts), [createdIds[1]]);
+  assert.equal(storekeeperDraftView.data.state.cycleCountDrafts[createdIds[1]].id, storekeeperDraft.id);
+  const adminDraftView = await request("/api/state", { headers: { cookie: roleCookies.admin } });
+  assert.deepEqual(adminDraftView.data.state.cycleCountDrafts, {});
+  state.data.revision = storekeeperDraftSaved.data.revision;
   sharedState.accounts = [{ id: "must-not-be-stored", role: "owner" }];
   sharedState.currentAccountId = "must-not-be-stored";
   sharedState.currentRole = "admin";

@@ -313,6 +313,7 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
     text("drizzle/0010_optimal_ender_wiggin.sql"),
     text("drizzle/0011_dear_war_machine.sql"),
     text("drizzle/0012_young_proemial_gods.sql"),
+    text("drizzle/0013_thin_radioactive_man.sql"),
   ]);
   const apply = (database, sql) => {
     for (const statement of sql.split("--> statement-breakpoint")) {
@@ -334,6 +335,9 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   assert.match(migrations[12], /ADD `pinned`/);
   assert.match(migrations[12], /ADD `reason`/);
   assert.match(migrations[12], /json_each\(warehouse_full_state\.payload, '\$\.inventoryActs'\)/);
+  assert.match(migrations[13], /DROP TABLE `inventory_act_counters`/);
+  assert.match(migrations[13], /ADD `header_json`/);
+  assert.match(migrations[13], /SET `header_json` = COALESCE/);
 
   const clean = new DatabaseSync(":memory:");
   for (const migration of migrations) apply(clean, migration);
@@ -341,7 +345,7 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   assert.deepEqual(
     clean.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all()
       .map((row) => row.name),
-    ["audit_log", "inventory_act_archive", "inventory_act_counters", "login_throttle", "products", "push_deliveries", "push_delivery_attempts", "push_devices", "push_events", "push_maintenance_state", "sessions", "users", "warehouse_full_state", "warehouse_state_inventory_acts", "warehouse_state_items", "warehouse_state_revisions"],
+    ["audit_log", "inventory_act_archive", "login_throttle", "products", "push_deliveries", "push_delivery_attempts", "push_devices", "push_events", "push_maintenance_state", "sessions", "users", "warehouse_full_state", "warehouse_state_inventory_acts", "warehouse_state_items", "warehouse_state_revisions"],
   );
   clean.close();
 
@@ -402,6 +406,8 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   apply(adopted, migrations[9]);
   apply(adopted, migrations[10]);
   apply(adopted, migrations[11]);
+  apply(adopted, migrations[12]);
+  apply(adopted, migrations[13]);
   assert.deepEqual(
     adopted.prepare("SELECT item_id AS itemId FROM warehouse_state_items WHERE state_key='main'").all()
       .map((row) => row.itemId),
@@ -594,8 +600,12 @@ test("inventory archive stays within D1 row limits and allocates numbers atomica
   assert.match(inventoryRoute, /json_set\(\?, '\$\.no', candidate\.number\)/);
   assert.match(inventoryRoute, /RETURNING id, number, payload, actor_user_id/);
   assert.doesNotMatch(inventoryRoute, /INSERT INTO inventory_act_counters/);
-  assert.match(inventoryRoute, /json_each\(warehouse\.payload, '\$\.inventoryActs'\)/);
+  assert.match(inventoryRoute, /LEFT JOIN warehouse_state_inventory_acts AS state_act/);
+  assert.match(inventoryRoute, /archive\.actor_user_id = \?/);
   assert.match(stateRoute, /warehouse_state_inventory_acts/);
+  assert.match(stateRoute, /header_json AS headerJson/);
+  assert.match(stateRoute, /nextInventoryActHeaders\.get\(actId\) !== headerJson/);
+  assert.match(stateRoute, /previousItemIds\.length === 0 && Number\(productCount\?\.count/);
   assert.match(stateRoute, /state_history_mutation_rejected/);
   assert.match(browserSync, /data\.terminal === true/);
   assert.match(browserSync, /recoverPendingInventoryActs/);

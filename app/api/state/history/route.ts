@@ -12,6 +12,8 @@ import {
   stateHistoryArchiveTimestamp,
   stateHistoryPruneBindings,
 } from "@/lib/state-history";
+import { projectWarehouseStateForUser } from "@/lib/warehouse-state";
+import type { WarehouseState } from "@/lib/warehouse-state";
 
 export const dynamic = "force-dynamic";
 
@@ -28,7 +30,7 @@ type RevisionRow = {
 
 export async function GET(request: Request) {
   const auth = await requireUser(request, ["owner", "admin"]);
-  if (auth.response) return auth.response;
+  if (auth.response || !auth.user) return auth.response;
   const requestedRevision = new URL(request.url).searchParams.get("revision");
   if (requestedRevision != null) {
     const revision = Number(requestedRevision);
@@ -42,9 +44,13 @@ export async function GET(request: Request) {
     ).bind(revision).first<RevisionRow>();
     if (!row) return Response.json({ error: "Ревизия не найдена" }, { status: 404 });
     try {
+      const projectedState = projectWarehouseStateForUser(
+        JSON.parse(row.payload) as WarehouseState,
+        auth.user,
+      );
       return Response.json({
         revision: row.revision,
-        state: JSON.parse(row.payload),
+        state: projectedState,
         updatedAt: row.updated_at,
         updatedBy: row.updated_by,
         sizeBytes: row.size_bytes,
@@ -107,8 +113,8 @@ export async function POST(request: Request) {
   }
   const [current, archived] = await Promise.all([
     env.DB.prepare(
-      "SELECT revision FROM warehouse_full_state WHERE state_key = 'main'",
-    ).first<{ revision: number }>(),
+      "SELECT revision, payload FROM warehouse_full_state WHERE state_key = 'main'",
+    ).first<{ revision: number; payload: string }>(),
     env.DB.prepare(
       `SELECT payload FROM warehouse_state_revisions
        WHERE state_key = 'main' AND revision = ?`,
@@ -121,14 +127,23 @@ export async function POST(request: Request) {
     );
   }
   if (!archived) return Response.json({ error: "Архивная ревизия не найдена" }, { status: 404 });
+  let restoredPayload = "";
   try {
     const parsed = JSON.parse(archived.payload) as Record<string, unknown>;
+    const currentState = JSON.parse(current.payload) as Record<string, unknown>;
     if (
       !parsed || typeof parsed !== "object" || Array.isArray(parsed)
       || !Array.isArray(parsed.items) || !Array.isArray(parsed.posts) || !Array.isArray(parsed.docs)
+      || !currentState || typeof currentState !== "object" || Array.isArray(currentState)
     ) {
       throw new Error("invalid state");
     }
+    // Drafts are per-user volatile work, not signed warehouse history. A
+    // warehouse rollback must not disclose, erase or resurrect anybody's
+    // unfinished count from an old snapshot.
+    parsed.cycleCountDrafts = currentState.cycleCountDrafts ?? {};
+    delete parsed.cycleCountDraft;
+    restoredPayload = JSON.stringify(parsed);
   } catch {
     return Response.json({ error: "Архивная ревизия повреждена" }, { status: 500 });
   }
@@ -152,7 +167,7 @@ export async function POST(request: Request) {
         `UPDATE warehouse_full_state
          SET revision = ?, payload = ?, updated_at = ?, updated_by = ?
          WHERE state_key = 'main' AND revision = ?`,
-      ).bind(revision, archived.payload, updatedAt, auth.user.callsign, expectedRevision),
+      ).bind(revision, restoredPayload, updatedAt, auth.user.callsign, expectedRevision),
       env.DB.prepare(STATE_HISTORY_PRUNE_SQL).bind(...stateHistoryPruneBindings()),
       env.DB.prepare(STATE_HISTORY_CAP_SQL).bind(STATE_HISTORY_MAX_ROWS),
       env.DB.prepare(
@@ -182,14 +197,17 @@ export async function POST(request: Request) {
            )`,
       ).bind(revision),
       env.DB.prepare(
-        `INSERT OR IGNORE INTO warehouse_state_inventory_acts (state_key, act_id)
+        `INSERT INTO warehouse_state_inventory_acts (state_key, act_id, header_json)
          SELECT warehouse_full_state.state_key,
-                TRIM(CAST(json_extract(value, '$.id') AS TEXT))
+                TRIM(CAST(json_extract(value, '$.id') AS TEXT)),
+                json(value)
          FROM warehouse_full_state,
               json_each(warehouse_full_state.payload, '$.inventoryActs')
          WHERE warehouse_full_state.state_key = 'main'
            AND warehouse_full_state.revision = ?
-           AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''`,
+           AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''
+         ON CONFLICT(state_key, act_id) DO UPDATE
+         SET header_json = excluded.header_json`,
       ).bind(revision),
       // Old snapshots may reference a product card that was deliberately
       // deleted after the snapshot was captured. Never recreate a dangling

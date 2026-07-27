@@ -27,7 +27,9 @@ type StateRow = {
   updated_by: string;
 };
 
-type StateMetaRow = Omit<StateRow, "payload">;
+type StateMetaRow = Omit<StateRow, "payload"> & {
+  cycleCountDrafts: string | null;
+};
 
 const MAX_STATE_BYTES = 1_500_000;
 const MAX_STATE_REQUEST_BYTES = 1_550_000;
@@ -357,13 +359,10 @@ export async function PUT(request: Request) {
       { status: 428 },
     );
   }
-  const payload = JSON.stringify(state);
-  const sizeBytes = new TextEncoder().encode(payload).byteLength;
-  if (sizeBytes > MAX_STATE_BYTES) {
-    return Response.json({ error: "Данные склада превышают безопасный размер 1,5 МБ" }, { status: 413 });
-  }
   const current = await env.DB.prepare(
-    "SELECT revision, updated_at, updated_by FROM warehouse_full_state WHERE state_key = 'main'",
+    `SELECT revision, updated_at, updated_by,
+            json_extract(payload, '$.cycleCountDrafts') AS cycleCountDrafts
+     FROM warehouse_full_state WHERE state_key = 'main'`,
   ).first<StateMetaRow>();
   if (
     (expectedRevision === 0 && current)
@@ -379,6 +378,38 @@ export async function PUT(request: Request) {
       },
       { status: 409, headers: { "cache-control": "no-store" } },
     );
+  }
+  // Every device receives only its account's draft. Merge that one slot into
+  // the server map so a stale or deliberately handcrafted snapshot cannot
+  // inspect, replace or erase another storekeeper's unfinished count.
+  const incomingDrafts = stateRecord(state.cycleCountDrafts) ?? {};
+  let mergedDrafts: Record<string, unknown> = {};
+  if (current?.cycleCountDrafts) {
+    try {
+      const parsedDrafts = JSON.parse(current.cycleCountDrafts);
+      if (!validCycleCountDrafts(parsedDrafts)) {
+        return Response.json(
+          { error: "Серверная карта черновиков инвентаризации повреждена" },
+          { status: 500 },
+        );
+      }
+      mergedDrafts = { ...parsedDrafts as Record<string, unknown> };
+    } catch {
+      return Response.json(
+        { error: "Серверная карта черновиков инвентаризации повреждена" },
+        { status: 500 },
+      );
+    }
+  }
+  delete mergedDrafts[auth.user.id];
+  if (incomingDrafts[auth.user.id]) {
+    mergedDrafts[auth.user.id] = incomingDrafts[auth.user.id];
+  }
+  state.cycleCountDrafts = mergedDrafts;
+  const payload = JSON.stringify(state);
+  const sizeBytes = new TextEncoder().encode(payload).byteLength;
+  if (sizeBytes > MAX_STATE_BYTES) {
+    return Response.json({ error: "Данные склада превышают безопасный размер 1,5 МБ" }, { status: 413 });
   }
   const unchanged = current
     ? await env.DB.prepare(
@@ -404,32 +435,47 @@ export async function PUT(request: Request) {
   const nextItemIds = warehouseItemIds(state);
   let pinPreviousState = false;
   if (current) {
-    const [indexedItems, indexedActs, archivedActCount] = await Promise.all([
+    const [indexedItems, indexedActs, archivedActCount, productCount] = await Promise.all([
       env.DB.prepare(
         "SELECT item_id AS itemId FROM warehouse_state_items WHERE state_key = 'main'",
       ).all<{ itemId: string }>(),
       env.DB.prepare(
-        "SELECT act_id AS actId FROM warehouse_state_inventory_acts WHERE state_key = 'main'",
-      ).all<{ actId: string }>(),
+        `SELECT act_id AS actId, header_json AS headerJson
+         FROM warehouse_state_inventory_acts WHERE state_key = 'main'`,
+      ).all<{ actId: string; headerJson: string }>(),
       env.DB.prepare(
         "SELECT COUNT(*) AS count FROM inventory_act_archive",
       ).first<{ count: number }>(),
+      env.DB.prepare(
+        "SELECT COUNT(*) AS count FROM products",
+      ).first<{ count: number }>(),
     ]);
     const previousItemIds = (indexedItems.results ?? []).map((row) => row.itemId);
-    const needsDeletionPolicyCheck = previousItemIds.some((itemId) => !nextItemIds.has(itemId));
+    const needsDeletionPolicyCheck = (
+      previousItemIds.some((itemId) => !nextItemIds.has(itemId))
+      || (previousItemIds.length === 0 && Number(productCount?.count ?? 0) > 0)
+    );
     const needsHistoryPolicyCheck = auth.user.role !== "owner";
-    const previousInventoryActIds = (indexedActs.results ?? []).map((row) => row.actId);
-    const nextInventoryActIds = new Set(
-      (Array.isArray(state.inventoryActs) ? state.inventoryActs : [])
-        .map((value) => String(stateRecord(value)?.id ?? "").trim())
-        .filter(Boolean),
+    const previousInventoryActHeaders = new Map(
+      (indexedActs.results ?? []).map((row) => [row.actId, row.headerJson]),
+    );
+    const nextInventoryActRows = (Array.isArray(state.inventoryActs) ? state.inventoryActs : [])
+      .map(stateRecord)
+      .filter((value): value is Record<string, unknown> => Boolean(value));
+    const nextInventoryActHeaders = new Map(
+      nextInventoryActRows
+        .map((value) => [String(value.id ?? "").trim(), JSON.stringify(value)] as const)
+        .filter(([actId]) => Boolean(actId)),
     );
     const needsInventoryPolicyCheck = (
-      previousInventoryActIds.some((actId) => !nextInventoryActIds.has(actId))
-      || [...nextInventoryActIds].some((actId) => !previousInventoryActIds.includes(actId))
+      nextInventoryActHeaders.size !== nextInventoryActRows.length
+      || previousInventoryActHeaders.size !== nextInventoryActHeaders.size
+      || [...previousInventoryActHeaders].some(
+        ([actId, headerJson]) => nextInventoryActHeaders.get(actId) !== headerJson,
+      )
       // Backstop an old deployment whose index was not yet populated. Pending
       // archived acts are allowed; they merely force the safe comparison path.
-      || (previousInventoryActIds.length === 0 && Number(archivedActCount?.count ?? 0) > 0)
+      || (previousInventoryActHeaders.size === 0 && Number(archivedActCount?.count ?? 0) > 0)
     );
     if (!needsDeletionPolicyCheck && !needsHistoryPolicyCheck && !needsInventoryPolicyCheck) {
       // Normal writes avoid reading and parsing the potentially 4 MB snapshot.
@@ -591,14 +637,17 @@ export async function PUT(request: Request) {
            )`,
       ).bind(revision, revision),
       env.DB.prepare(
-        `INSERT OR IGNORE INTO warehouse_state_inventory_acts (state_key, act_id)
+        `INSERT INTO warehouse_state_inventory_acts (state_key, act_id, header_json)
          SELECT warehouse_full_state.state_key,
-                TRIM(CAST(json_extract(value, '$.id') AS TEXT))
+                TRIM(CAST(json_extract(value, '$.id') AS TEXT)),
+                json(value)
          FROM warehouse_full_state,
               json_each(warehouse_full_state.payload, '$.inventoryActs')
          WHERE warehouse_full_state.state_key = 'main'
            AND warehouse_full_state.revision = ?
-           AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''`,
+           AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''
+         ON CONFLICT(state_key, act_id) DO UPDATE
+         SET header_json = excluded.header_json`,
       ).bind(revision),
     ]);
     result = results[1];

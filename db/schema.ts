@@ -118,17 +118,13 @@ export const warehouseStateInventoryActs = sqliteTable(
   {
     stateKey: text("state_key").notNull(),
     actId: text("act_id").notNull(),
+    headerJson: text("header_json").notNull().default(""),
   },
   (table) => [
     uniqueIndex("warehouse_state_inventory_acts_key_idx").on(table.stateKey, table.actId),
     index("warehouse_state_inventory_acts_state_idx").on(table.stateKey),
   ],
 );
-
-export const inventoryActCounters = sqliteTable("inventory_act_counters", {
-  scope: text("scope").primaryKey(),
-  value: integer("value").notNull().default(0),
-});
 
 export const inventoryActArchive = sqliteTable(
   "inventory_act_archive",

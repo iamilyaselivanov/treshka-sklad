@@ -5,6 +5,7 @@ export type WarehouseDeletionPolicy =
   | null;
 
 export type WarehouseStateViewer = {
+  id?: string;
   role: string;
   assignment: string;
 };
@@ -120,7 +121,16 @@ export function projectWarehouseStateForUser(
   state: WarehouseState,
   viewer: WarehouseStateViewer,
 ): WarehouseState {
-  if (viewer.role !== "worker") return state;
+  const viewerId = String(viewer.id ?? "").trim();
+  const ownCycleCountDrafts = viewerId && record(state.cycleCountDrafts)?.[viewerId]
+    ? { [viewerId]: record(state.cycleCountDrafts)?.[viewerId] }
+    : {};
+  if (viewer.role !== "worker") {
+    return {
+      ...state,
+      cycleCountDrafts: ownCycleCountDrafts,
+    };
+  }
   const assignment = normalizedAssignment(viewer.assignment);
   const projectedItems = rows(state.items).map((itemValue) => {
     const item = record(itemValue);
@@ -153,7 +163,7 @@ export function projectWarehouseStateForUser(
     stockTransfers: rows(state.stockTransfers).filter((entry) => belongsToAssignment(entry, assignment)),
     inventoryActs: [],
     cycleCountDraft: null,
-    cycleCountDrafts: {},
+    cycleCountDrafts: ownCycleCountDrafts,
     auditLog: rows(state.auditLog).filter((entry) => belongsToAssignment(entry, assignment)),
     notifications: rows(state.notifications).filter((entry) => belongsToAssignment(entry, assignment)),
   };

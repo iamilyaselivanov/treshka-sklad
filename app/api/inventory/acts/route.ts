@@ -85,16 +85,14 @@ export async function GET(request: Request) {
     const result = await env.DB.prepare(
       `SELECT archive.id, archive.number, archive.payload, archive.actor_user_id
        FROM inventory_act_archive AS archive
-       WHERE NOT EXISTS (
-         SELECT 1
-         FROM warehouse_full_state AS warehouse,
-              json_each(warehouse.payload, '$.inventoryActs') AS entry
-         WHERE warehouse.state_key = 'main'
-           AND TRIM(CAST(json_extract(entry.value, '$.id') AS TEXT)) = archive.id
-       )
+       LEFT JOIN warehouse_state_inventory_acts AS state_act
+         ON state_act.state_key = 'main'
+        AND state_act.act_id = archive.id
+       WHERE state_act.act_id IS NULL
+         AND (? IN ('owner', 'admin') OR archive.actor_user_id = ?)
        ORDER BY archive.finished_at ASC, archive.number ASC
        LIMIT 1`,
-    ).all<ArchiveRow>();
+    ).bind(auth.user?.role ?? "", auth.user?.id ?? "").all<ArchiveRow>();
     const pending = (result.results ?? [])
       .map(parseArchivedAct)
       .filter((act): act is Record<string, unknown> => Boolean(act));
