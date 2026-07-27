@@ -95,6 +95,20 @@ function validCycleCountDraft(value: unknown) {
     itemIdSet.has(id) && Number.isSafeInteger(Number(quantity)) && Number(quantity) >= 0);
 }
 
+function validCycleCountDrafts(value: unknown) {
+  if (value == null) return true;
+  const drafts = stateRecord(value);
+  if (!drafts || Object.keys(drafts).length > 100) return false;
+  return Object.entries(drafts).every(([userId, draftValue]) => {
+    const actor = stateRecord(stateRecord(draftValue)?.actor);
+    return Boolean(
+      userId.trim()
+      && validCycleCountDraft(draftValue)
+      && String(actor?.id ?? "").trim() === userId.trim(),
+    );
+  });
+}
+
 function normalizedState(value: unknown): WarehouseState | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const state = { ...(value as WarehouseState) };
@@ -107,7 +121,18 @@ function normalizedState(value: unknown): WarehouseState | null {
   for (const key of OPTIONAL_COLLECTIONS) {
     if (state[key] != null && (!Array.isArray(state[key]) || state[key].length > MAX_COLLECTION_ITEMS)) return null;
   }
-  if (!validCycleCountDraft(state.cycleCountDraft)) return null;
+  if (!validCycleCountDraft(state.cycleCountDraft) || !validCycleCountDrafts(state.cycleCountDrafts)) {
+    return null;
+  }
+  // Migrate the former single shared slot into a per-account map. Two
+  // storekeepers can now count independently without the newer draft silently
+  // replacing the other user's work.
+  if (state.cycleCountDraft && !state.cycleCountDrafts) {
+    const legacyActor = stateRecord(stateRecord(state.cycleCountDraft)?.actor);
+    const legacyUserId = String(legacyActor?.id ?? "").trim();
+    state.cycleCountDrafts = legacyUserId ? { [legacyUserId]: state.cycleCountDraft } : {};
+  }
+  delete state.cycleCountDraft;
   // Права и аккаунты принадлежат серверной авторизации, а не общему снимку.
   // Их нельзя менять подменённым PUT /api/state.
   delete state.accounts;
@@ -186,7 +211,11 @@ async function inventoryCommitError(
   const headerActor = stateRecord(header.actor);
   const archivedTotals = stateRecord(act.totals);
   const headerTotals = stateRecord(header.totals);
-  const archivedDiffs = Array.isArray(act.diffs) ? act.diffs.map(stateRecord) : [];
+  const archivedDiffs = (
+    Array.isArray(act.diffs)
+      ? act.diffs
+      : lines.filter((line) => Number(line?.delta) !== 0)
+  ).map(stateRecord);
   const headerDiffs = Array.isArray(header.diffs) ? header.diffs.map(stateRecord) : [];
   if (
     String(archivedActor?.id ?? "") !== archived.actorUserId
@@ -373,16 +402,35 @@ export async function PUT(request: Request) {
     );
   }
   const nextItemIds = warehouseItemIds(state);
+  let pinPreviousState = false;
   if (current) {
-    const indexedItems = await env.DB.prepare(
-      "SELECT item_id AS itemId FROM warehouse_state_items WHERE state_key = 'main'",
-    ).all<{ itemId: string }>();
+    const [indexedItems, indexedActs, archivedActCount] = await Promise.all([
+      env.DB.prepare(
+        "SELECT item_id AS itemId FROM warehouse_state_items WHERE state_key = 'main'",
+      ).all<{ itemId: string }>(),
+      env.DB.prepare(
+        "SELECT act_id AS actId FROM warehouse_state_inventory_acts WHERE state_key = 'main'",
+      ).all<{ actId: string }>(),
+      env.DB.prepare(
+        "SELECT COUNT(*) AS count FROM inventory_act_archive",
+      ).first<{ count: number }>(),
+    ]);
     const previousItemIds = (indexedItems.results ?? []).map((row) => row.itemId);
-    const needsDeletionPolicyCheck = previousItemIds.length === 0
-      || previousItemIds.some((itemId) => !nextItemIds.has(itemId));
+    const needsDeletionPolicyCheck = previousItemIds.some((itemId) => !nextItemIds.has(itemId));
     const needsHistoryPolicyCheck = auth.user.role !== "owner";
-    const needsInventoryPolicyCheck = Array.isArray(state.inventoryActs)
-      && state.inventoryActs.length > 0;
+    const previousInventoryActIds = (indexedActs.results ?? []).map((row) => row.actId);
+    const nextInventoryActIds = new Set(
+      (Array.isArray(state.inventoryActs) ? state.inventoryActs : [])
+        .map((value) => String(stateRecord(value)?.id ?? "").trim())
+        .filter(Boolean),
+    );
+    const needsInventoryPolicyCheck = (
+      previousInventoryActIds.some((actId) => !nextInventoryActIds.has(actId))
+      || [...nextInventoryActIds].some((actId) => !previousInventoryActIds.includes(actId))
+      // Backstop an old deployment whose index was not yet populated. Pending
+      // archived acts are allowed; they merely force the safe comparison path.
+      || (previousInventoryActIds.length === 0 && Number(archivedActCount?.count ?? 0) > 0)
+    );
     if (!needsDeletionPolicyCheck && !needsHistoryPolicyCheck && !needsInventoryPolicyCheck) {
       // Normal writes avoid reading and parsing the potentially 4 MB snapshot.
       // warehouse_state_items is maintained atomically with payload below.
@@ -430,11 +478,22 @@ export async function PUT(request: Request) {
             `Роль ${auth.user.role} · журнал: ${Number(policy.auditRowsAdded) || 0} · уведомления: ${Number(policy.notificationRowsAdded) || 0}`,
           ).catch((error) => console.error("warehouse feed rejection audit failed", error));
         }
+        if (
+          "code" in policy
+          && (policy.code === "mutation" || policy.code === "inventory_history_mutation")
+        ) {
+          await audit(
+            auth.user,
+            "state_history_mutation_rejected",
+            `Роль ${auth.user.role} · класс ${policy.code}`,
+          ).catch((error) => console.error("warehouse history mutation audit failed", error));
+        }
         return Response.json(
           { error: policy.error, terminal: true, recover: "server" },
           { status: policy.status },
         );
       }
+      pinPreviousState = needsDeletionPolicyCheck;
     }
   }
   const revision = expectedRevision + 1;
@@ -450,21 +509,30 @@ export async function PUT(request: Request) {
         SET revision = ?, payload = ?, updated_at = ?, updated_by = ?
         WHERE state_key = 'main' AND revision = ?
       `).bind(revision, payload, updatedAt, auth.user.callsign, expectedRevision);
+  const archivedAt = stateHistoryArchiveTimestamp();
+  const stateArchiveWrite = pinPreviousState
+    ? env.DB.prepare(
+      `INSERT OR REPLACE INTO warehouse_state_revisions
+         (state_key, revision, payload, updated_at, updated_by, size_bytes, archived_at, pinned, reason)
+       SELECT state_key, revision, payload, updated_at, updated_by, length(payload), ?, 1, 'state_item_delete'
+       FROM warehouse_full_state
+       WHERE state_key = 'main' AND revision = ?`,
+    ).bind(archivedAt, expectedRevision)
+    : env.DB.prepare(
+      `INSERT OR IGNORE INTO warehouse_state_revisions
+         (state_key, revision, payload, updated_at, updated_by, size_bytes, archived_at, pinned, reason)
+       SELECT state_key, revision, payload, updated_at, updated_by, length(payload), ?, 0, 'sample'
+       FROM warehouse_full_state
+       WHERE state_key = 'main'
+         AND NOT EXISTS (
+           SELECT 1 FROM warehouse_state_revisions
+           WHERE state_key = 'main' AND archived_at >= ?
+         )`,
+    ).bind(archivedAt, stateHistorySampleCutoff());
   let result;
   try {
-    const archivedAt = stateHistoryArchiveTimestamp();
     const results = await env.DB.batch([
-      env.DB.prepare(
-        `INSERT OR IGNORE INTO warehouse_state_revisions
-           (state_key, revision, payload, updated_at, updated_by, size_bytes, archived_at)
-         SELECT state_key, revision, payload, updated_at, updated_by, length(payload), ?
-         FROM warehouse_full_state
-         WHERE state_key = 'main'
-           AND NOT EXISTS (
-             SELECT 1 FROM warehouse_state_revisions
-             WHERE state_key = 'main' AND archived_at >= ?
-           )`,
-      ).bind(archivedAt, stateHistorySampleCutoff()),
+      stateArchiveWrite,
       stateWrite,
       env.DB.prepare(
         `${STATE_HISTORY_PRUNE_SQL}
@@ -502,6 +570,32 @@ export async function PUT(request: Request) {
                 TRIM(CAST(json_extract(value, '$.id') AS TEXT))
          FROM warehouse_full_state,
               json_each(warehouse_full_state.payload, '$.items')
+         WHERE warehouse_full_state.state_key = 'main'
+           AND warehouse_full_state.revision = ?
+           AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''`,
+      ).bind(revision),
+      env.DB.prepare(
+        `DELETE FROM warehouse_state_inventory_acts
+         WHERE state_key = 'main'
+           AND EXISTS (
+             SELECT 1 FROM warehouse_full_state
+             WHERE state_key = 'main' AND revision = ?
+           )
+           AND act_id NOT IN (
+             SELECT TRIM(CAST(json_extract(value, '$.id') AS TEXT))
+             FROM warehouse_full_state,
+                  json_each(warehouse_full_state.payload, '$.inventoryActs')
+             WHERE warehouse_full_state.state_key = 'main'
+               AND warehouse_full_state.revision = ?
+               AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''
+           )`,
+      ).bind(revision, revision),
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO warehouse_state_inventory_acts (state_key, act_id)
+         SELECT warehouse_full_state.state_key,
+                TRIM(CAST(json_extract(value, '$.id') AS TEXT))
+         FROM warehouse_full_state,
+              json_each(warehouse_full_state.payload, '$.inventoryActs')
          WHERE warehouse_full_state.state_key = 'main'
            AND warehouse_full_state.revision = ?
            AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''`,

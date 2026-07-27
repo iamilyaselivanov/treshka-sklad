@@ -149,8 +149,8 @@ export async function DELETE(request: Request) {
       const results = await env.DB.batch([
         env.DB.prepare(
           `INSERT OR REPLACE INTO warehouse_state_revisions
-             (state_key, revision, payload, updated_at, updated_by, size_bytes, archived_at)
-           SELECT state_key, revision, payload, updated_at, updated_by, length(payload), ?
+             (state_key, revision, payload, updated_at, updated_by, size_bytes, archived_at, pinned, reason)
+           SELECT state_key, revision, payload, updated_at, updated_by, length(payload), ?, 1, 'product_delete'
            FROM warehouse_full_state
            WHERE state_key = 'main' AND revision = ?`,
         ).bind(archivedAt, stateRow.revision),

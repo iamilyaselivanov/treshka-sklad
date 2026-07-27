@@ -251,7 +251,8 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.doesNotMatch(androidSync, /store\.updateServerRevision/);
   assert.match(androidStore, /remoteRevision > baseRevision/);
   assert.match(androidStore, /db\.delete\("sync_remote_pending", "id=1"/);
-  assert.match(androidSync, /val retryable = SyncPolicy\.isRetryableHttp\(response\.code\)/);
+  assert.match(androidSync, /val terminal = runCatching/);
+  assert.match(androidSync, /val retryable = !terminal && SyncPolicy\.isRetryableHttp\(response\.code\)/);
   assert.match(androidSync, /store\.markMutationConflicted\(pending\.mutationId, message\)/);
   assert.doesNotMatch(androidSync, /scheduleRetry\(pending\.attempts, pending\.mutationId\)/);
   assert.doesNotMatch(androidStore, /releaseConflictedMutations/);
@@ -311,6 +312,7 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
     text("drizzle/0009_living_leo.sql"),
     text("drizzle/0010_optimal_ender_wiggin.sql"),
     text("drizzle/0011_dear_war_machine.sql"),
+    text("drizzle/0012_young_proemial_gods.sql"),
   ]);
   const apply = (database, sql) => {
     for (const statement of sql.split("--> statement-breakpoint")) {
@@ -328,6 +330,10 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   assert.match(migrations[10], /SET `size_bytes` = length\(`payload`\)/);
   assert.match(migrations[11], /CREATE TABLE `inventory_act_archive`/);
   assert.match(migrations[11], /CREATE TABLE `inventory_act_counters`/);
+  assert.match(migrations[12], /CREATE TABLE `warehouse_state_inventory_acts`/);
+  assert.match(migrations[12], /ADD `pinned`/);
+  assert.match(migrations[12], /ADD `reason`/);
+  assert.match(migrations[12], /json_each\(warehouse_full_state\.payload, '\$\.inventoryActs'\)/);
 
   const clean = new DatabaseSync(":memory:");
   for (const migration of migrations) apply(clean, migration);
@@ -335,7 +341,7 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   assert.deepEqual(
     clean.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all()
       .map((row) => row.name),
-    ["audit_log", "inventory_act_archive", "inventory_act_counters", "login_throttle", "products", "push_deliveries", "push_delivery_attempts", "push_devices", "push_events", "push_maintenance_state", "sessions", "users", "warehouse_full_state", "warehouse_state_items", "warehouse_state_revisions"],
+    ["audit_log", "inventory_act_archive", "inventory_act_counters", "login_throttle", "products", "push_deliveries", "push_delivery_attempts", "push_devices", "push_events", "push_maintenance_state", "sessions", "users", "warehouse_full_state", "warehouse_state_inventory_acts", "warehouse_state_items", "warehouse_state_revisions"],
   );
   clean.close();
 
@@ -488,7 +494,9 @@ test("state revision thinning keeps detailed, hourly and daily recovery points",
     CREATE TABLE warehouse_state_revisions (
       state_key TEXT NOT NULL,
       revision INTEGER NOT NULL,
-      archived_at TEXT NOT NULL
+      archived_at TEXT NOT NULL,
+      pinned INTEGER NOT NULL DEFAULT 0,
+      reason TEXT NOT NULL DEFAULT 'sample'
     )
   `);
   const insert = database.prepare(
@@ -542,6 +550,57 @@ test("state revision thinning keeps detailed, hourly and daily recovery points",
   database.close();
 });
 
+test("destructive recovery points survive thinning and the ordinary row cap", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec(`
+    CREATE TABLE warehouse_state_revisions (
+      state_key TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      archived_at TEXT NOT NULL,
+      pinned INTEGER NOT NULL DEFAULT 0,
+      reason TEXT NOT NULL DEFAULT 'sample'
+    )
+  `);
+  const insert = database.prepare(
+    "INSERT INTO warehouse_state_revisions (state_key, revision, archived_at, pinned, reason) VALUES ('main', ?, ?, ?, ?)",
+  );
+  const now = Date.parse("2026-07-27T12:00:00.000Z");
+  const bucket = new Date(now - 3 * 24 * 60 * 60 * 1_000).toISOString();
+  insert.run(100, bucket, 0, "sample");
+  insert.run(101, new Date(Date.parse(bucket) + 60_000).toISOString(), 1, "product_delete");
+  insert.run(102, new Date(Date.parse(bucket) + 120_000).toISOString(), 0, "sample");
+  for (let revision = 200; revision < 800; revision += 1) {
+    insert.run(revision, new Date(now - (800 - revision) * 1_000).toISOString(), 0, "sample");
+  }
+  database.prepare(STATE_HISTORY_PRUNE_SQL).run(...stateHistoryPruneBindings(now));
+  database.prepare(STATE_HISTORY_CAP_SQL).run(STATE_HISTORY_MAX_ROWS);
+  const pinned = database.prepare(
+    "SELECT pinned, reason FROM warehouse_state_revisions WHERE revision = 101",
+  ).get();
+  assert.equal(pinned.pinned, 1);
+  assert.equal(pinned.reason, "product_delete");
+  database.close();
+});
+
+test("inventory archive stays within D1 row limits and allocates numbers atomically", async () => {
+  const [inventoryRoute, stateRoute, browserSync] = await Promise.all([
+    text("app/api/inventory/acts/route.ts"),
+    text("app/api/state/route.ts"),
+    text("public/prototype-server.js"),
+  ]);
+  assert.match(inventoryRoute, /MAX_ACT_BYTES = 1_800_000/);
+  assert.match(inventoryRoute, /MAX_ACT_LINES = 15_000/);
+  assert.match(inventoryRoute, /new TextEncoder\(\)\.encode\(payload\)\.byteLength > MAX_ACT_BYTES/);
+  assert.match(inventoryRoute, /json_set\(\?, '\$\.no', candidate\.number\)/);
+  assert.match(inventoryRoute, /RETURNING id, number, payload, actor_user_id/);
+  assert.doesNotMatch(inventoryRoute, /INSERT INTO inventory_act_counters/);
+  assert.match(inventoryRoute, /json_each\(warehouse\.payload, '\$\.inventoryActs'\)/);
+  assert.match(stateRoute, /warehouse_state_inventory_acts/);
+  assert.match(stateRoute, /state_history_mutation_rejected/);
+  assert.match(browserSync, /data\.terminal === true/);
+  assert.match(browserSync, /recoverPendingInventoryActs/);
+});
+
 test("Android WebView exposes JavaScript alert and confirm dialogs for destructive actions", async () => {
   const [activity, prototype] = await Promise.all([
     text("android/app/src/main/java/com/treshka/sklad/MainActivity.kt"),
@@ -549,6 +608,7 @@ test("Android WebView exposes JavaScript alert and confirm dialogs for destructi
   ]);
   assert.match(activity, /override fun onJsAlert/);
   assert.match(activity, /override fun onJsConfirm/);
+  assert.ok((activity.match(/override fun onJsConfirm/g) ?? []).length >= 2);
   assert.match(activity, /result\.confirm\(\)/);
   assert.match(activity, /result\.cancel\(\)/);
   assert.match(prototype, /id="restoreRevisionCode"/);

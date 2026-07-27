@@ -3107,7 +3107,7 @@ function serializeAppState(){
     itemSeq, categoriesList, componentSubcats, currentRole, currentUserPost, currentAccountId,
     accountSeq, notificationSeq, documentSeq, externalIssueSeq, accounts, notifications,
     items, posts, docs, extIssues, stockTransfers, inventoryActs, auditLog,
-    cycleCountDraft: cycleCountServerDraft,
+    cycleCountDrafts: deepClone(cycleCountServerDrafts),
   };
 }
 
@@ -3199,8 +3199,15 @@ function applyAppState(saved){
     if(!Array.isArray(stockTransfersNext)) return false;
     const inventoryActsNext = s.inventoryActs!=null ? s.inventoryActs : [];
     if(!Array.isArray(inventoryActsNext)) return false;
-    const remoteCycleDraft=s.cycleCountDraft==null?null:s.cycleCountDraft;
-    if(remoteCycleDraft&&!validCycleCountDraft(remoteCycleDraft))return false;
+    const legacyCycleDraft=s.cycleCountDraft==null?null:s.cycleCountDraft;
+    const remoteCycleDrafts=s.cycleCountDrafts==null
+      ?(legacyCycleDraft&&validCycleCountDraft(legacyCycleDraft)
+        ?{[String(legacyCycleDraft.actor?.id||'')]:legacyCycleDraft}: {})
+      :s.cycleCountDrafts;
+    if(!validCycleCountDraftMap(remoteCycleDrafts))return false;
+    const draftUserId=currentInventoryUserId();
+    const remoteCycleDraft=draftUserId&&remoteCycleDrafts[draftUserId]
+      ?remoteCycleDrafts[draftUserId]:null;
     const localCycleDraft=loadCycleCountLocal();
     const cycleCountNext=localCycleDraft&&(!remoteCycleDraft
       || Date.parse(localCycleDraft.updatedAt||localCycleDraft.startedAt)>=Date.parse(remoteCycleDraft.updatedAt||remoteCycleDraft.startedAt))
@@ -3247,7 +3254,7 @@ function applyAppState(saved){
     documentSeq=documentSeqNext;
     externalIssueSeq=externalIssueSeqNext;
     cycleCount=cycleCountNext?deepClone(cycleCountNext):null;
-    cycleCountServerDraft=remoteCycleDraft?deepClone(remoteCycleDraft):null;
+    cycleCountServerDrafts=deepClone(remoteCycleDrafts);
     cycleCountNeedsResume=!!cycleCount;
     saveCycleCountLocal();
     return true;
@@ -3407,11 +3414,12 @@ function loadAppStateOnStart(){
 const CYCLE_COUNT_STORAGE_KEY='treshka.cycleCount.v1';
 const INVENTORY_ACT_CACHE_KEY='treshka.inventoryActs.v1';
 let cycleCount = null;
-let cycleCountServerDraft = null;
+let cycleCountServerDrafts = {};
 let cycleCountNeedsResume = false;
 let inventoryListMode = 'pending';
 let _inventoryConfirmAction = null;
 let inventoryActDetailCache = {};
+let pendingInventoryRecovery = null;
 try{
   const cached=JSON.parse(localStorage.getItem(INVENTORY_ACT_CACHE_KEY)||'{}');
   if(cached&&typeof cached==='object'&&!Array.isArray(cached))inventoryActDetailCache=cached;
@@ -3433,6 +3441,18 @@ function validCycleCountDraft(draft){
   return Object.entries(draft.counts).every(([id,value])=>
     idSet.has(id)&&Number.isSafeInteger(Number(value))&&Number(value)>=0);
 }
+function validCycleCountDraftMap(value){
+  if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).length>100)return false;
+  return Object.entries(value).every(([userId,draft])=>
+    String(userId).trim()&&validCycleCountDraft(draft)
+    &&String(draft.actor?.id||'').trim()===String(userId).trim());
+}
+function currentInventoryUserId(){
+  try{
+    const serverUser=typeof window.treshkaServerUser==='function'?window.treshkaServerUser():null;
+    return String(serverUser?.id||cycleCount?.actor?.id||'').trim();
+  }catch{return String(cycleCount?.actor?.id||'').trim();}
+}
 function saveCycleCountLocal(){
   try{
     if(cycleCount)localStorage.setItem(CYCLE_COUNT_STORAGE_KEY,JSON.stringify(cycleCount));
@@ -3447,7 +3467,11 @@ function loadCycleCountLocal(){
 }
 function stageCycleCountForServer(){
   if(cycleCount)cycleCount.serverSavedAt=new Date().toISOString();
-  cycleCountServerDraft=cycleCount?deepClone(cycleCount):null;
+  const userId=currentInventoryUserId();
+  if(userId){
+    if(cycleCount)cycleCountServerDrafts[userId]=deepClone(cycleCount);
+    else delete cycleCountServerDrafts[userId];
+  }
   flushSave();
   return true;
 }
@@ -3471,6 +3495,79 @@ async function inventoryActDetail(summary){
     return act;
   }
   return {...summary,lines:Array.isArray(summary.diffs)?summary.diffs:[]};
+}
+function compactInventoryAct(fullAct){
+  const lines=Array.isArray(fullAct?.lines)?fullAct.lines:[];
+  return {
+    id:fullAct.id,no:fullAct.no,scope:'warehouse',
+    startedAt:fullAct.startedAt,finishedAt:fullAct.finishedAt,
+    date:fullAct.date||inventoryMoment(fullAct.finishedAt),
+    actor:fullAct.actor,totals:fullAct.totals,
+    diffs:lines.filter(line=>Number(line.delta)!==0),
+  };
+}
+function canReplayPendingInventoryAct(fullAct){
+  if(!fullAct||!Array.isArray(fullAct.lines)||fullAct.lines.length!==items.length)return false;
+  const byId=new Map(items.map(value=>[String(value.id),value]));
+  return fullAct.lines.every(line=>{
+    const current=byId.get(String(line.id));
+    return current
+      &&String(current.name||'')===String(line.name||'')
+      &&String(current.sku||'')===String(line.sku||'')
+      &&String(current.unit||'')===String(line.unit||'')
+      &&Number(current.stock)===Number(line.book);
+  });
+}
+function replayPendingInventoryAct(fullAct){
+  if(!canReplayPendingInventoryAct(fullAct))return false;
+  const summary=compactInventoryAct(fullAct);
+  if(inventoryActs.some(value=>value?.id===summary.id))return true;
+  fullAct.lines.forEach(line=>{
+    const current=item(line.id);
+    if(Number(line.delta)!==0){
+      current.history=current.history||[];
+      current.history.push({
+        d:todayStr(),
+        type:Number(line.delta)>0?'in':'off',
+        text:`Восстановленная корректировка по инвентаризации ${fullAct.no}`,
+        q:`${Number(line.delta)>0?'+':''}${Number(line.delta)} ${current.unit}`,
+      });
+      current.stock=Number(line.counted);
+      adjustLots(current,Number(line.delta));
+    }
+  });
+  inventoryActs.unshift(summary);
+  cacheInventoryAct(fullAct);
+  logAction('Инвентаризация восстановлена',`Акт ${fullAct.no} досинхронизирован из серверного архива`);
+  flushSave();
+  return true;
+}
+async function recoverPendingInventoryActs(){
+  const bridge=window.treshkaInventoryActs;
+  if(!bridge||typeof bridge.pending!=='function')return false;
+  try{
+    const pending=await bridge.pending();
+    const fullAct=Array.isArray(pending)?pending[0]:null;
+    if(!fullAct){pendingInventoryRecovery=null;return false;}
+    if(replayPendingInventoryAct(fullAct)){
+      pendingInventoryRecovery=null;
+      toast(`✓ Акт ${fullAct.no} восстановлен после незавершённой синхронизации`);
+      return true;
+    }
+    pendingInventoryRecovery=fullAct;
+    cacheInventoryAct(fullAct);
+    toast(`⚠ Акт ${fullAct.no} есть в архиве, но остатки уже изменились. Откройте «Инвентаризацию» для проверки.`);
+    return false;
+  }catch(error){
+    console.warn('Не удалось проверить незавершённые акты инвентаризации',error);
+    return false;
+  }
+}
+window.recoverPendingInventoryActs=recoverPendingInventoryActs;
+async function retryPendingInventoryRecovery(){
+  const recovered=await recoverPendingInventoryActs();
+  if(recovered)render({fn:views.inventory},false);
+  return recovered;
 }
 setInterval(()=>{if(cycleCount)stageCycleCountForServer();},30_000);
 
@@ -4230,6 +4327,8 @@ inventory(){
   }
   if(!cycleCount){
     $('content').innerHTML = `
+      ${pendingInventoryRecovery?`<div class="progress-note bad"><b>Акт ${esc(pendingInventoryRecovery.no)} ожидает досинхронизации.</b><br>Сервер сохранил документ, но текущие остатки уже отличаются от значений на момент пересчёта. Автоматическая корректировка остановлена, чтобы не затереть более новые операции.</div>
+      <button class="btn ghost" onclick="retryPendingInventoryRecovery()">↻ Проверить возможность досинхронизации</button>`:''}
       <div class="progress-note"><b>Пересчёт основного склада.</b> Остатки на постах и выданное на сторону не проверяются. Каждая позиция фиксируется в итоговом акте, включая совпавшие остатки.</div>
       <button class="btn primary" onclick="startCycleCount()">▶ Начать инвентаризацию склада</button>
       <button class="btn ghost" onclick="exportInventorySnapshotExcel()">⤓ Выгрузить текущие учётные остатки</button>
@@ -4316,7 +4415,7 @@ async function renderStateHistory(){
     $('content').innerHTML=`
       <div class="progress-note">Самый старый доступный снимок: ${esc(stateHistoryDate(data.oldestArchivedAt))}. Последние сутки хранятся подробно, затем остаётся один снимок в час и один в сутки. Восстановление доступно только владельцу.</div>
       ${revisions.map(row=>`<div class="card" onclick="renderStateRevision(${Number(row.revision)})">
-        <div class="row"><div class="icbox">#${Number(row.revision)}</div><div class="grow"><div class="t">Ревизия ${Number(row.revision)}</div><div class="s">Архив: ${esc(stateHistoryDate(row.archivedAt))}</div><div class="s">Автор: ${esc(row.updatedBy||'—')} · ${stateHistorySize(row.sizeBytes)}</div></div><div style="color:var(--muted)">›</div></div>
+        <div class="row"><div class="icbox">#${Number(row.revision)}</div><div class="grow"><div class="t">Ревизия ${Number(row.revision)} ${row.pinned?'<span class="chip green">закреплена</span>':''}</div><div class="s">Архив: ${esc(stateHistoryDate(row.archivedAt))}</div><div class="s">Автор: ${esc(row.updatedBy||'—')} · ${stateHistorySize(row.sizeBytes)}</div></div><div style="color:var(--muted)">›</div></div>
       </div>`).join('')||'<div class="s" style="text-align:center;padding:32px">Архивных ревизий пока нет</div>'}`;
   }catch(e){
     $('content').innerHTML=`<div class="progress-note bad">⚠ ${esc(e.message||'Не удалось загрузить историю ревизий')}</div><button class="btn ghost" onclick="renderStateHistory()">Повторить</button>`;
@@ -6114,10 +6213,9 @@ function continueCycleCount(){
 }
 function clearCycleCountDraft(){
   cycleCount=null;
-  cycleCountServerDraft=null;
   cycleCountNeedsResume=false;
   saveCycleCountLocal();
-  flushSave();
+  stageCycleCountForServer();
 }
 function requestRestartCycleCount(){
   showInventoryConfirm('Начать пересчёт заново','Текущий незавершённый черновик и уже введённые количества будут удалены.','Удалить черновик и начать',()=>{
@@ -6340,10 +6438,9 @@ async function finishCycleCount(){
     return true;
   },{inventoryActs:true,cycleCount:true});
   if(!success)return false;
-  cycleCountServerDraft=null;
   cycleCountNeedsResume=false;
   saveCycleCountLocal();
-  flushSave();
+  stageCycleCountForServer();
   toast('✓ Сформирован акт '+fullAct.no);
   await openInventoryAct(0);
   return true;

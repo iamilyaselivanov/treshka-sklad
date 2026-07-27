@@ -899,6 +899,25 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT
             ))
             popupWebView.webChromeClient = object : WebChromeClient() {
+                override fun onJsConfirm(
+                    view: WebView?,
+                    url: String?,
+                    message: String?,
+                    result: JsResult
+                ): Boolean {
+                    if (isFinishing || isDestroyed) {
+                        result.cancel()
+                        return true
+                    }
+                    AlertDialog.Builder(this@MainActivity)
+                        .setMessage(message.orEmpty())
+                        .setPositiveButton("Подтвердить") { _, _ -> result.confirm() }
+                        .setNegativeButton(android.R.string.cancel) { _, _ -> result.cancel() }
+                        .setOnCancelListener { result.cancel() }
+                        .show()
+                    return true
+                }
+
                 override fun onCloseWindow(window: WebView) {
                     dialog.dismiss()
                 }

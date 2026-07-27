@@ -350,7 +350,10 @@ class ServerSyncManager(
             }
             if (response.code !in 200..299) {
                 val message = "HTTP ${response.code}: ${response.body.take(300)}"
-                val retryable = SyncPolicy.isRetryableHttp(response.code)
+                val terminal = runCatching {
+                    JSONObject(response.body).optBoolean("terminal", false)
+                }.getOrDefault(false)
+                val retryable = !terminal && SyncPolicy.isRetryableHttp(response.code)
                 if (retryable) {
                     // A push outage must not freeze native authorization. The
                     // status endpoint may still report a downgrade/revocation.

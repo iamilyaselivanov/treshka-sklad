@@ -568,8 +568,11 @@
         return false;
       }
       if (
-        response.status >= 400 && response.status < 500
-        && response.status !== 408 && response.status !== 429
+        data.terminal === true
+        || (
+          response.status >= 400 && response.status < 500
+          && response.status !== 408 && response.status !== 429
+        )
       ) {
         if (response.status === 413) {
           sync.lastError = data.error || "Снимок склада слишком велик";
@@ -740,7 +743,11 @@
       sync.lastUploaded = data.state || !canUploadState() ? JSON.stringify(normalizedState()) : "";
       sync.ready = true;
       go("sklad");
-      if (!data.state && canUploadState()) await uploadIfChanged();
+      const recoveredInventory = data.state
+        && typeof window.recoverPendingInventoryActs === "function"
+        ? await window.recoverPendingInventoryActs()
+        : false;
+      if ((!data.state || recoveredInventory) && canUploadState()) await uploadIfChanged();
       else if (canUploadState()) void migrateEmbeddedPhotos();
       void registerNativePush();
       void flushPushQueue();
@@ -850,6 +857,10 @@
     get: async (id) => {
       const data = await inventoryActRequest("?id=" + encodeURIComponent(String(id || "")));
       return data.act;
+    },
+    pending: async () => {
+      const data = await inventoryActRequest();
+      return Array.isArray(data.pending) ? data.pending : [];
     },
   };
 

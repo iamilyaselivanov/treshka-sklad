@@ -153,6 +153,7 @@ export function projectWarehouseStateForUser(
     stockTransfers: rows(state.stockTransfers).filter((entry) => belongsToAssignment(entry, assignment)),
     inventoryActs: [],
     cycleCountDraft: null,
+    cycleCountDrafts: {},
     auditLog: rows(state.auditLog).filter((entry) => belongsToAssignment(entry, assignment)),
     notifications: rows(state.notifications).filter((entry) => belongsToAssignment(entry, assignment)),
   };
@@ -383,6 +384,7 @@ export function warehouseHistoryMutationIssue(
     return {
       status: 403 as const,
       error: "Нельзя удалять или изменять сформированные акты инвентаризации",
+      code: "inventory_history_mutation" as const,
     };
   }
   if (role === "owner") return null;
@@ -421,6 +423,7 @@ export function warehouseHistoryMutationIssue(
     return {
       status: 403 as const,
       error: "Эта роль не может удалять или подменять документы и историю складских операций",
+      code: "mutation" as const,
     };
   }
   return null;

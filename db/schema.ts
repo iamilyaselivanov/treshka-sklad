@@ -91,6 +91,8 @@ export const warehouseStateRevisions = sqliteTable(
     updatedBy: text("updated_by").notNull(),
     sizeBytes: integer("size_bytes").notNull().default(0),
     archivedAt: text("archived_at").notNull().default(""),
+    pinned: integer("pinned", { mode: "boolean" }).notNull().default(false),
+    reason: text("reason").notNull().default("sample"),
   },
   (table) => [
     primaryKey({ columns: [table.stateKey, table.revision] }),
@@ -108,6 +110,18 @@ export const warehouseStateItems = sqliteTable(
   (table) => [
     uniqueIndex("warehouse_state_items_key_idx").on(table.stateKey, table.itemId),
     index("warehouse_state_items_state_idx").on(table.stateKey),
+  ],
+);
+
+export const warehouseStateInventoryActs = sqliteTable(
+  "warehouse_state_inventory_acts",
+  {
+    stateKey: text("state_key").notNull(),
+    actId: text("act_id").notNull(),
+  },
+  (table) => [
+    uniqueIndex("warehouse_state_inventory_acts_key_idx").on(table.stateKey, table.actId),
+    index("warehouse_state_inventory_acts_state_idx").on(table.stateKey),
   ],
 );
 

@@ -7,8 +7,9 @@ export const STATE_HISTORY_MAX_ROWS = 500;
 
 // Keep every five-minute sample for the most recent day, one sample per hour
 // through day seven, and one sample per day through day thirty. The hard row
-// cap remains a final guard for bursts of destructive operations, which are
-// archived immediately rather than sampled.
+// cap remains a final guard for ordinary samples. Revisions captured directly
+// before destructive operations are pinned for the whole retention window and
+// are never removed by hourly/daily thinning or the ordinary-row cap.
 export const STATE_HISTORY_PRUNE_SQL = `
   DELETE FROM warehouse_state_revisions
   WHERE state_key = 'main'
@@ -19,6 +20,8 @@ export const STATE_HISTORY_PRUNE_SQL = `
     AND (
       archived_at < ?
       OR (
+        pinned = 0
+        AND
         archived_at < ?
         AND revision NOT IN (
           SELECT MAX(revision)
@@ -39,6 +42,7 @@ export const STATE_HISTORY_PRUNE_SQL = `
 export const STATE_HISTORY_CAP_SQL = `
   DELETE FROM warehouse_state_revisions
   WHERE state_key = 'main'
+    AND pinned = 0
     AND revision NOT IN (
       SELECT revision FROM warehouse_state_revisions
       WHERE state_key = 'main'

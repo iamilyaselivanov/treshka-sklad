@@ -1368,7 +1368,13 @@ test('inventory — storekeeper draft persists, bulk fill preserves counted rows
     runInventoryConfirm();
     const firstAfterBulk = cycleCount.counts[first.id];
     const allFilled = cycleCount.itemIds.every((id) => cycleCount.counts[id] !== undefined);
-    const serializedHasDraft = serializeAppState().cycleCountDraft?.id === cycleCount.id;
+    const otherDraft = deepClone(cycleCount);
+    otherDraft.id = 'inventory-other-user';
+    otherDraft.actor = { ...otherDraft.actor, id: 'other-user', login: 'other-user' };
+    cycleCountServerDrafts['other-user'] = otherDraft;
+    const serializedDrafts = serializeAppState().cycleCountDrafts;
+    const serializedHasDraft = serializedDrafts?.[cycleCount.actor.id]?.id === cycleCount.id;
+    const preservesOtherDraft = serializedDrafts?.['other-user']?.id === otherDraft.id;
 
     _pendingScanTarget = 'count';
     onNativeScanResult(`SKLAD-ITEM:${first.sku}`);
@@ -1384,6 +1390,7 @@ test('inventory — storekeeper draft persists, bulk fill preserves counted rows
       firstValue,
       allFilled,
       serializedHasDraft,
+      preservesOtherDraft,
       repeatWarning,
       confirmationShown,
       replacedValue: cycleCount.counts[first.id],
@@ -1394,6 +1401,7 @@ test('inventory — storekeeper draft persists, bulk fill preserves counted rows
   assert.equal(beforeReload.firstAfterBulk, beforeReload.firstValue, 'bulk confirmation must not overwrite an already counted row');
   assert.equal(beforeReload.allFilled, true);
   assert.equal(beforeReload.serializedHasDraft, true);
+  assert.equal(beforeReload.preservesOtherDraft, true);
   assert.equal(beforeReload.repeatWarning, true);
   assert.equal(beforeReload.confirmationShown, true);
   assert.equal(beforeReload.replacedValue, beforeReload.firstValue + 1);

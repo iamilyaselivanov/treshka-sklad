@@ -388,6 +388,9 @@ try {
     headers: ownerHeaders,
   });
   assert.equal(inventoryFetched.data.act.id, inventoryId);
+  const pendingBeforeCommit = await request("/api/inventory/acts", { headers: ownerHeaders });
+  assert.equal(pendingBeforeCommit.data.pending.length, 1);
+  assert.equal(pendingBeforeCommit.data.pending[0].id, inventoryId);
   const inventoryHeader = { ...inventoryArchived.data.act };
   delete inventoryHeader.lines;
   const inventoryCommittedState = {
@@ -424,6 +427,17 @@ try {
   Object.assign(sharedState, inventoryCommittedState);
   state.data.revision = inventoryCommitted.data.revision;
   state.data.state = sharedState;
+  const pendingAfterCommit = await request("/api/inventory/acts", { headers: ownerHeaders });
+  assert.deepEqual(pendingAfterCommit.data.pending, []);
+  const ownerInventoryWipe = await request("/api/state", {
+    method: "PUT",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: { ...inventoryCommittedState, inventoryActs: [] },
+      expectedRevision: inventoryCommitted.data.revision,
+    }),
+  }, 403);
+  assert.match(ownerInventoryWipe.data.error, /сформированные акты инвентаризации/);
   sharedState.accounts = [{ id: "must-not-be-stored", role: "owner" }];
   sharedState.currentAccountId = "must-not-be-stored";
   sharedState.currentRole = "admin";
@@ -777,6 +791,13 @@ try {
   const overflowAudit = await request("/api/audit", { headers: ownerHeaders });
   assert.ok(
     overflowAudit.data.entries.some((entry) =>
+      entry.action === "state_history_mutation_rejected"
+      && entry.details.includes("Роль admin")
+      && entry.details.includes("mutation")),
+    "a forged history mutation must leave a dedicated audit record",
+  );
+  assert.ok(
+    overflowAudit.data.entries.some((entry) =>
       entry.action === "state_feed_append_rejected"
       && entry.details.includes("Роль admin")
       && entry.details.includes("журнал: 201")),
@@ -799,6 +820,10 @@ try {
   assert.ok(history.data.revisions.length <= 500);
   assert.ok(history.data.revisions.every((entry) => Number(entry.sizeBytes) > 0));
   assert.ok(history.data.revisions.every((entry) => !Number.isNaN(Date.parse(entry.archivedAt))));
+  assert.ok(
+    history.data.revisions.some((entry) => Boolean(entry.pinned) && entry.reason === "product_delete"),
+    "the snapshot before a product deletion must remain pinned",
+  );
   const targetRevision = history.data.revisions.find(
     (entry) => entry.revision < currentBeforeRestore.data.revision,
   ).revision;

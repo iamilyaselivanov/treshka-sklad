@@ -22,6 +22,8 @@ type RevisionRow = {
   updated_by: string;
   size_bytes: number;
   archived_at: string;
+  pinned: number;
+  reason: string;
 };
 
 export async function GET(request: Request) {
@@ -34,7 +36,7 @@ export async function GET(request: Request) {
       return Response.json({ error: "Некорректный номер ревизии" }, { status: 400 });
     }
     const row = await env.DB.prepare(
-      `SELECT revision, payload, updated_at, updated_by, size_bytes, archived_at
+      `SELECT revision, payload, updated_at, updated_by, size_bytes, archived_at, pinned, reason
        FROM warehouse_state_revisions
        WHERE state_key = 'main' AND revision = ?`,
     ).bind(revision).first<RevisionRow>();
@@ -47,21 +49,30 @@ export async function GET(request: Request) {
         updatedBy: row.updated_by,
         sizeBytes: row.size_bytes,
         archivedAt: row.archived_at,
+        pinned: Boolean(row.pinned),
+        reason: row.reason,
       });
     } catch {
       return Response.json({ error: "Архивная ревизия повреждена" }, { status: 500 });
     }
   }
-  const result = await env.DB.prepare(
-    `SELECT revision, updated_at AS updatedAt, updated_by AS updatedBy,
-            size_bytes AS sizeBytes, archived_at AS archivedAt
-     FROM warehouse_state_revisions
-     WHERE state_key = 'main'
-     ORDER BY archived_at DESC, revision DESC
-     LIMIT ?`,
-  ).bind(STATE_HISTORY_LIST_LIMIT).all();
+  const [result, oldest] = await Promise.all([
+    env.DB.prepare(
+      `SELECT revision, updated_at AS updatedAt, updated_by AS updatedBy,
+              size_bytes AS sizeBytes, archived_at AS archivedAt,
+              pinned, reason
+       FROM warehouse_state_revisions
+       WHERE state_key = 'main'
+       ORDER BY archived_at DESC, revision DESC
+       LIMIT ?`,
+    ).bind(STATE_HISTORY_LIST_LIMIT).all(),
+    env.DB.prepare(
+      `SELECT MIN(archived_at) AS archivedAt
+       FROM warehouse_state_revisions
+       WHERE state_key = 'main'`,
+    ).first<{ archivedAt: string | null }>(),
+  ]);
   const revisions = result.results ?? [];
-  const oldest = revisions.at(-1) as { archivedAt?: string } | undefined;
   return Response.json({
     revisions,
     oldestArchivedAt: oldest?.archivedAt ?? null,
@@ -132,8 +143,8 @@ export async function POST(request: Request) {
       // has not captured the latest revision yet.
       env.DB.prepare(
         `INSERT OR REPLACE INTO warehouse_state_revisions
-           (state_key, revision, payload, updated_at, updated_by, size_bytes, archived_at)
-         SELECT state_key, revision, payload, updated_at, updated_by, length(payload), ?
+           (state_key, revision, payload, updated_at, updated_by, size_bytes, archived_at, pinned, reason)
+         SELECT state_key, revision, payload, updated_at, updated_by, length(payload), ?, 1, 'state_restore'
          FROM warehouse_full_state
          WHERE state_key = 'main' AND revision = ?`,
       ).bind(archivedAt, expectedRevision),
@@ -158,6 +169,24 @@ export async function POST(request: Request) {
                 TRIM(CAST(json_extract(value, '$.id') AS TEXT))
          FROM warehouse_full_state,
               json_each(warehouse_full_state.payload, '$.items')
+         WHERE warehouse_full_state.state_key = 'main'
+           AND warehouse_full_state.revision = ?
+           AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''`,
+      ).bind(revision),
+      env.DB.prepare(
+        `DELETE FROM warehouse_state_inventory_acts
+         WHERE state_key = 'main'
+           AND EXISTS (
+             SELECT 1 FROM warehouse_full_state
+             WHERE state_key = 'main' AND revision = ?
+           )`,
+      ).bind(revision),
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO warehouse_state_inventory_acts (state_key, act_id)
+         SELECT warehouse_full_state.state_key,
+                TRIM(CAST(json_extract(value, '$.id') AS TEXT))
+         FROM warehouse_full_state,
+              json_each(warehouse_full_state.payload, '$.inventoryActs')
          WHERE warehouse_full_state.state_key = 'main'
            AND warehouse_full_state.revision = ?
            AND TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''`,
@@ -196,7 +225,7 @@ export async function POST(request: Request) {
       { status: 409, headers: { "cache-control": "no-store" } },
     );
   }
-  const discardedItemReferences = Number(results[6].meta?.changes ?? 0);
+  const discardedItemReferences = Number(results[8].meta?.changes ?? 0);
   await audit(
     auth.user,
     "state_restored",
