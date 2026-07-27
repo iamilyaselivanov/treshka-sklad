@@ -268,14 +268,20 @@ export async function POST(request: Request) {
     "state_restored",
     `Архивная ревизия ${targetRevision} восстановлена как ревизия ${revision}`
       + (prepared.legacySchemaAdjusted ? " · версия старого снимка приведена к поддерживаемой" : "")
-      + (currentStateDamaged ? " · повреждённые текущие черновики отброшены" : "")
+      + (currentStateDamaged ? " · текущее состояние было нечитаемо" : "")
+      + (prepared.discardedCurrentDrafts > 0
+        ? ` · отброшено повреждённых черновиков: ${prepared.discardedCurrentDrafts}`
+        : "")
       + (discardedItemReferences > 0
         ? ` · отброшено ссылок на удалённые карточки: ${discardedItemReferences}`
         : ""),
   ).catch((error) => console.error("warehouse state restore audit failed", error));
   const warnings = [
     currentStateDamaged
-      ? "Текущее состояние склада было повреждено; откат выполнен, текущие черновики инвентаризации отброшены"
+      ? "Текущее состояние склада было повреждено; откат выполнен по архивной ревизии"
+      : "",
+    prepared.discardedCurrentDrafts > 0
+      ? `Отброшено повреждённых черновиков инвентаризации: ${prepared.discardedCurrentDrafts}`
       : "",
     prepared.legacySchemaAdjusted
       ? "Старая архивная ревизия приведена к текущей поддерживаемой версии схемы"
@@ -288,6 +294,7 @@ export async function POST(request: Request) {
     discardedItemReferences,
     legacySchemaAdjusted: prepared.legacySchemaAdjusted,
     currentStateDamaged,
+    discardedCurrentDrafts: prepared.discardedCurrentDrafts,
     warning: warnings.length ? warnings.join(" · ") : undefined,
   });
 }

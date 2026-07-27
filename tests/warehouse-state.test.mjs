@@ -111,6 +111,31 @@ test("restore preparation tolerates broken current state and reports discarded d
   );
 });
 
+test("restore preparation keeps valid current drafts and reports only invalid rows", () => {
+  const validDraft = {
+    id: "draft-owner",
+    startedAt: "2026-07-27T10:00:00.000Z",
+    actor: { id: "owner-1", role: "owner" },
+    itemIds: [],
+    positions: 0,
+    books: {},
+    counts: {},
+  };
+  const prepared = prepareWarehouseStateRestore(
+    state({ items: [{ id: "archived-item" }] }),
+    state({
+      cycleCountDrafts: {
+        "owner-1": validDraft,
+        "broken-user": { ...validDraft, actor: { id: "someone-else", role: "worker" } },
+      },
+    }),
+  );
+  assert.ok(prepared);
+  assert.equal(prepared.currentStateDamaged, false);
+  assert.equal(prepared.discardedCurrentDrafts, 1);
+  assert.deepEqual(prepared.state.cycleCountDrafts, { "owner-1": validDraft });
+});
+
 test("server deletion policy rejects a storekeeper and allows an admin for an unused card", () => {
   const previous = state({ items: [unusedItem] });
   const next = state();

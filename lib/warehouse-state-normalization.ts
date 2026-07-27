@@ -154,6 +154,7 @@ export type PreparedWarehouseStateRestore = {
   state: WarehouseState;
   legacySchemaAdjusted: boolean;
   currentStateDamaged: boolean;
+  discardedCurrentDrafts: number;
 };
 
 export function prepareWarehouseStateRestore(
@@ -167,10 +168,22 @@ export function prepareWarehouseStateRestore(
   const state = sanitizedLegacyWarehouseState(archivedValue);
   if (!state) return null;
   const currentState = normalizedWarehouseState(currentValue);
-  state.cycleCountDrafts = currentState?.cycleCountDrafts ?? {};
+  const sanitizedCurrentState = currentState ?? sanitizedLegacyWarehouseState(currentValue);
+  const rawCurrentDrafts = stateRecord(stateRecord(currentValue)?.cycleCountDrafts);
+  const recoverableCurrentDrafts = sanitizedCurrentState?.cycleCountDrafts
+    ?? prunedCycleCountDrafts(rawCurrentDrafts);
+  const discardedCurrentDrafts = rawCurrentDrafts
+    ? Math.max(
+      0,
+      Object.keys(rawCurrentDrafts).length
+        - Object.keys(prunedCycleCountDrafts(rawCurrentDrafts)).length,
+    )
+    : 0;
+  state.cycleCountDrafts = recoverableCurrentDrafts;
   return {
     state,
     legacySchemaAdjusted,
-    currentStateDamaged: !currentState,
+    currentStateDamaged: !sanitizedCurrentState,
+    discardedCurrentDrafts,
   };
 }

@@ -694,6 +694,38 @@
     else await pollServer();
   }
 
+  function startRegularSynchronization() {
+    if (sync.timer) window.clearInterval(sync.timer);
+    sync.timer = window.setInterval(synchronize, 2500);
+  }
+
+  async function recoveryPoll() {
+    if (!sync.ready || !sync.recoveryRequired || sync.busy) return;
+    sync.busy = true;
+    let recovered = false;
+    try {
+      sync.lastServerEtag = "";
+      const snapshot = await fetchSnapshot({ forceFull: true });
+      if (snapshot.recoverable === true) return;
+      if (!snapshot.state) throw new Error("Сервер не вернул восстановленное состояние");
+      applyRemoteSnapshot(snapshot, false);
+      recovered = true;
+      startRegularSynchronization();
+      go("sklad");
+      void registerNativePush();
+      void flushPushQueue();
+      toast("✓ Склад восстановлен, синхронизация возобновлена");
+    } catch (error) {
+      // fetchSnapshot clears the flag for every successful HTTP response.
+      // Keep polling if the supposedly repaired payload is still unusable.
+      if (!recovered) sync.recoveryRequired = true;
+      sync.lastError = error.message || "Не удалось проверить восстановление склада";
+      console.warn("warehouse recovery poll failed", error);
+    } finally {
+      sync.busy = false;
+    }
+  }
+
   async function resolveConflict(strategy) {
     if (!sync.conflict || !sync.pendingRemote) return false;
     if (strategy === "local" && !canUploadState()) {
@@ -750,9 +782,10 @@
         } else {
           toast("⚠ Снимок склада повреждён. Восстановление должен выполнить владелец.");
         }
-        // Keep a timer installed so synchronization resumes automatically
-        // after the owner restores a healthy revision from this screen.
-        sync.timer = window.setInterval(synchronize, 15_000);
+        // Recovery polling deliberately bypasses synchronize(): regular
+        // synchronization must remain blocked while the live snapshot is
+        // damaged, but every device still has to notice the owner's restore.
+        sync.timer = window.setInterval(recoveryPoll, 15_000);
         return;
       }
       sync.revision = data.revision || 0;
@@ -777,8 +810,7 @@
       else if (canUploadState()) void migrateEmbeddedPhotos();
       void registerNativePush();
       void flushPushQueue();
-      sync.timer = window.setInterval(synchronize, 2500);
-      window.addEventListener("beforeunload", () => { void uploadIfChanged(); });
+      startRegularSynchronization();
     } catch (error) {
       console.error("server initialization failed", error);
       toast("⚠ Нет связи с сервером. Изменения сохраняются на устройстве.");
@@ -850,9 +882,16 @@
     // contained references to product cards that the server deliberately
     // discarded while rebuilding the deletion guard index.
     sync.lastServerEtag = "";
+    const recoveryWasRequired = sync.recoveryRequired;
     const snapshot = await fetchSnapshot({ forceFull: true });
-    if (!snapshot.state) throw new Error("Сервер не вернул восстановленное состояние");
-    applyRemoteSnapshot(snapshot, false);
+    try {
+      if (!snapshot.state) throw new Error("Сервер не вернул восстановленное состояние");
+      applyRemoteSnapshot(snapshot, false);
+    } catch (error) {
+      if (recoveryWasRequired) sync.recoveryRequired = true;
+      throw error;
+    }
+    startRegularSynchronization();
     return restored;
   }
 
@@ -926,5 +965,6 @@
     },
   };
 
+  window.addEventListener("beforeunload", () => { void uploadIfChanged(); });
   void initialize();
 })();

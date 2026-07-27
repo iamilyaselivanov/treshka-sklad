@@ -45,6 +45,8 @@ const MAX_AUDIT_LOG_ITEMS = 2_000;
 const MAX_NOTIFICATION_ITEMS = 2_000;
 const MAX_INVENTORY_ACT_ITEMS = 5_000;
 const STATE_CONDITION_AUDIT_WINDOW_MS = 15 * 60 * 1_000;
+const STATE_CONDITION_AUDIT_CACHE_MAX = 256;
+const stateConditionAuditCache = new Map<string, number>();
 
 const SPECIFIC_COLLECTION_LIMITS = {
   auditLog: MAX_AUDIT_LOG_ITEMS,
@@ -198,14 +200,25 @@ async function auditStateConditionOnce(
   action: string,
   details: string,
 ) {
-  const cutoff = new Date(Date.now() - STATE_CONDITION_AUDIT_WINDOW_MS).toISOString();
-  const recent = await env.DB.prepare(
-    `SELECT id
-     FROM audit_log
-     WHERE action = ? AND details = ? AND created_at >= ?
-     LIMIT 1`,
-  ).bind(action, details, cutoff).first<{ id: string }>();
-  if (!recent) await audit(user, action, details);
+  const now = Date.now();
+  const key = `${action}\u0000${details}`;
+  const previous = stateConditionAuditCache.get(key);
+  if (previous != null && now - previous < STATE_CONDITION_AUDIT_WINDOW_MS) return;
+  stateConditionAuditCache.delete(key);
+  stateConditionAuditCache.set(key, now);
+  while (stateConditionAuditCache.size > STATE_CONDITION_AUDIT_CACHE_MAX) {
+    const oldest = stateConditionAuditCache.keys().next().value;
+    if (oldest == null) break;
+    stateConditionAuditCache.delete(oldest);
+  }
+  try {
+    await audit(user, action, details);
+  } catch (error) {
+    if (stateConditionAuditCache.get(key) === now) {
+      stateConditionAuditCache.delete(key);
+    }
+    throw error;
+  }
 }
 
 export async function GET(request: Request) {

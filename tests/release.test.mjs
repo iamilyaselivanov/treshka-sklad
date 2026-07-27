@@ -668,6 +668,12 @@ test("inventory archive stays within D1 row limits and allocates numbers atomica
   assert.match(historyRoute, /warnings\.join\(" · "\)/);
   assert.match(historyRoute, /if \(!auth\.user\) \{\s*return Response\.json/);
   assert.match(stateRoute, /auditStateConditionOnce/);
+  assert.match(stateRoute, /STATE_CONDITION_AUDIT_CACHE_MAX/);
+  assert.doesNotMatch(
+    stateRoute,
+    /FROM audit_log[\s\S]{0,300}created_at >=/,
+    "GET state condition auditing must not query audit_log on every poll",
+  );
   assert.match(stateRoute, /recoverable: true/);
   assert.match(stateRoute, /state_history_mutation_rejected/);
   assert.match(browserSync, /data\.recoverable === true/);

@@ -1031,15 +1031,30 @@ try {
     1,
     "repeated reads of one sanitized revision must produce one bounded audit entry",
   );
+  const restoredMixedDrafts = await request("/api/state/history", {
+    method: "POST",
+    headers: { ...ownerHeaders, "content-type": "application/json" },
+    body: JSON.stringify({
+      revision: targetRevision,
+      expectedRevision: sanitizedMixedDrafts.data.revision,
+    }),
+  });
+  assert.equal(restoredMixedDrafts.data.currentStateDamaged, false);
+  assert.equal(restoredMixedDrafts.data.discardedCurrentDrafts, 1);
+  assert.match(restoredMixedDrafts.data.warning, /Отброшено повреждённых черновиков инвентаризации: 1/);
+  const stateAfterMixedDraftRestore = await request("/api/state", { headers: ownerHeaders });
+  assert.deepEqual(stateAfterMixedDraftRestore.data.state.cycleCountDrafts, {
+    [auth.user.id]: validDraft,
+  });
   const persistedSanitizedDrafts = await request("/api/state", {
     method: "PUT",
     headers: { ...ownerHeaders, "content-type": "application/json" },
     body: JSON.stringify({
-      state: sanitizedMixedDrafts.data.state,
-      expectedRevision: sanitizedMixedDrafts.data.revision,
+      state: stateAfterMixedDraftRestore.data.state,
+      expectedRevision: stateAfterMixedDraftRestore.data.revision,
     }),
   });
-  const legacyArchive = structuredClone(sanitizedMixedDrafts.data.state);
+  const legacyArchive = structuredClone(stateAfterMixedDraftRestore.data.state);
   delete legacyArchive.schemaVersion;
   const legacyArchivePayload = JSON.stringify(legacyArchive);
   await executeLocalD1(

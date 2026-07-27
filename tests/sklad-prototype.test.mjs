@@ -81,6 +81,8 @@ async function newHttpServerPage({
   emptyState = false,
   historyRestoreStatus = 200,
   corruptedState = false,
+  recoverStateAfterGets = null,
+  recoveryPollMs = null,
 } = {}) {
   const ctx = await browser.newContext();
   const state = serverStateFixture();
@@ -103,13 +105,22 @@ async function newHttpServerPage({
       return;
     }
     if (url.pathname === '/prototype-server.js') {
-      await route.fulfill({ status: 200, contentType: 'application/javascript; charset=utf-8', body: SERVER_SYNC_SOURCE });
+      const source = recoveryPollMs == null
+        ? SERVER_SYNC_SOURCE
+        : SERVER_SYNC_SOURCE.replace(
+          'window.setInterval(recoveryPoll, 15_000)',
+          `window.setInterval(recoveryPoll, ${Number(recoveryPollMs)})`,
+        );
+      await route.fulfill({ status: 200, contentType: 'application/javascript; charset=utf-8', body: source });
       return;
     }
     if (url.pathname === '/api/state' && request.method() === 'GET') {
       stateGets += 1;
       const responseRole = stateGets >= 2 && promoteToRole ? promoteToRole : role;
-      if (corruptedState && historyRestores === 0) {
+      const stateStillCorrupted = corruptedState
+        && historyRestores === 0
+        && (recoverStateAfterGets == null || stateGets <= recoverStateAfterGets);
+      if (stateStillCorrupted) {
         await route.fulfill({
           status: 500,
           contentType: 'application/json',
@@ -135,6 +146,7 @@ async function newHttpServerPage({
         stateGets === 1
         || (stateGets === 2 && promoteToRole)
         || (stateGets > 2 && promoteToRole && forcedFullFetch)
+        || (corruptedState && !stateStillCorrupted && forcedFullFetch)
         || (historyRestores > 0 && forcedFullFetch)
       ) {
         await route.fulfill({
@@ -2419,4 +2431,29 @@ test('a corrupted live snapshot opens recoverable history without retrying or up
     false,
   );
   await owner.ctx.close();
+});
+
+test('a non-owner automatically resumes synchronization after the owner repairs the live snapshot', async () => {
+  const storekeeper = await newHttpServerPage({
+    role: 'storekeeper',
+    corruptedState: true,
+    recoverStateAfterGets: 1,
+    recoveryPollMs: 50,
+  });
+  await storekeeper.page.waitForFunction(() =>
+    window.treshkaServerSync.status().recoveryRequired === false);
+  assert.ok(storekeeper.counts().stateGets >= 2, 'recovery poll must force-fetch the repaired snapshot');
+  assert.equal(
+    await storekeeper.page.evaluate(() => items.some((item) => item.id === 'server-item')),
+    true,
+    'the repaired canonical state must be applied before recovery mode closes',
+  );
+  const getsAfterRecovery = storekeeper.counts().stateGets;
+  await storekeeper.page.evaluate(() => window.treshkaServerSync.flush());
+  assert.ok(
+    storekeeper.counts().stateGets > getsAfterRecovery,
+    'ordinary synchronization must be available again after automatic recovery',
+  );
+  assert.equal(storekeeper.counts().statePuts, 0, 'recovery must not upload stale local data');
+  await storekeeper.ctx.close();
 });
