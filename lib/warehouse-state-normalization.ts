@@ -1,0 +1,100 @@
+import type { WarehouseState } from "@/lib/warehouse-state";
+
+const MAX_COLLECTION_ITEMS = 50_000;
+const REQUIRED_COLLECTIONS = ["items", "posts", "docs"] as const;
+const OPTIONAL_COLLECTIONS = [
+  "extIssues",
+  "stockTransfers",
+  "inventoryActs",
+  "auditLog",
+  "notifications",
+] as const;
+
+export function stateRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function validCycleCountDraft(value: unknown) {
+  if (value == null) return true;
+  const draft = stateRecord(value);
+  const counts = stateRecord(draft?.counts);
+  const books = stateRecord(draft?.books);
+  const actor = stateRecord(draft?.actor);
+  const itemIds = Array.isArray(draft?.itemIds)
+    ? draft.itemIds.map((itemId) => String(itemId ?? "").trim())
+    : [];
+  const itemIdSet = new Set(itemIds);
+  if (
+    !draft || !counts || !books || !actor
+    || itemIds.length > MAX_COLLECTION_ITEMS
+    || itemIds.some((itemId) => !itemId)
+    || itemIdSet.size !== itemIds.length
+    || Number(draft.positions) !== itemIds.length
+    || Object.keys(books).length !== itemIds.length
+    || Object.keys(counts).length > itemIds.length
+  ) return false;
+  if (!String(draft.id ?? "").trim() || !Number.isFinite(Date.parse(String(draft.startedAt ?? "")))) return false;
+  if (!String(actor.id ?? actor.login ?? "").trim() || !String(actor.role ?? "").trim()) return false;
+  if (!itemIds.every((itemId) =>
+    Number.isSafeInteger(Number(books[itemId])) && Number(books[itemId]) >= 0)) return false;
+  return Object.entries(counts).every(([id, quantity]) =>
+    itemIdSet.has(id) && Number.isSafeInteger(Number(quantity)) && Number(quantity) >= 0);
+}
+
+export function validCycleCountDrafts(value: unknown) {
+  if (value == null) return true;
+  const drafts = stateRecord(value);
+  if (!drafts || Object.keys(drafts).length > 100) return false;
+  return Object.entries(drafts).every(([userId, draftValue]) => {
+    const actor = stateRecord(stateRecord(draftValue)?.actor);
+    return Boolean(
+      userId.trim()
+      && validCycleCountDraft(draftValue)
+      && String(actor?.id ?? "").trim() === userId.trim(),
+    );
+  });
+}
+
+export function normalizedWarehouseState(value: unknown): WarehouseState | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const state = { ...(value as WarehouseState) };
+  if (!Number.isInteger(state.schemaVersion) || Number(state.schemaVersion) < 1 || Number(state.schemaVersion) > 4) {
+    return null;
+  }
+  for (const key of REQUIRED_COLLECTIONS) {
+    if (!Array.isArray(state[key]) || state[key].length > MAX_COLLECTION_ITEMS) return null;
+  }
+  for (const key of OPTIONAL_COLLECTIONS) {
+    if (state[key] != null && (!Array.isArray(state[key]) || state[key].length > MAX_COLLECTION_ITEMS)) return null;
+  }
+  // Older or manually edited snapshots can contain scalar junk in indexed
+  // collections. Keep legitimate records and repair the snapshot before D1
+  // extracts object fields from each entry.
+  state.items = (state.items as unknown[]).filter(
+    (entry) => Boolean(stateRecord(entry)),
+  );
+  if (Array.isArray(state.inventoryActs)) {
+    state.inventoryActs = state.inventoryActs.filter(
+      (entry) => Boolean(stateRecord(entry)),
+    );
+  }
+  if (!validCycleCountDraft(state.cycleCountDraft) || !validCycleCountDrafts(state.cycleCountDrafts)) {
+    return null;
+  }
+  // Migrate the former single shared slot into a per-account map.
+  if (state.cycleCountDraft && !state.cycleCountDrafts) {
+    const legacyActor = stateRecord(stateRecord(state.cycleCountDraft)?.actor);
+    const legacyUserId = String(legacyActor?.id ?? "").trim();
+    state.cycleCountDrafts = legacyUserId ? { [legacyUserId]: state.cycleCountDraft } : {};
+  }
+  delete state.cycleCountDraft;
+  // Authentication and device-local fields never belong to shared state.
+  delete state.accounts;
+  delete state.currentAccountId;
+  delete state.currentRole;
+  delete state.currentUserPost;
+  delete state.savedAt;
+  return state;
+}

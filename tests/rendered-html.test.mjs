@@ -22,16 +22,18 @@ test("built release contains the real warehouse shell rather than the starter pr
 });
 
 test("production shell exposes conflict resolution and guards displayed photos", async () => {
-  const [page, prototype, stateRoute] = await Promise.all([
+  const [page, prototype, stateRoute, stateNormalization] = await Promise.all([
     text("app/page.tsx"),
     text("public/prototype.html"),
     text("app/api/state/route.ts"),
+    text("lib/warehouse-state-normalization.ts"),
   ]);
   assert.match(page, /Серверную/);
   assert.match(page, /resolveSyncConflict\("local"\)/);
   assert.match(prototype, /function safePhotoDataUrl/);
   assert.match(prototype, /safePhotoDataUrl\(dataUrl\)/);
   assert.match(prototype, /function safePhotoSource/);
-  assert.match(stateRoute, /delete state\.accounts/);
-  assert.match(stateRoute, /DELETE|delete state\.currentRole/);
+  assert.match(stateRoute, /normalizedWarehouseState\(body\.state\)/);
+  assert.match(stateNormalization, /delete state\.accounts/);
+  assert.match(stateNormalization, /delete state\.currentRole/);
 });

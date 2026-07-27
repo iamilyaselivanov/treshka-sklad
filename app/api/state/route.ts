@@ -17,6 +17,11 @@ import {
   warehouseItemIds,
 } from "@/lib/warehouse-state";
 import type { WarehouseState } from "@/lib/warehouse-state";
+import {
+  normalizedWarehouseState,
+  stateRecord,
+  validCycleCountDrafts,
+} from "@/lib/warehouse-state-normalization";
 
 export const dynamic = "force-dynamic";
 
@@ -33,18 +38,9 @@ type StateMetaRow = Omit<StateRow, "payload"> & {
 
 const MAX_STATE_BYTES = 1_500_000;
 const MAX_STATE_REQUEST_BYTES = 1_550_000;
-const MAX_COLLECTION_ITEMS = 50_000;
 const MAX_AUDIT_LOG_ITEMS = 2_000;
 const MAX_NOTIFICATION_ITEMS = 2_000;
 const MAX_INVENTORY_ACT_ITEMS = 5_000;
-const REQUIRED_COLLECTIONS = ["items", "posts", "docs"] as const;
-const OPTIONAL_COLLECTIONS = [
-  "extIssues",
-  "stockTransfers",
-  "inventoryActs",
-  "auditLog",
-  "notifications",
-] as const;
 
 const SPECIFIC_COLLECTION_LIMITS = {
   auditLog: MAX_AUDIT_LOG_ITEMS,
@@ -62,102 +58,6 @@ function collectionLimitError(value: unknown) {
     }
   }
   return null;
-}
-
-function stateRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-function validCycleCountDraft(value: unknown) {
-  if (value == null) return true;
-  const draft = stateRecord(value);
-  const counts = stateRecord(draft?.counts);
-  const books = stateRecord(draft?.books);
-  const actor = stateRecord(draft?.actor);
-  const itemIds = Array.isArray(draft?.itemIds)
-    ? draft.itemIds.map((itemId) => String(itemId ?? "").trim())
-    : [];
-  const itemIdSet = new Set(itemIds);
-  if (
-    !draft || !counts || !books || !actor
-    || itemIds.length > MAX_COLLECTION_ITEMS
-    || itemIds.some((itemId) => !itemId)
-    || itemIdSet.size !== itemIds.length
-    || Number(draft.positions) !== itemIds.length
-    || Object.keys(books).length !== itemIds.length
-    || Object.keys(counts).length > itemIds.length
-  ) return false;
-  if (!String(draft.id ?? "").trim() || !Number.isFinite(Date.parse(String(draft.startedAt ?? "")))) return false;
-  if (!String(actor.id ?? actor.login ?? "").trim() || !String(actor.role ?? "").trim()) return false;
-  if (!itemIds.every((itemId) =>
-    Number.isSafeInteger(Number(books[itemId])) && Number(books[itemId]) >= 0)) return false;
-  return Object.entries(counts).every(([id, quantity]) =>
-    itemIdSet.has(id) && Number.isSafeInteger(Number(quantity)) && Number(quantity) >= 0);
-}
-
-function validCycleCountDrafts(value: unknown) {
-  if (value == null) return true;
-  const drafts = stateRecord(value);
-  if (!drafts || Object.keys(drafts).length > 100) return false;
-  return Object.entries(drafts).every(([userId, draftValue]) => {
-    const actor = stateRecord(stateRecord(draftValue)?.actor);
-    return Boolean(
-      userId.trim()
-      && validCycleCountDraft(draftValue)
-      && String(actor?.id ?? "").trim() === userId.trim(),
-    );
-  });
-}
-
-function normalizedState(value: unknown): WarehouseState | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const state = { ...(value as WarehouseState) };
-  if (!Number.isInteger(state.schemaVersion) || Number(state.schemaVersion) < 1 || Number(state.schemaVersion) > 4) {
-    return null;
-  }
-  for (const key of REQUIRED_COLLECTIONS) {
-    if (!Array.isArray(state[key]) || state[key].length > MAX_COLLECTION_ITEMS) return null;
-  }
-  for (const key of OPTIONAL_COLLECTIONS) {
-    if (state[key] != null && (!Array.isArray(state[key]) || state[key].length > MAX_COLLECTION_ITEMS)) return null;
-  }
-  // Older or manually edited snapshots can contain scalar junk in this
-  // collection. Keep legitimate product records and repair the snapshot on its
-  // next write before D1 indexes try to extract object fields from each entry.
-  state.items = (state.items as unknown[]).filter(
-    (value) => Boolean(stateRecord(value)),
-  );
-  if (Array.isArray(state.inventoryActs)) {
-    // Releases before 48ec63f could persist nulls and numbers in this optional
-    // history array. They are never legitimate act headers, so discard them
-    // during the next normal write and let the snapshot repair itself instead
-    // of trapping every client in a permanent GET-then-400 loop.
-    state.inventoryActs = state.inventoryActs.filter(
-      (value) => Boolean(stateRecord(value)),
-    );
-  }
-  if (!validCycleCountDraft(state.cycleCountDraft) || !validCycleCountDrafts(state.cycleCountDrafts)) {
-    return null;
-  }
-  // Migrate the former single shared slot into a per-account map. Two
-  // storekeepers can now count independently without the newer draft silently
-  // replacing the other user's work.
-  if (state.cycleCountDraft && !state.cycleCountDrafts) {
-    const legacyActor = stateRecord(stateRecord(state.cycleCountDraft)?.actor);
-    const legacyUserId = String(legacyActor?.id ?? "").trim();
-    state.cycleCountDrafts = legacyUserId ? { [legacyUserId]: state.cycleCountDraft } : {};
-  }
-  delete state.cycleCountDraft;
-  // Права и аккаунты принадлежат серверной авторизации, а не общему снимку.
-  // Их нельзя менять подменённым PUT /api/state.
-  delete state.accounts;
-  delete state.currentAccountId;
-  delete state.currentRole;
-  delete state.currentUserPost;
-  delete state.savedAt;
-  return state;
 }
 
 async function inventoryCommitError(
@@ -363,7 +263,7 @@ export async function PUT(request: Request) {
   if (limitError) {
     return Response.json({ error: limitError }, { status: 413 });
   }
-  const state = normalizedState(body.state);
+  const state = normalizedWarehouseState(body.state);
   if (!state) {
     return Response.json({ error: "Некорректное состояние склада" }, { status: 400 });
   }
@@ -512,7 +412,7 @@ export async function PUT(request: Request) {
       }
       let previous: WarehouseState | null = null;
       try {
-        previous = normalizedState(JSON.parse(previousRow.payload));
+        previous = normalizedWarehouseState(JSON.parse(previousRow.payload));
       } catch {
         // Never overwrite a damaged snapshot before an owner can export/recover it.
       }

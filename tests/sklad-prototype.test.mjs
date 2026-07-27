@@ -1140,6 +1140,29 @@ test('regression — rabotnik can never reassign their bound post locally, inclu
   await ctx.close();
 });
 
+test('regression — remote state drops scalar warehouse items before applying the snapshot', async () => {
+  const { ctx, page } = await newPage();
+  const r = await page.evaluate(() => {
+    const base = JSON.parse(JSON.stringify(serializeAppState()));
+    const expectedIds = base.items.map((item) => item.id);
+    const ok = applyAppState({
+      ...base,
+      items: [...base.items, 'legacy-junk', null, 42, []],
+    });
+    return {
+      ok,
+      expectedIds,
+      ids: items.map((item) => item.id),
+      everyItemIsRecord: items.every((item) =>
+        Boolean(item) && typeof item === 'object' && !Array.isArray(item)),
+    };
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.everyItemIsRecord, true);
+  assert.deepEqual(r.ids, r.expectedIds);
+  await ctx.close();
+});
+
 test('review 800c0c9 — a 304 response reuses an immutable cached snapshot without parsing an empty body', async () => {
   const { ctx, page, counts } = await newHttpServerPage({ role: 'worker' });
   const result = await page.evaluate(async () => {

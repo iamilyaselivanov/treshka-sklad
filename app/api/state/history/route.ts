@@ -14,6 +14,7 @@ import {
 } from "@/lib/state-history";
 import { projectWarehouseStateForUser } from "@/lib/warehouse-state";
 import type { WarehouseState } from "@/lib/warehouse-state";
+import { normalizedWarehouseState } from "@/lib/warehouse-state-normalization";
 
 export const dynamic = "force-dynamic";
 
@@ -135,13 +136,9 @@ export async function POST(request: Request) {
   if (!archived) return Response.json({ error: "Архивная ревизия не найдена" }, { status: 404 });
   let restoredPayload = "";
   try {
-    const parsed = JSON.parse(archived.payload) as Record<string, unknown>;
-    const currentState = JSON.parse(current.payload) as Record<string, unknown>;
-    if (
-      !parsed || typeof parsed !== "object" || Array.isArray(parsed)
-      || !Array.isArray(parsed.items) || !Array.isArray(parsed.posts) || !Array.isArray(parsed.docs)
-      || !currentState || typeof currentState !== "object" || Array.isArray(currentState)
-    ) {
+    const parsed = normalizedWarehouseState(JSON.parse(archived.payload));
+    const currentState = normalizedWarehouseState(JSON.parse(current.payload));
+    if (!parsed || !currentState) {
       throw new Error("invalid state");
     }
     // Drafts are per-user volatile work, not signed warehouse history. A

@@ -8,6 +8,7 @@ import {
   warehouseHistoryMutationIssue,
   warehouseItemDeletionIssue,
 } from "../lib/warehouse-state.ts";
+import { normalizedWarehouseState } from "../lib/warehouse-state-normalization.ts";
 
 function state(overrides = {}) {
   return {
@@ -34,6 +35,24 @@ const unusedItem = {
   posts: {},
   lots: [],
 };
+
+test("shared state normalization removes legacy scalar rows without mutating the source", () => {
+  const item = { id: "item-valid", name: "Исправный товар" };
+  const act = { id: "act-valid", no: "ИНВ-000001" };
+  const source = state({
+    items: [item, "junk", null, 42, []],
+    inventoryActs: [act, "junk", null],
+    accounts: [{ id: "forged-owner" }],
+    currentRole: "admin",
+  });
+  const normalized = normalizedWarehouseState(source);
+  assert.ok(normalized);
+  assert.deepEqual(normalized.items, [item]);
+  assert.deepEqual(normalized.inventoryActs, [act]);
+  assert.equal("accounts" in normalized, false);
+  assert.equal("currentRole" in normalized, false);
+  assert.equal(source.items.length, 5, "normalization must not mutate the caller's arrays");
+});
 
 test("server deletion policy rejects a storekeeper and allows an admin for an unused card", () => {
   const previous = state({ items: [unusedItem] });

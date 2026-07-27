@@ -4,9 +4,10 @@ UPDATE `warehouse_full_state`
 SET `item_ids` = CASE
   WHEN json_valid(`payload`) THEN COALESCE(
     (
-      SELECT json_group_array(json_extract(value, '$.id'))
-      FROM json_each(`warehouse_full_state`.`payload`, '$.items')
-      WHERE TRIM(CAST(json_extract(value, '$.id') AS TEXT)) <> ''
+      SELECT json_group_array(json_extract(item_entry.value, '$.id'))
+      FROM json_each(`warehouse_full_state`.`payload`, '$.items') AS item_entry
+      WHERE item_entry.type = 'object'
+        AND TRIM(CAST(json_extract(item_entry.value, '$.id') AS TEXT)) <> ''
     ),
     '[]'
   )

@@ -3191,6 +3191,10 @@ function applyAppState(saved){
     // ВСЕ поля до единого throw-safe места, и только после полного успеха один
     // блок применяет их разом — частичного применения быть не может.
     if(!Array.isArray(s.items) || !Array.isArray(s.docs) || !Array.isArray(s.posts)) return false;
+    // Старые серверные ревизии могли содержать скаляры внутри items. Сервер
+    // очищает их при восстановлении, но клиент также не должен допускать такие
+    // элементы в живой граф при работе со старым или частично обновлённым узлом.
+    const itemsNext=s.items.filter(i=>i&&typeof i==='object'&&!Array.isArray(i));
     const extIssuesNext = s.extIssues!=null ? s.extIssues : [];
     if(!Array.isArray(extIssuesNext)) return false;
     const auditLogNext = s.auditLog!=null ? s.auditLog : [];
@@ -3234,7 +3238,7 @@ function applyAppState(saved){
 
     // Точка применения — все поля выше уже провалидированы, здесь только
     // присваивание/push в уже гарантированно корректные массивы.
-    items.length = 0; items.push(...s.items);
+    items.length = 0; items.push(...itemsNext);
     posts.length = 0; posts.push(...s.posts);
     docs.length = 0; docs.push(...s.docs);
     extIssues.length = 0; extIssues.push(...extIssuesNext);

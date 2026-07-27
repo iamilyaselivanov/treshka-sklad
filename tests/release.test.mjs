@@ -313,7 +313,9 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
     }
   };
   assert.match(migrations[5], /ALTER TABLE `push_deliveries` ADD `attempts`/);
+  assert.match(migrations[5], /item_entry\.type = 'object'/);
   assert.doesNotMatch(migrations[6], /ALTER TABLE/);
+  assert.match(migrations[6], /item_entry\.type = 'object'/);
   assert.match(migrations[7], /ALTER TABLE `users` ADD `assignment_key`/);
   assert.match(migrations[8], /CREATE TRIGGER `users_assignment_key_after_insert`/);
   assert.match(migrations[9], /CREATE TABLE `warehouse_state_revisions`/);
@@ -327,6 +329,7 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   assert.match(migrations[12], /ADD `pinned`/);
   assert.match(migrations[12], /ADD `reason`/);
   assert.match(migrations[12], /json_each\(warehouse_full_state\.payload, '\$\.inventoryActs'\)/);
+  assert.match(migrations[12], /inventory_entry\.type = 'object'/);
   assert.match(migrations[13], /DROP TABLE `inventory_act_counters`/);
   assert.match(migrations[13], /ADD `header_json`/);
   assert.match(migrations[13], /SET `header_json` = COALESCE/);
@@ -335,6 +338,17 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   const latestMigration = migrationNames[migrationNames.length - 1];
   const escapedLatestMigration = latestMigration.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   assert.match(releaseNotes, new RegExp(escapedLatestMigration));
+  for (const [index, migration] of migrations.entries()) {
+    for (const statement of migration.split("--> statement-breakpoint")) {
+      if (/json_each\([\s\S]*'\$\.(?:items|inventoryActs)'\)/.test(statement)) {
+        assert.match(
+          statement,
+          /\.type = 'object'/,
+          `${migrationNames[index]} must filter scalar json_each rows`,
+        );
+      }
+    }
+  }
 
   const clean = new DatabaseSync(":memory:");
   for (const migration of migrations) apply(clean, migration);
@@ -345,6 +359,36 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
     ["audit_log", "inventory_act_archive", "login_throttle", "products", "push_deliveries", "push_delivery_attempts", "push_devices", "push_events", "push_maintenance_state", "sessions", "users", "warehouse_full_state", "warehouse_state_inventory_acts", "warehouse_state_items", "warehouse_state_revisions"],
   );
   clean.close();
+
+  const restoredLegacy = new DatabaseSync(":memory:");
+  for (const migration of migrations.slice(0, 5)) apply(restoredLegacy, migration);
+  restoredLegacy.prepare(
+    `INSERT INTO warehouse_full_state (state_key, revision, payload, updated_at, updated_by)
+     VALUES ('main', 1, ?, '2026-01-01T00:00:00.000Z', 'legacy')`,
+  ).run(JSON.stringify({
+    items: [{ id: "item-valid" }, "junk", null, 42, []],
+    inventoryActs: [{ id: "act-valid", no: "ИНВ-000001" }, "junk", null, 42, []],
+  }));
+  for (const migration of migrations.slice(5)) apply(restoredLegacy, migration);
+  assert.deepEqual(
+    JSON.parse(restoredLegacy.prepare(
+      "SELECT item_ids AS itemIds FROM warehouse_full_state WHERE state_key = 'main'",
+    ).get().itemIds),
+    ["item-valid"],
+  );
+  assert.deepEqual(
+    restoredLegacy.prepare(
+      "SELECT item_id AS itemId FROM warehouse_state_items ORDER BY item_id",
+    ).all().map((row) => row.itemId),
+    ["item-valid"],
+  );
+  assert.deepEqual(
+    restoredLegacy.prepare(
+      "SELECT act_id AS actId FROM warehouse_state_inventory_acts ORDER BY act_id",
+    ).all().map((row) => row.actId),
+    ["act-valid"],
+  );
+  restoredLegacy.close();
 
   const adopted = new DatabaseSync(":memory:");
   for (const migration of migrations.slice(0, 3)) apply(adopted, migration);
@@ -586,9 +630,10 @@ test("destructive recovery points survive thinning and the ordinary row cap", ()
 });
 
 test("inventory archive stays within D1 row limits and allocates numbers atomically", async () => {
-  const [inventoryRoute, stateRoute, historyRoute, productsRoute, browserSync] = await Promise.all([
+  const [inventoryRoute, stateRoute, stateNormalization, historyRoute, productsRoute, browserSync] = await Promise.all([
     text("app/api/inventory/acts/route.ts"),
     text("app/api/state/route.ts"),
+    text("lib/warehouse-state-normalization.ts"),
     text("app/api/state/history/route.ts"),
     text("app/api/products/route.ts"),
     text("public/prototype-server.js"),
@@ -605,13 +650,15 @@ test("inventory archive stays within D1 row limits and allocates numbers atomica
   assert.match(stateRoute, /header_json AS headerJson/);
   assert.match(stateRoute, /nextInventoryActHeaders\.get\(actId\) !== headerJson/);
   assert.match(stateRoute, /previousItemIds\.length === 0 && Number\(productCount\?\.count/);
-  assert.match(stateRoute, /state\.items = \(state\.items as unknown\[\]\)\.filter/);
-  assert.match(stateRoute, /state\.inventoryActs = state\.inventoryActs\.filter/);
+  assert.match(stateRoute, /normalizedWarehouseState\(body\.state\)/);
+  assert.match(stateNormalization, /state\.items = \(state\.items as unknown\[\]\)\.filter/);
+  assert.match(stateNormalization, /state\.inventoryActs = state\.inventoryActs\.filter/);
   assert.equal((stateRoute.match(/item_entry\.type = 'object'/g) ?? []).length, 2);
   assert.equal((historyRoute.match(/item_entry\.type = 'object'/g) ?? []).length, 1);
   assert.equal((productsRoute.match(/item_entry\.type = 'object'/g) ?? []).length, 2);
   assert.match(stateRoute, /inventory_entry\.type = 'object'/);
   assert.match(historyRoute, /inventory_entry\.type = 'object'/);
+  assert.equal((historyRoute.match(/normalizedWarehouseState\(JSON\.parse/g) ?? []).length, 2);
   assert.match(historyRoute, /if \(!auth\.user\) \{\s*return Response\.json/);
   assert.match(stateRoute, /state_history_mutation_rejected/);
   assert.match(browserSync, /data\.terminal === true/);
