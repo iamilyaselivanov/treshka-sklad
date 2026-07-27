@@ -340,6 +340,10 @@ test("database migrations build a clean schema and adopt the legacy runtime stat
   assert.match(migrations[13], /DROP TABLE `inventory_act_counters`/);
   assert.match(migrations[13], /ADD `header_json`/);
   assert.match(migrations[13], /SET `header_json` = COALESCE/);
+  assert.match(migrations[13], /entry\.type = 'object'/);
+  const releaseNotes = await text("RELEASE_NOTES.md");
+  const latestMigration = "0013_thin_radioactive_man.sql";
+  assert.match(releaseNotes, new RegExp(latestMigration.replace(".", "\\.")));
 
   const clean = new DatabaseSync(":memory:");
   for (const migration of migrations) apply(clean, migration);
@@ -609,7 +613,7 @@ test("inventory archive stays within D1 row limits and allocates numbers atomica
   assert.match(stateRoute, /header_json AS headerJson/);
   assert.match(stateRoute, /nextInventoryActHeaders\.get\(actId\) !== headerJson/);
   assert.match(stateRoute, /previousItemIds\.length === 0 && Number\(productCount\?\.count/);
-  assert.match(stateRoute, /state\.inventoryActs\.some\(\(value\) => !stateRecord\(value\)\)/);
+  assert.match(stateRoute, /state\.inventoryActs = state\.inventoryActs\.filter/);
   assert.match(stateRoute, /inventory_entry\.type = 'object'/);
   assert.match(historyRoute, /inventory_entry\.type = 'object'/);
   assert.match(historyRoute, /if \(!auth\.user\) \{\s*return Response\.json/);

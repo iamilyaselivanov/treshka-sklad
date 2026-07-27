@@ -123,11 +123,14 @@ function normalizedState(value: unknown): WarehouseState | null {
   for (const key of OPTIONAL_COLLECTIONS) {
     if (state[key] != null && (!Array.isArray(state[key]) || state[key].length > MAX_COLLECTION_ITEMS)) return null;
   }
-  if (
-    Array.isArray(state.inventoryActs)
-    && state.inventoryActs.some((value) => !stateRecord(value))
-  ) {
-    return null;
+  if (Array.isArray(state.inventoryActs)) {
+    // Releases before 48ec63f could persist nulls and numbers in this optional
+    // history array. They are never legitimate act headers, so discard them
+    // during the next normal write and let the snapshot repair itself instead
+    // of trapping every client in a permanent GET-then-400 loop.
+    state.inventoryActs = state.inventoryActs.filter(
+      (value) => Boolean(stateRecord(value)),
+    );
   }
   if (!validCycleCountDraft(state.cycleCountDraft) || !validCycleCountDrafts(state.cycleCountDrafts)) {
     return null;

@@ -326,16 +326,20 @@ try {
     headers: { ...ownerHeaders, "content-type": "application/json" },
     body: JSON.stringify({ state: sharedState, expectedRevision: state.data.revision }),
   });
-  const malformedInventoryHistory = await request("/api/state", {
+  const normalizedLegacyInventoryHistory = await request("/api/state", {
     method: "PUT",
     headers: { ...ownerHeaders, "content-type": "application/json" },
     body: JSON.stringify({
-      state: { ...sharedState, inventoryActs: ["not-an-inventory-header"] },
+      state: {
+        ...sharedState,
+        inventoryActs: ["not-an-inventory-header", null, 42],
+      },
       expectedRevision: inventoryBootstrap.data.revision,
     }),
-  }, 400);
-  assert.match(malformedInventoryHistory.data.error, /Некорректное состояние склада/);
-  await request("/api/auth/status");
+  });
+  inventoryBootstrap.data.revision = normalizedLegacyInventoryHistory.data.revision;
+  const cleanedLegacyInventoryHistory = await request("/api/state", { headers: ownerHeaders });
+  assert.deepEqual(cleanedLegacyInventoryHistory.data.state.inventoryActs, []);
   const inventoryId = `inventory-${crypto.randomUUID()}`;
   const inventoryStartedAt = new Date(Date.now() - 60_000).toISOString();
   const inventoryFinishedAt = new Date().toISOString();
