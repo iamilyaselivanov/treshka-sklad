@@ -8,7 +8,11 @@ import {
   warehouseHistoryMutationIssue,
   warehouseItemDeletionIssue,
 } from "../lib/warehouse-state.ts";
-import { normalizedWarehouseState } from "../lib/warehouse-state-normalization.ts";
+import {
+  normalizedWarehouseState,
+  prepareWarehouseStateRestore,
+  sanitizedLegacyWarehouseState,
+} from "../lib/warehouse-state-normalization.ts";
 
 function state(overrides = {}) {
   return {
@@ -52,6 +56,35 @@ test("shared state normalization removes legacy scalar rows without mutating the
   assert.equal("accounts" in normalized, false);
   assert.equal("currentRole" in normalized, false);
   assert.equal(source.items.length, 5, "normalization must not mutate the caller's arrays");
+});
+
+test("legacy archive sanitation accepts missing schema and discards obsolete drafts", () => {
+  const archive = state({
+    items: [{ id: "item-valid" }, "junk"],
+    cycleCountDrafts: {
+      broken: { actor: { id: "someone-else" }, itemIds: [], books: {}, counts: {} },
+    },
+  });
+  delete archive.schemaVersion;
+  const sanitized = sanitizedLegacyWarehouseState(archive);
+  assert.ok(sanitized);
+  assert.equal(sanitized.schemaVersion, 1);
+  assert.deepEqual(sanitized.items, [{ id: "item-valid" }]);
+  assert.equal("cycleCountDrafts" in sanitized, false);
+});
+
+test("restore preparation tolerates broken current state and reports discarded drafts", () => {
+  const archive = state({ items: [{ id: "item-valid" }] });
+  const prepared = prepareWarehouseStateRestore(archive, { broken: true });
+  assert.ok(prepared);
+  assert.equal(prepared.currentStateDamaged, true);
+  assert.equal(prepared.legacySchemaAdjusted, false);
+  assert.deepEqual(prepared.state.cycleCountDrafts, {});
+  assert.equal(
+    prepareWarehouseStateRestore({ ...archive, items: "broken" }, state()),
+    null,
+    "an archive without the required structural arrays must still be rejected",
+  );
 });
 
 test("server deletion policy rejects a storekeeper and allows an admin for an unused card", () => {

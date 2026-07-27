@@ -13,8 +13,10 @@ import {
   stateHistoryPruneBindings,
 } from "@/lib/state-history";
 import { projectWarehouseStateForUser } from "@/lib/warehouse-state";
-import type { WarehouseState } from "@/lib/warehouse-state";
-import { normalizedWarehouseState } from "@/lib/warehouse-state-normalization";
+import {
+  prepareWarehouseStateRestore,
+  sanitizedLegacyWarehouseState,
+} from "@/lib/warehouse-state-normalization";
 
 export const dynamic = "force-dynamic";
 
@@ -48,8 +50,10 @@ export async function GET(request: Request) {
     ).bind(revision).first<RevisionRow>();
     if (!row) return Response.json({ error: "Ревизия не найдена" }, { status: 404 });
     try {
+      const sanitizedState = sanitizedLegacyWarehouseState(JSON.parse(row.payload));
+      if (!sanitizedState) throw new Error("invalid state");
       const projectedState = projectWarehouseStateForUser(
-        JSON.parse(row.payload) as WarehouseState,
+        sanitizedState,
         auth.user,
       );
       return Response.json({
@@ -134,22 +138,25 @@ export async function POST(request: Request) {
     );
   }
   if (!archived) return Response.json({ error: "Архивная ревизия не найдена" }, { status: 404 });
-  let restoredPayload = "";
+  let archivedValue: unknown;
   try {
-    const parsed = normalizedWarehouseState(JSON.parse(archived.payload));
-    const currentState = normalizedWarehouseState(JSON.parse(current.payload));
-    if (!parsed || !currentState) {
-      throw new Error("invalid state");
-    }
-    // Drafts are per-user volatile work, not signed warehouse history. A
-    // warehouse rollback must not disclose, erase or resurrect anybody's
-    // unfinished count from an old snapshot.
-    parsed.cycleCountDrafts = currentState.cycleCountDrafts ?? {};
-    delete parsed.cycleCountDraft;
-    restoredPayload = JSON.stringify(parsed);
+    archivedValue = JSON.parse(archived.payload);
   } catch {
     return Response.json({ error: "Архивная ревизия повреждена" }, { status: 500 });
   }
+  let currentValue: unknown;
+  let currentJsonDamaged = false;
+  try {
+    currentValue = JSON.parse(current.payload);
+  } catch {
+    currentJsonDamaged = true;
+  }
+  const prepared = prepareWarehouseStateRestore(archivedValue, currentValue);
+  if (!prepared) {
+    return Response.json({ error: "Архивная ревизия повреждена" }, { status: 500 });
+  }
+  const currentStateDamaged = currentJsonDamaged || prepared.currentStateDamaged;
+  const restoredPayload = JSON.stringify(prepared.state);
   const revision = expectedRevision + 1;
   const updatedAt = new Date().toISOString();
   const archivedAt = stateHistoryArchiveTimestamp();
@@ -253,6 +260,8 @@ export async function POST(request: Request) {
     auth.user,
     "state_restored",
     `Архивная ревизия ${targetRevision} восстановлена как ревизия ${revision}`
+      + (prepared.legacySchemaAdjusted ? " · версия старого снимка приведена к поддерживаемой" : "")
+      + (currentStateDamaged ? " · повреждённые текущие черновики отброшены" : "")
       + (discardedItemReferences > 0
         ? ` · отброшено ссылок на удалённые карточки: ${discardedItemReferences}`
         : ""),
@@ -262,5 +271,12 @@ export async function POST(request: Request) {
     restoredFrom: targetRevision,
     updatedAt,
     discardedItemReferences,
+    legacySchemaAdjusted: prepared.legacySchemaAdjusted,
+    currentStateDamaged,
+    warning: currentStateDamaged
+      ? "Текущее состояние склада было повреждено; откат выполнен, текущие черновики инвентаризации отброшены"
+      : prepared.legacySchemaAdjusted
+        ? "Старая архивная ревизия приведена к поддерживаемой версии схемы"
+        : undefined,
   });
 }

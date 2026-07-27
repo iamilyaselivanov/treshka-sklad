@@ -4475,7 +4475,10 @@ async function restoreStateRevision(revision){
   try{
     const result=await bridge.restore(Number(revision));
     const discarded=Math.max(0,Number(result.discardedItemReferences)||0);
-    toast(discarded?`✓ Ревизия восстановлена. Отброшено ссылок на удалённые карточки: ${discarded}`:'✓ Ревизия восстановлена');
+    const notes=[];
+    if(discarded)notes.push(`Отброшено ссылок на удалённые карточки: ${discarded}`);
+    if(result.warning)notes.push(String(result.warning));
+    toast(`✓ Ревизия восстановлена${notes.length?`. ${notes.join('. ')}`:''}`);
     await renderStateHistory();
     return true;
   }catch(e){

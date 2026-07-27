@@ -651,14 +651,17 @@ test("inventory archive stays within D1 row limits and allocates numbers atomica
   assert.match(stateRoute, /nextInventoryActHeaders\.get\(actId\) !== headerJson/);
   assert.match(stateRoute, /previousItemIds\.length === 0 && Number\(productCount\?\.count/);
   assert.match(stateRoute, /normalizedWarehouseState\(body\.state\)/);
+  assert.match(stateRoute, /normalizedWarehouseState\(rawState\)[\s\S]*sanitizedLegacyWarehouseState\(rawState\)/);
   assert.match(stateNormalization, /state\.items = \(state\.items as unknown\[\]\)\.filter/);
   assert.match(stateNormalization, /state\.inventoryActs = state\.inventoryActs\.filter/);
+  assert.match(stateNormalization, /function prepareWarehouseStateRestore/);
   assert.equal((stateRoute.match(/item_entry\.type = 'object'/g) ?? []).length, 2);
   assert.equal((historyRoute.match(/item_entry\.type = 'object'/g) ?? []).length, 1);
   assert.equal((productsRoute.match(/item_entry\.type = 'object'/g) ?? []).length, 2);
   assert.match(stateRoute, /inventory_entry\.type = 'object'/);
   assert.match(historyRoute, /inventory_entry\.type = 'object'/);
-  assert.equal((historyRoute.match(/normalizedWarehouseState\(JSON\.parse/g) ?? []).length, 2);
+  assert.match(historyRoute, /prepareWarehouseStateRestore\(archivedValue, currentValue\)/);
+  assert.match(historyRoute, /currentStateDamaged/);
   assert.match(historyRoute, /if \(!auth\.user\) \{\s*return Response\.json/);
   assert.match(stateRoute, /state_history_mutation_rejected/);
   assert.match(browserSync, /data\.terminal === true/);

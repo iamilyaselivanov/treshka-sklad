@@ -19,6 +19,7 @@ import {
 import type { WarehouseState } from "@/lib/warehouse-state";
 import {
   normalizedWarehouseState,
+  sanitizedLegacyWarehouseState,
   stateRecord,
   validCycleCountDrafts,
 } from "@/lib/warehouse-state-normalization";
@@ -38,6 +39,7 @@ type StateMetaRow = Omit<StateRow, "payload"> & {
 
 const MAX_STATE_BYTES = 1_500_000;
 const MAX_STATE_REQUEST_BYTES = 1_550_000;
+const STATE_ETAG_VERSION = "v2";
 const MAX_AUDIT_LOG_ITEMS = 2_000;
 const MAX_NOTIFICATION_ITEMS = 2_000;
 const MAX_INVENTORY_ACT_ITEMS = 5_000;
@@ -186,7 +188,7 @@ async function inventoryCommitError(
 
 function stateEtag(revision: number, user: SessionUser) {
   const authorizationScope = encodeURIComponent(`${user.id}|${user.role}|${user.assignment}`);
-  return `W/"warehouse-main-${revision}-${authorizationScope}"`;
+  return `W/"warehouse-main-${STATE_ETAG_VERSION}-${revision}-${authorizationScope}"`;
 }
 
 export async function GET(request: Request) {
@@ -209,7 +211,10 @@ export async function GET(request: Request) {
     });
   }
   try {
-    const parsedState = JSON.parse(row.payload) as WarehouseState;
+    const rawState = JSON.parse(row.payload);
+    const parsedState = normalizedWarehouseState(rawState)
+      ?? sanitizedLegacyWarehouseState(rawState);
+    if (!parsedState) throw new Error("invalid state");
     const projectedState = projectWarehouseStateForUser(parsedState, auth.user);
     const projectedPayload = JSON.stringify(projectedState);
     return Response.json(

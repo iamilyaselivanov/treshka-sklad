@@ -57,11 +57,15 @@ export function validCycleCountDrafts(value: unknown) {
   });
 }
 
-export function normalizedWarehouseState(value: unknown): WarehouseState | null {
+function structurallySanitizedWarehouseState(
+  value: unknown,
+  coerceLegacySchema: boolean,
+): WarehouseState | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const state = { ...(value as WarehouseState) };
   if (!Number.isInteger(state.schemaVersion) || Number(state.schemaVersion) < 1 || Number(state.schemaVersion) > 4) {
-    return null;
+    if (!coerceLegacySchema) return null;
+    state.schemaVersion = 1;
   }
   for (const key of REQUIRED_COLLECTIONS) {
     if (!Array.isArray(state[key]) || state[key].length > MAX_COLLECTION_ITEMS) return null;
@@ -80,6 +84,18 @@ export function normalizedWarehouseState(value: unknown): WarehouseState | null 
       (entry) => Boolean(stateRecord(entry)),
     );
   }
+  // Authentication and device-local fields never belong to shared state.
+  delete state.accounts;
+  delete state.currentAccountId;
+  delete state.currentRole;
+  delete state.currentUserPost;
+  delete state.savedAt;
+  return state;
+}
+
+export function normalizedWarehouseState(value: unknown): WarehouseState | null {
+  const state = structurallySanitizedWarehouseState(value, false);
+  if (!state) return null;
   if (!validCycleCountDraft(state.cycleCountDraft) || !validCycleCountDrafts(state.cycleCountDrafts)) {
     return null;
   }
@@ -90,11 +106,41 @@ export function normalizedWarehouseState(value: unknown): WarehouseState | null 
     state.cycleCountDrafts = legacyUserId ? { [legacyUserId]: state.cycleCountDraft } : {};
   }
   delete state.cycleCountDraft;
-  // Authentication and device-local fields never belong to shared state.
-  delete state.accounts;
-  delete state.currentAccountId;
-  delete state.currentRole;
-  delete state.currentUserPost;
-  delete state.savedAt;
   return state;
+}
+
+export function sanitizedLegacyWarehouseState(value: unknown): WarehouseState | null {
+  const state = structurallySanitizedWarehouseState(value, true);
+  if (!state) return null;
+  // Inventory drafts are volatile per-user work and never part of a historical
+  // rollback. Old malformed drafts must not make otherwise intact history
+  // impossible to restore.
+  delete state.cycleCountDraft;
+  delete state.cycleCountDrafts;
+  return state;
+}
+
+export type PreparedWarehouseStateRestore = {
+  state: WarehouseState;
+  legacySchemaAdjusted: boolean;
+  currentStateDamaged: boolean;
+};
+
+export function prepareWarehouseStateRestore(
+  archivedValue: unknown,
+  currentValue: unknown,
+): PreparedWarehouseStateRestore | null {
+  const archivedRecord = stateRecord(archivedValue);
+  const legacySchemaAdjusted = !Number.isInteger(archivedRecord?.schemaVersion)
+    || Number(archivedRecord?.schemaVersion) < 1
+    || Number(archivedRecord?.schemaVersion) > 4;
+  const state = sanitizedLegacyWarehouseState(archivedValue);
+  if (!state) return null;
+  const currentState = normalizedWarehouseState(currentValue);
+  state.cycleCountDrafts = currentState?.cycleCountDrafts ?? {};
+  return {
+    state,
+    legacySchemaAdjusted,
+    currentStateDamaged: !currentState,
+  };
 }

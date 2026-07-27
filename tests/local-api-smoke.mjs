@@ -678,7 +678,7 @@ try {
   assert.equal(sanitized.data.state.notifications.length, 2_000);
   assert.equal(sanitized.data.state.inventoryActs.length, 5_000);
   const etag = sanitized.response.headers.get("etag");
-  assert.match(etag, new RegExp(`^W/"warehouse-main-${sanitized.data.revision}-`));
+  assert.match(etag, new RegExp(`^W/"warehouse-main-v2-${sanitized.data.revision}-`));
   const notModified = await fetch(new URL("/api/state", baseUrl), {
     headers: { ...ownerHeaders, "if-none-match": etag },
   });

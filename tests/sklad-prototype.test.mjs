@@ -171,6 +171,8 @@ async function newHttpServerPage({
             restoredFrom: Number(JSON.parse(request.postData() || '{}').revision),
             updatedAt: '2026-07-26T09:00:00.000Z',
             discardedItemReferences: 2,
+            currentStateDamaged: true,
+            warning: 'Текущее состояние склада было повреждено; текущие черновики отброшены',
           })
           : JSON.stringify({ error: 'Восстанавливать ревизии может только владелец' }),
       });
@@ -2330,6 +2332,7 @@ test('server revision history is visible to admins and restorable only by the ow
   owner.page.once('dialog', (dialog) => dialog.accept());
   assert.equal(await owner.page.evaluate(() => restoreStateRevision(6)), true);
   assert.equal(owner.counts().historyRestores, 1);
+  assert.match(await owner.page.textContent('#toast'), /текущие черновики отброшены/i);
   assert.ok(owner.counts().historyGets >= 3, 'list, preview and refreshed list must all reach the server');
   assert.ok(owner.counts().stateGets >= 2, 'restore must force-fetch the canonical restored state');
   await owner.ctx.close();
