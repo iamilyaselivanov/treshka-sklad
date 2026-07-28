@@ -2493,12 +2493,18 @@ test('automatic recovery restarts ordinary synchronization even when snapshot po
     regularSyncMs: 50,
   });
   await storekeeper.page.evaluate(() => {
+    window.__testRecoverPendingInventoryCalls = 0;
     window.recoverPendingInventoryActs = async () => {
+      window.__testRecoverPendingInventoryCalls += 1;
       throw new Error('test post-processing failure');
     };
   });
   await storekeeper.page.waitForFunction(() =>
     window.treshkaServerSync.status().recoveryRequired === false);
+  assert.ok(
+    await storekeeper.page.evaluate(() => window.__testRecoverPendingInventoryCalls) >= 1,
+    'the throwing post-processing override must be reached before synchronization recovery is asserted',
+  );
   const getsAfterRecovery = storekeeper.counts().stateGets;
   await storekeeper.page.waitForTimeout(250);
   assert.ok(
