@@ -114,6 +114,22 @@ Push работает через Firebase Cloud Messaging HTTP v1. Код при
    устройство отзывается, а при следующем входе FCM-токен привязывается к
    вошедшему сотруднику.
 
+Release-сборка намеренно останавливается, если отсутствует Firebase-конфигурация
+или постоянная подпись. Ключ храните вне репозитория и перед сборкой задайте
+переменные только в текущем PowerShell-сеансе:
+
+```powershell
+$Env:TRESHKA_RELEASE_STORE_FILE = "D:\secure\treshka-release.jks"
+$Env:TRESHKA_RELEASE_STORE_PASSWORD = "<пароль хранилища>"
+$Env:TRESHKA_RELEASE_KEY_ALIAS = "treshka"
+$Env:TRESHKA_RELEASE_KEY_PASSWORD = "<пароль ключа>"
+.\gradlew.bat :app:assembleRelease
+```
+
+`google-services.json`, `*.jks`, `*.keystore` и локальные файлы с параметрами
+подписи исключены из Git. Не передавайте закрытый ключ Firebase или пароли
+подписи через исходный код, commit, APK или публичный чат.
+
 Сервер сам выбирает получателей и не принимает список адресатов от клиента:
 
 - инициатор события не получает push о собственном действии; если администратор назначен на пост,

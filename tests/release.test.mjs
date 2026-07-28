@@ -23,6 +23,28 @@ test("release version is 1.6 in web and Android", async () => {
   assert.match(gradle, /versionName "1\.6"/);
 });
 
+test("Android production release fails closed without Firebase and permanent signing", async () => {
+  const [gradle, androidIgnore, rootIgnore] = await Promise.all([
+    text("android/app/build.gradle"),
+    text("android/.gitignore"),
+    text(".gitignore"),
+  ]);
+  for (const variable of [
+    "TRESHKA_RELEASE_STORE_FILE",
+    "TRESHKA_RELEASE_STORE_PASSWORD",
+    "TRESHKA_RELEASE_KEY_ALIAS",
+    "TRESHKA_RELEASE_KEY_PASSWORD",
+  ]) {
+    assert.match(gradle, new RegExp(variable));
+  }
+  assert.match(gradle, /validateReleasePrerequisites/);
+  assert.match(gradle, /google-services\.json/);
+  assert.match(gradle, /preReleaseBuild/);
+  assert.match(androidIgnore, /app\/google-services\.json/);
+  assert.match(androidIgnore, /app\/\*\.jks/);
+  assert.match(rootIgnore, /firebase-service-account\*\.json/);
+});
+
 test("security endpoints and server-connected APK are present", async () => {
   const paths = [
     "app/api/auth/setup/route.ts",

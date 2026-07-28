@@ -6,6 +6,17 @@ if (file('google-services.json').exists()) {
     apply plugin: 'com.google.gms.google-services'
 }
 
+def releaseStoreFilePath = System.getenv('TRESHKA_RELEASE_STORE_FILE')?.trim()
+def releaseStorePassword = System.getenv('TRESHKA_RELEASE_STORE_PASSWORD')?.trim()
+def releaseKeyAlias = System.getenv('TRESHKA_RELEASE_KEY_ALIAS')?.trim()
+def releaseKeyPassword = System.getenv('TRESHKA_RELEASE_KEY_PASSWORD')?.trim()
+def releaseSigningConfigured = [
+    releaseStoreFilePath,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+].every { value -> value }
+
 android {
     namespace 'com.treshka.sklad'
     compileSdk 34
@@ -18,8 +29,26 @@ android {
         versionName "1.6"
     }
 
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            release {
+                storeFile file(releaseStoreFilePath)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+                enableV1Signing true
+                enableV2Signing true
+                enableV3Signing true
+                enableV4Signing true
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (releaseSigningConfigured) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
@@ -32,6 +61,37 @@ android {
     kotlinOptions {
         jvmTarget = '17'
     }
+}
+
+tasks.register('validateReleasePrerequisites') {
+    group = 'verification'
+    description = 'Fails closed when a production APK would be unsigned or unable to receive FCM push.'
+
+    doLast {
+        def missing = []
+        if (!file('google-services.json').isFile()) {
+            missing.add('android/app/google-services.json')
+        }
+        if (!releaseSigningConfigured) {
+            missing.add(
+                'TRESHKA_RELEASE_STORE_FILE, TRESHKA_RELEASE_STORE_PASSWORD, ' +
+                'TRESHKA_RELEASE_KEY_ALIAS and TRESHKA_RELEASE_KEY_PASSWORD'
+            )
+        } else if (!file(releaseStoreFilePath).isFile()) {
+            missing.add("release keystore file: ${releaseStoreFilePath}")
+        }
+
+        if (!missing.isEmpty()) {
+            throw new GradleException(
+                'Release prerequisites are missing: ' + missing.join('; ') +
+                '. Debug builds remain available, but a production APK is blocked.'
+            )
+        }
+    }
+}
+
+tasks.matching { task -> task.name == 'preReleaseBuild' }.configureEach {
+    dependsOn tasks.named('validateReleasePrerequisites')
 }
 
 def isolatedBuildDir = System.getenv('TRESHKA_BUILD_DIR')

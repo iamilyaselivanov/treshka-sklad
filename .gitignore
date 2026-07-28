@@ -41,3 +41,6 @@ next-env.d.ts
 /.wrangler/
 /outputs/
 /work/
+
+# Firebase service-account credentials are runtime secrets, never source.
+firebase-service-account*.json

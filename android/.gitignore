@@ -3,3 +3,10 @@
 local.properties
 **/build/
 *.iml
+
+# Android release/Firebase secrets. Supply these locally or through CI secrets.
+app/google-services.json
+app/*.jks
+app/*.keystore
+keystore.properties
+key.properties
