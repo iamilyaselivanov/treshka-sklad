@@ -3093,7 +3093,7 @@ const STORAGE_FALLBACK_KEY = 'treshka_sklad_state_v1';
    дублируется на экране "Ещё"). Держим синхронно с android/app/build.gradle →
    defaultConfig.versionName; отдельно от APP_SCHEMA_VERSION, который
    версионирует структуру данных, а не саму сборку приложения. */
-const APP_VERSION = '1.6';
+const APP_VERSION = '1.7';
 
 function nativeStorageBridge(){
   return (typeof window!=='undefined' && window.AndroidStorage && typeof window.AndroidStorage.saveState==='function')
@@ -7054,6 +7054,6 @@ if(_startupLoadResult === 'corrupted'){
   flushSave();
 }
 </script>
-<script src="/prototype-server.js?build=1.6-sync2"></script>
+<script src="/prototype-server.js?build=1.7-firebase"></script>
 </body>
 </html>

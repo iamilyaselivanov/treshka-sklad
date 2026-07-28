@@ -11,16 +11,16 @@ import {
 
 const text = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
-test("release version is 1.6 in web and Android", async () => {
+test("release version is 1.7 in web and Android", async () => {
   const [pkg, page, gradle] = await Promise.all([
     text("package.json"),
     text("app/page.tsx"),
     text("android/app/build.gradle"),
   ]);
-  assert.equal(JSON.parse(pkg).version, "1.6.0");
-  assert.match(page, /Версия 1\.6/);
-  assert.match(gradle, /versionCode 8/);
-  assert.match(gradle, /versionName "1\.6"/);
+  assert.equal(JSON.parse(pkg).version, "1.7.0");
+  assert.match(page, /Версия 1\.7/);
+  assert.match(gradle, /versionCode 9/);
+  assert.match(gradle, /versionName "1\.7"/);
 });
 
 test("Android production release fails closed without Firebase and permanent signing", async () => {
