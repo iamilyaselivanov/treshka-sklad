@@ -3523,7 +3523,7 @@ function canReplayPendingInventoryAct(fullAct){
   });
 }
 function replayPendingInventoryAct(fullAct){
-  if(!fullAct)return false;
+  if(!fullAct?.id)return false;
   const summary=compactInventoryAct(fullAct);
   if(inventoryActs.some(value=>value?.id===summary.id))return true;
   if(!canReplayPendingInventoryAct(fullAct))return false;

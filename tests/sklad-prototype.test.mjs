@@ -83,6 +83,7 @@ async function newHttpServerPage({
   corruptedState = false,
   recoverStateAfterGets = null,
   recoveryPollMs = null,
+  regularSyncMs = null,
   pendingInventoryAct = null,
 } = {}) {
   const ctx = await browser.newContext();
@@ -107,12 +108,19 @@ async function newHttpServerPage({
       return;
     }
     if (url.pathname === '/prototype-server.js') {
-      const source = recoveryPollMs == null
-        ? SERVER_SYNC_SOURCE
-        : SERVER_SYNC_SOURCE.replace(
+      let source = SERVER_SYNC_SOURCE;
+      if (recoveryPollMs != null) {
+        source = source.replace(
           'window.setInterval(recoveryPoll, 15_000)',
           `window.setInterval(recoveryPoll, ${Number(recoveryPollMs)})`,
         );
+      }
+      if (regularSyncMs != null) {
+        source = source.replace(
+          'window.setInterval(synchronize, 2500)',
+          `window.setInterval(synchronize, ${Number(regularSyncMs)})`,
+        );
+      }
       await route.fulfill({ status: 200, contentType: 'application/javascript; charset=utf-8', body: source });
       return;
     }
@@ -2476,6 +2484,30 @@ test('a non-owner automatically resumes synchronization after the owner repairs 
   await storekeeper.ctx.close();
 });
 
+test('automatic recovery restarts ordinary synchronization even when snapshot post-processing fails', async () => {
+  const storekeeper = await newHttpServerPage({
+    role: 'storekeeper',
+    corruptedState: true,
+    recoverStateAfterGets: 1,
+    recoveryPollMs: 1_000,
+    regularSyncMs: 50,
+  });
+  await storekeeper.page.evaluate(() => {
+    window.recoverPendingInventoryActs = async () => {
+      throw new Error('test post-processing failure');
+    };
+  });
+  await storekeeper.page.waitForFunction(() =>
+    window.treshkaServerSync.status().recoveryRequired === false);
+  const getsAfterRecovery = storekeeper.counts().stateGets;
+  await storekeeper.page.waitForTimeout(250);
+  assert.ok(
+    storekeeper.counts().stateGets > getsAfterRecovery,
+    'the regular synchronization timer must start from finally despite post-processing failure',
+  );
+  await storekeeper.ctx.close();
+});
+
 test('automatic snapshot recovery replays and uploads a pending inventory act without restart', async () => {
   const pendingAct = {
     id: 'inventory-pending-after-recovery',
@@ -2533,6 +2565,16 @@ test('automatic snapshot recovery replays and uploads a pending inventory act wi
     }), pendingAct.id),
     { actCount: 1, stock: 4, pendingRecovery: null },
     'a repeated pass must neither apply stock twice nor raise a false recovery warning',
+  );
+  assert.equal(
+    await storekeeper.page.evaluate((act) => {
+      inventoryActs.push({ no: 'legacy-act-without-id' });
+      const accepted = replayPendingInventoryAct({ ...act, id: undefined });
+      inventoryActs.pop();
+      return accepted;
+    }, pendingAct),
+    false,
+    'an act without an immutable id must never match a malformed legacy summary',
   );
   await storekeeper.ctx.close();
 });
