@@ -734,15 +734,15 @@ test('regression — app version is shown to the user on the "Ещё" screen', a
     render({ fn: views.more });
     return { version: APP_VERSION, html: document.getElementById('content').innerHTML };
   });
-  assert.equal(r.version, '1.7');
-  assert.ok(r.html.includes('версия 1.7'), 'more() screen must render the current app version');
+  assert.equal(r.version, '1.7.1');
+  assert.ok(r.html.includes('версия 1.7.1'), 'more() screen must render the current app version');
   await ctx.close();
 });
 
 test('regression — app version is also shown in the persistent top masthead on every screen', async () => {
   const { ctx, page } = await newPage();
   const text = await page.evaluate(() => document.getElementById('mastVersion').textContent);
-  assert.equal(text, 'v1.7');
+  assert.equal(text, 'v1.7.1');
   await ctx.close();
 });
 
@@ -924,7 +924,7 @@ test('regression — schema migration v1→v3 preserves old data and backfills w
     };
   });
   assert.equal(r.migratedOk, true, 'v1 data must migrate cleanly to the current schema');
-  assert.equal(r.schemaVersion, 4);
+  assert.equal(r.schemaVersion, 5);
   assert.equal(r.hasActionTypes, true, 'migration must backfill actionTypes:[] where missing');
   assert.equal(r.resultTextIsString, true, 'migration must backfill resultText:\'\' where missing');
   assert.equal(r.otkPassedIsBool, true, 'migration must backfill otkPassed:false where missing');
@@ -1233,8 +1233,8 @@ test('regression — remote state drops scalar warehouse items before applying t
   await ctx.close();
 });
 
-test('review 800c0c9 — a 304 response reuses an immutable cached snapshot without parsing an empty body', async () => {
-  const { ctx, page, counts } = await newHttpServerPage({ role: 'worker' });
+test('worker forbidden state drift is rejected and replaced from the immutable cached server snapshot', async () => {
+  const { ctx, page, counts } = await newHttpServerPage({ role: 'worker', putStatus: 403 });
   const result = await page.evaluate(async () => {
     items[0].stock = 99;
     await window.treshkaServerSync.flush();
@@ -1243,9 +1243,48 @@ test('review 800c0c9 — a 304 response reuses an immutable cached snapshot with
       status: window.treshkaServerSync.status(),
     };
   });
+  assert.equal(counts().statePuts, 1, 'worker change must be checked by the server');
   assert.ok(counts().stateGets >= 2, 'the explicit flush must exercise the 304 branch');
-  assert.equal(result.stock, 5, 'worker-local drift must be replaced from the cached server graph');
-  assert.equal(result.status.lastError, null);
+  assert.equal(result.stock, 5, 'forbidden worker drift must be replaced from the cached server graph');
+  assert.match(result.status.lastError, /Сервер отклонил изменение/);
+  await ctx.close();
+});
+
+test('worker document changes are uploaded as an explicitly partial assigned-post snapshot', async () => {
+  const { ctx, page, counts, putBodies } = await newHttpServerPage({ role: 'worker' });
+  await page.evaluate(async () => {
+    docs.unshift({
+      id: 'work-worker-browser',
+      no: 'АВР-000777',
+      kind: 'work',
+      status: 'Черновик',
+      post: 'ТЭЧ',
+      item: 'Изделие',
+      defektDoc: 'ДФ-000777',
+      works: [],
+      materials: [],
+      participants: [],
+      actionTypes: [],
+    });
+    docs.push({
+      id: 'defect-worker-browser',
+      no: 'ДФ-000777',
+      kind: 'defekt',
+      status: 'Закрыт',
+      post: 'ТЭЧ',
+      item: 'Изделие',
+      orderNo: 'З-777',
+      callsign: 'Линза',
+      fault: 'Не включается',
+      verdict: 'Ремонтопригодно',
+      defects: ['Обрыв'],
+      workDoc: 'АВР-000777',
+    });
+    await window.treshkaServerSync.flush();
+  });
+  assert.equal(counts().statePuts, 1);
+  assert.equal(putBodies[0].partial, true);
+  assert.ok(putBodies[0].state.docs.some((document) => document.no === 'АВР-000777'));
   await ctx.close();
 });
 
@@ -1292,7 +1331,6 @@ test('review 1c9e809 — worker projection is replaced before a promoted adminis
     promoteToRole: 'admin',
   });
   const result = await page.evaluate(async () => {
-    items[0].stock = 0;
     await window.treshkaServerSync.flush();
     const afterPromotion = {
       stock: items[0].stock,
@@ -1306,7 +1344,7 @@ test('review 1c9e809 — worker projection is replaced before a promoted adminis
   assert.equal(result.role, 'admin');
   assert.equal(result.partial, false);
   assert.equal(result.stock, 5, 'full server truth must replace the old worker projection');
-  assert.equal(counts().statePuts, 1, 'the partial graph itself must never be uploaded');
+  assert.equal(counts().statePuts, 1, 'only the full graph edited after promotion may be uploaded');
   assert.equal(putBodies[0].partial, false);
   assert.equal(putBodies[0].state.items[0].stock, 6);
   await ctx.close();
@@ -1997,7 +2035,7 @@ test('review round — external issue validates date/stock and work-act rework b
     const materialOptionsOnlyFromPost = [...document.querySelectorAll('#addSel option')].every((o) => (item(o.value)?.posts[d.post] || 0) > 0);
     document.getElementById('mm_reason').value = 'Нужна повторная проверка'; document.getElementById('mm_decision').value = 'rework'; resolveMismatch(d.no);
     const reopened = d.status === 'На доработке' && !hasUnresolvedMismatch(d);
-    currentRole = 'rabotnik'; closeWork(d.no);
+    currentRole = 'rabotnik'; currentUserPost = d.post; closeWork(d.no);
     return { invalidRejected, participantEditorPresent, materialOptionsOnlyFromPost, reopened, resubmitted: d.status === 'Расхождение' && d.status !== 'Закрыт' };
   });
   assert.equal(r.invalidRejected, true);
@@ -2173,6 +2211,7 @@ test('v1.3 — admin creates a hashed worker account bound to a post and post no
 test('v1.6 — every work act waits for admin approval and then storekeeper warehouse acceptance', async () => {
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => {
+    currentRole = 'admin';
     const base = docs.find((d) => d.kind === 'defekt' && d.status === 'Закрыт' && !String(d.verdict || '').includes('Не подлежит'));
     const source = { ...JSON.parse(JSON.stringify(base)), no: 'ДФ-APPROVAL-TEST', workDoc: null };
     docs.push(source);
@@ -2199,6 +2238,84 @@ test('v1.6 — every work act waits for admin approval and then storekeeper ware
   assert.equal(r.closed, true);
   assert.equal(r.appHasAnalytics, true);
   assert.equal(r.printHasAnalytics, false);
+  await ctx.close();
+});
+
+test('v1.7.1 — worker creates and submits acts only for the assigned post, admin approves, storekeeper accepts', async () => {
+  const { ctx, page } = await newPage();
+  const result = await page.evaluate(() => {
+    const base = docs.find((entry) =>
+      entry.kind === 'defekt'
+      && entry.status === 'Закрыт'
+      && !String(entry.verdict || '').includes('Не подлежит'));
+    const assignedPost = base.post;
+    const ownDefect = {
+      ...JSON.parse(JSON.stringify(base)),
+      id: 'defect-worker-route',
+      no: 'ДФ-WORKER-ROUTE',
+      post: assignedPost,
+      workDoc: null,
+    };
+    const foreignDefect = {
+      ...JSON.parse(JSON.stringify(base)),
+      id: 'defect-foreign-route',
+      no: 'ДФ-FOREIGN-ROUTE',
+      post: posts.find((post) => post.name !== assignedPost)?.name || 'Чужой пост',
+      workDoc: null,
+    };
+    docs.unshift(foreignDefect, ownDefect);
+    currentRole = 'rabotnik';
+    currentUserPost = assignedPost;
+
+    views.docs();
+    const createButtonsVisible = document.getElementById('content').textContent.includes('Новый акт дефектовки')
+      && document.getElementById('content').textContent.includes('Новый акт выполненных работ');
+    renderWorkActPicker();
+    const pickerText = document.getElementById('content').textContent;
+    const pickerScoped = pickerText.includes(ownDefect.no) && !pickerText.includes(foreignDefect.no);
+    const foreignRejected = createWorkFromDefekt(foreignDefect.no) === false;
+    const ownCreated = createWorkFromDefekt(ownDefect.no) === true;
+    const work = docs.find((entry) => entry.defektDoc === ownDefect.no);
+    work.actionTypes = ['Ремонт'];
+    work.works = [{ type: 'Ремонт', qty: 1 }];
+    work.participants = [{ worker: 'Линза', work: 'Ремонт' }];
+    work.otkPassed = true;
+    const submitted = closeWork(work.no) === true && work.status === 'Ожидает согласования';
+    const selfApprovalRejected = approveWork(work.no) === false
+      && work.status === 'Ожидает согласования';
+
+    currentRole = 'admin';
+    window.treshkaServerUser = () => ({ id: 'admin-2', login: 'admin.second', role: 'admin' });
+    const approved = approveWork(work.no) === true
+      && work.status === 'Ожидает приёмки на склад'
+      && work.approvedBy === 'admin.second';
+
+    currentRole = 'kladovshik';
+    window.treshkaServerUser = () => ({ id: 'storekeeper-1', login: 'warehouse.one', role: 'storekeeper' });
+    const accepted = acceptWorkToWarehouse(work.no) === true
+      && work.status === 'Закрыт'
+      && work.warehouseAcceptedBy === 'warehouse.one';
+    return {
+      createButtonsVisible,
+      pickerScoped,
+      foreignRejected,
+      ownCreated,
+      submitted,
+      selfApprovalRejected,
+      approved,
+      accepted,
+    };
+  });
+  assert.deepEqual(result, {
+    createButtonsVisible: true,
+    pickerScoped: true,
+    foreignRejected: true,
+    ownCreated: true,
+    submitted: true,
+    selfApprovalRejected: true,
+    approved: true,
+    accepted: true,
+  });
   await ctx.close();
 });
 
@@ -2230,7 +2347,7 @@ test('v1.4 — a compatible remote snapshot is migrated and atomically persisted
   });
   assert.equal(result.ok, true);
   assert.equal(result.stock, result.expected);
-  assert.deepEqual(result.saves, [{ schema: 4, revision: 77 }]);
+  assert.deepEqual(result.saves, [{ schema: 5, revision: 77 }]);
   assert.equal(result.lastPayloadMatches, true);
   await ctx.close();
 });

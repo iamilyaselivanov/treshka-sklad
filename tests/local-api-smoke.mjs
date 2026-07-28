@@ -724,18 +724,154 @@ try {
   assert.ok(workerSnapshot.data.state.items.every((item) =>
     Number(item.stock) === 0
     && Object.keys(item.posts ?? {}).every((post) => post === "ТЭЧ")));
+  const workerDefectNo = `ДФ-WORKER-${suffix}`;
+  const workerPartialState = structuredClone(workerSnapshot.data.state);
+  workerPartialState.docs.unshift({
+    id: `worker-defect-${suffix}`,
+    no: workerDefectNo,
+    kind: "defekt",
+    status: "Закрыт",
+    post: "ТЭЧ",
+    item: "Тестовое изделие работника",
+    orderNo: `WORKER-${suffix}`,
+    callsign: "Старший поста",
+    fault: "Не включается",
+    verdict: "Ремонтопригодно",
+    defects: ["Обрыв цепи"],
+    workDoc: null,
+  });
+  workerPartialState.posts[0].repairs.push({
+    serial: "—",
+    item: "Тестовое изделие работника",
+    status: "В ремонте",
+    doc: workerDefectNo,
+  });
+  const workerStateSaved = await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.worker, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: workerPartialState,
+      expectedRevision: workerSnapshot.data.revision,
+      partial: true,
+    }),
+  });
+  let stateAfterWorkerWrite = await request("/api/state", { headers: ownerHeaders });
+  assert.equal(stateAfterWorkerWrite.data.revision, workerStateSaved.data.revision);
+  assert.ok(stateAfterWorkerWrite.data.state.docs.some((document) =>
+    document.no === workerDefectNo && document.post === "ТЭЧ"));
+
+  const workerWorkNo = `АВР-WORKER-${suffix}`;
+  const workerAfterDefect = await request("/api/state", { headers: { cookie: roleCookies.worker } });
+  const workerWorkDraft = structuredClone(workerAfterDefect.data.state);
+  const linkedWorkerDefect = workerWorkDraft.docs.find((document) => document.no === workerDefectNo);
+  linkedWorkerDefect.workDoc = workerWorkNo;
+  workerWorkDraft.docs.unshift({
+    id: `worker-work-${suffix}`,
+    no: workerWorkNo,
+    kind: "work",
+    status: "Черновик",
+    post: "ТЭЧ",
+    item: "Тестовое изделие работника",
+    defektDoc: workerDefectNo,
+    materials: [],
+    participants: [],
+    works: [],
+    actionTypes: [],
+    otkPassed: false,
+  });
+  const workerWorkCreated = await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.worker, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: workerWorkDraft,
+      expectedRevision: workerAfterDefect.data.revision,
+      partial: true,
+    }),
+  });
+
+  const workerBeforeSubmission = await request("/api/state", { headers: { cookie: roleCookies.worker } });
+  const submittedWorkerState = structuredClone(workerBeforeSubmission.data.state);
+  const submittedWorkerWork = submittedWorkerState.docs.find((document) => document.no === workerWorkNo);
+  submittedWorkerWork.status = "Ожидает согласования";
+  submittedWorkerWork.actionTypes = ["Ремонт"];
+  submittedWorkerWork.works = [{ type: "Ремонт", qty: 1 }];
+  submittedWorkerWork.participants = [{ worker: "Старший поста", work: "Ремонт" }];
+  submittedWorkerWork.otkPassed = true;
+  submittedWorkerWork.submittedAt = Date.now();
+  const workerWorkSubmitted = await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.worker, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: submittedWorkerState,
+      expectedRevision: workerBeforeSubmission.data.revision,
+      partial: true,
+    }),
+  });
+  assert.ok(workerWorkSubmitted.data.revision > workerWorkCreated.data.revision);
+
+  const forgedWorkerApproval = structuredClone(submittedWorkerState);
+  const forgedWorkerAct = forgedWorkerApproval.docs.find((document) => document.no === workerWorkNo);
+  forgedWorkerAct.status = "Ожидает приёмки на склад";
+  forgedWorkerAct.approvedBy = "Самозванец";
+  await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.worker, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: forgedWorkerApproval,
+      expectedRevision: workerWorkSubmitted.data.revision,
+      partial: true,
+    }),
+  }, 403);
+
+  const stateForAdminApproval = await request("/api/state", { headers: { cookie: roleCookies.admin } });
+  const adminApprovedState = structuredClone(stateForAdminApproval.data.state);
+  const adminApprovedWork = adminApprovedState.docs.find((document) => document.no === workerWorkNo);
+  adminApprovedWork.status = "Ожидает приёмки на склад";
+  adminApprovedWork.approvedBy = "admin";
+  adminApprovedWork.approvedAt = Date.now();
+  const adminApprovalSaved = await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.admin, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: adminApprovedState,
+      expectedRevision: stateForAdminApproval.data.revision,
+    }),
+  });
+  assert.ok(adminApprovalSaved.data.revision > workerWorkSubmitted.data.revision);
+
+  const stateForWarehouseAcceptance = await request("/api/state", { headers: { cookie: roleCookies.storekeeper } });
+  const warehouseAcceptedState = structuredClone(stateForWarehouseAcceptance.data.state);
+  const warehouseAcceptedWork = warehouseAcceptedState.docs.find((document) => document.no === workerWorkNo);
+  warehouseAcceptedWork.status = "Закрыт";
+  warehouseAcceptedWork.warehouseAcceptedBy = "storekeeper";
+  warehouseAcceptedWork.warehouseAcceptedAt = Date.now();
+  const warehouseAcceptanceSaved = await request("/api/state", {
+    method: "PUT",
+    headers: { cookie: roleCookies.storekeeper, "content-type": "application/json" },
+    body: JSON.stringify({
+      state: warehouseAcceptedState,
+      expectedRevision: stateForWarehouseAcceptance.data.revision,
+    }),
+  });
+  stateAfterWorkerWrite = await request("/api/state", { headers: ownerHeaders });
+  const completedWorkerWork = stateAfterWorkerWrite.data.state.docs.find((document) => document.no === workerWorkNo);
+  assert.equal(stateAfterWorkerWrite.data.revision, warehouseAcceptanceSaved.data.revision);
+  assert.equal(completedWorkerWork.status, "Закрыт");
+  assert.equal(completedWorkerWork.approvedBy, "admin");
+  assert.equal(completedWorkerWork.warehouseAcceptedBy, "storekeeper");
+
   const deletionProbeId = `delete-state-${suffix}`;
   const stateWithDeletionProbe = {
-    ...sanitized.data.state,
+    ...stateAfterWorkerWrite.data.state,
     items: [
-      ...(sanitized.data.state.items ?? []),
+      ...(stateAfterWorkerWrite.data.state.items ?? []),
       { id: deletionProbeId, name: "Проверка роли удаления", sku: `STATE-${suffix}`, stock: 1, ext: 0, posts: {}, lots: [] },
     ],
   };
   const deletionProbeSaved = await request("/api/state", {
     method: "PUT",
     headers: { ...ownerHeaders, "content-type": "application/json" },
-    body: JSON.stringify({ state: stateWithDeletionProbe, expectedRevision: sanitized.data.revision }),
+    body: JSON.stringify({ state: stateWithDeletionProbe, expectedRevision: stateAfterWorkerWrite.data.revision }),
   });
   const stateWithoutDeletionProbe = {
     ...stateWithDeletionProbe,
@@ -1100,7 +1236,7 @@ try {
   );
   assert.match(recoveredDamagedState.data.warning, /текущей поддерживаемой версии схемы/);
   const healthyAfterRecovery = await request("/api/state", { headers: ownerHeaders });
-  assert.equal(healthyAfterRecovery.data.state.schemaVersion, 4);
+  assert.equal(healthyAfterRecovery.data.state.schemaVersion, 5);
 
   const onePixelPng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
   await request("/api/media/images", {
@@ -1153,7 +1289,7 @@ console.log(JSON.stringify({
   parallelStateRaceResolved: true,
   authFieldsStrippedFromState: true,
   mediaUploadReadDelete: true,
-  workerStateWriteRejected: true,
+  workerAssignedPostWriteVerified: true,
   usedProductDeletionProtected: true,
   everyStateWriteAudited: true,
   parallelLoginThrottleEnforced: true,

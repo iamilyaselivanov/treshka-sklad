@@ -321,8 +321,10 @@
 
   function canUploadState() {
     return !!sync.user
-      && !sync.partial
-      && ["owner", "admin", "storekeeper"].includes(sync.user.role);
+      && (
+        (sync.user.role === "worker" && sync.partial)
+        || (!sync.partial && ["owner", "admin", "storekeeper"].includes(sync.user.role))
+      );
   }
 
   function adoptServerUser(user) {
@@ -655,14 +657,7 @@
         rerenderCurrentView();
         return;
       }
-      if (remoteRevision <= sync.revision) {
-        // Worker is a server-authoritative read-only role. Reapply the current
-        // snapshot if local UI code changed state that it is not allowed to PUT.
-        if (!canUploadState() && localPayload !== sync.lastUploaded && snapshot.state) {
-          applyRemoteSnapshot(snapshot, false);
-        }
-        return;
-      }
+      if (remoteRevision <= sync.revision) return;
       if (canUploadState() && localPayload !== sync.lastUploaded) {
         announceConflict(snapshot);
         return;
@@ -704,7 +699,7 @@
       && typeof window.recoverPendingInventoryActs === "function"
       ? await window.recoverPendingInventoryActs()
       : false;
-    if ((!hadServerState || recoveredInventory) && canUploadState()) {
+    if ((!hadServerState && !sync.partial || recoveredInventory) && canUploadState()) {
       await uploadIfChanged();
     } else if (canUploadState()) {
       void migrateEmbeddedPhotos();
@@ -816,7 +811,9 @@
         stockTransfers.length = 0;
         inventoryActs.length = 0;
       }
-      sync.lastUploaded = data.state || !canUploadState() ? JSON.stringify(normalizedState()) : "";
+      sync.lastUploaded = data.state || !canUploadState() || sync.partial
+        ? JSON.stringify(normalizedState())
+        : "";
       sync.ready = true;
       go("sklad");
       await afterSnapshotAdopted(Boolean(data.state));
@@ -952,6 +949,7 @@
       return data.act;
     },
     pending: async () => {
+      if (sync.user?.role === "worker") return [];
       const data = await inventoryActRequest();
       return Array.isArray(data.pending) ? data.pending : [];
     },

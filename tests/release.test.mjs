@@ -11,16 +11,16 @@ import {
 
 const text = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
 
-test("release version is 1.7 in web and Android", async () => {
+test("release version is 1.7.1 in web and Android", async () => {
   const [pkg, page, gradle] = await Promise.all([
     text("package.json"),
     text("app/page.tsx"),
     text("android/app/build.gradle"),
   ]);
-  assert.equal(JSON.parse(pkg).version, "1.7.0");
+  assert.equal(JSON.parse(pkg).version, "1.7.1");
   assert.match(page, /Версия 1\.7/);
-  assert.match(gradle, /versionCode 9/);
-  assert.match(gradle, /versionName "1\.7"/);
+  assert.match(gradle, /versionCode 10/);
+  assert.match(gradle, /versionName "1\.7\.1"/);
 });
 
 test("Android production release fails closed without Firebase and permanent signing", async () => {
@@ -133,12 +133,13 @@ test("security hardening keeps state writes privileged and recovery throttling g
     text("drizzle/0003_warehouse_full_state.sql"),
     text("lib/http.ts"),
   ]);
-  assert.match(stateRoute, /requireUser\(request, \["owner", "admin", "storekeeper"\]\)/);
+  assert.match(stateRoute, /requireUser\(request, \["owner", "admin", "storekeeper", "worker"\]\)/);
   assert.match(stateRoute, /warehouseDeletionPolicy\(previous, state, auth\.user\.role\)/);
   assert.match(stateRoute, /warehouseHistoryMutationIssue\(previous, state, auth\.user\.role\)/);
   assert.match(stateRoute, /projectWarehouseStateForUser\(parsedState, auth\.user\)/);
   assert.match(stateRoute, /partial: auth\.user\.role === "worker"/);
-  assert.match(stateRoute, /if \(body\.partial === true\)/);
+  assert.match(stateRoute, /workerPartialWrite && body\.partial !== true/);
+  assert.match(stateRoute, /mergeWorkerPostState\(previous, state, auth\.user\)/);
   assert.match(stateRoute, /readJsonObject\(request, MAX_STATE_REQUEST_BYTES\)/);
   assert.match(stateRoute, /terminal: true, recover: "server"/);
   assert.match(stateRoute, /SELECT item_id AS itemId FROM warehouse_state_items/);
@@ -258,7 +259,7 @@ test("sync hardening keeps conflicts recoverable and Android secrets protected",
   assert.match(prototype, /treshka_sklad_document_node_v1/);
   assert.match(prototype, /(?:ДФ\|АВР\|ВН)/);
   assert.match(browserSync, /state\.auditLog = Array\.isArray\(state\.auditLog\).*slice\(0, 2_000\)/);
-  assert.match(browserSync, /!sync\.partial/);
+  assert.match(browserSync, /sync\.user\.role === "worker" && sync\.partial/);
   assert.match(browserSync, /authorizationChanged/);
   assert.match(browserSync, /mediaMigrationPromise/);
   assert.match(prototype, /window\.onTreshkaServerRoleChanged/);

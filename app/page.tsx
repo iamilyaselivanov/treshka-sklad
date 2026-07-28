@@ -74,7 +74,7 @@ export default function Home() {
       </AuthShell>
     );
   }
-  if (!status) return <AuthShell title="Проверяем доступ…" text="Подключаемся к серверу версии 1.7." />;
+  if (!status) return <AuthShell title="Проверяем доступ…" text="Подключаемся к серверу версии 1.7.1." />;
   if (status.setupRequired) {
     return (
       <CredentialsForm
@@ -200,7 +200,7 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
             <button className="local" onClick={() => resolveSyncConflict("local")}>Мою</button>
           </div>
         )}
-        <iframe ref={prototypeFrame} title="ТРЁШКА СКЛАД" src="/prototype.html?server=1&build=1.7-firebase" />
+        <iframe ref={prototypeFrame} title="ТРЁШКА СКЛАД" src="/prototype.html?server=1&build=1.7.1-firebase" />
       </main>
     );
   }
@@ -212,7 +212,7 @@ function WarehouseApp({ currentUser, loggedOut }: { currentUser: AuthUser; logge
           <div className="brandmark">Т</div>
           <div>
             <b>ТРЁШКА <i>СКЛАД</i></b>
-            <span>Версия 1.7 · сервер подключён</span>
+            <span>Версия 1.7.1 · сервер подключён</span>
           </div>
         </div>
         <div className="account-box">
@@ -448,7 +448,7 @@ function AuthShell({ title, text, children }: { title: string; text: string; chi
   return (
     <main className="auth-shell">
       <section className="auth-card">
-        <div className="auth-brand"><span>Т</span><div><b>ТРЁШКА СКЛАД</b><small>Версия 1.7</small></div></div>
+        <div className="auth-brand"><span>Т</span><div><b>ТРЁШКА СКЛАД</b><small>Версия 1.7.1</small></div></div>
         <h1>{title}</h1>
         <p>{text}</p>
         {children}

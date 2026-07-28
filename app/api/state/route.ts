@@ -12,6 +12,7 @@ import {
 } from "@/lib/state-history";
 import {
   projectWarehouseStateForUser,
+  mergeWorkerPostState,
   warehouseDeletionPolicy,
   warehouseHistoryMutationIssue,
   warehouseItemIds,
@@ -34,7 +35,11 @@ type StateRow = {
   updated_by: string;
 };
 
-type StateMetaRow = Omit<StateRow, "payload"> & {
+type StateMetaRow = {
+  revision: number;
+  payload?: string;
+  updated_at: string;
+  updated_by: string;
   cycleCountDrafts: string | null;
 };
 
@@ -292,7 +297,7 @@ export async function GET(request: Request) {
 }
 
 export async function PUT(request: Request) {
-  const auth = await requireUser(request, ["owner", "admin", "storekeeper"]);
+  const auth = await requireUser(request, ["owner", "admin", "storekeeper", "worker"]);
   if (auth.response || !auth.user) return auth.response;
   let body: { state?: unknown; expectedRevision?: unknown; partial?: unknown };
   try {
@@ -307,21 +312,24 @@ export async function PUT(request: Request) {
     }
     return Response.json({ error: "Некорректный JSON" }, { status: 400 });
   }
-  if (body.partial === true) {
+  const workerPartialWrite = auth.user.role === "worker";
+  if ((workerPartialWrite && body.partial !== true) || (!workerPartialWrite && body.partial === true)) {
     return Response.json(
       {
-        error: "Частичный снимок нельзя отправить как полный склад. Сначала загрузите данные для текущей роли",
+        error: workerPartialWrite
+          ? "Работник может сохранять только частичное состояние назначенного поста"
+          : "Частичный снимок нельзя отправить как полный склад. Сначала загрузите данные для текущей роли",
         terminal: true,
         recover: "server",
       },
-      { status: 409 },
+      { status: workerPartialWrite ? 403 : 409 },
     );
   }
   const limitError = collectionLimitError(body.state);
   if (limitError) {
     return Response.json({ error: limitError }, { status: 413 });
   }
-  const state = normalizedWarehouseState(body.state);
+  let state = normalizedWarehouseState(body.state);
   if (!state) {
     return Response.json({ error: "Некорректное состояние склада" }, { status: 400 });
   }
@@ -333,9 +341,13 @@ export async function PUT(request: Request) {
     );
   }
   const current = await env.DB.prepare(
-    `SELECT revision, updated_at, updated_by,
-            json_extract(payload, '$.cycleCountDrafts') AS cycleCountDrafts
-     FROM warehouse_full_state WHERE state_key = 'main'`,
+    workerPartialWrite
+      ? `SELECT revision, payload, updated_at, updated_by,
+                json_extract(payload, '$.cycleCountDrafts') AS cycleCountDrafts
+         FROM warehouse_full_state WHERE state_key = 'main'`
+      : `SELECT revision, updated_at, updated_by,
+                json_extract(payload, '$.cycleCountDrafts') AS cycleCountDrafts
+         FROM warehouse_full_state WHERE state_key = 'main'`,
   ).first<StateMetaRow>();
   if (
     (expectedRevision === 0 && current)
@@ -351,6 +363,45 @@ export async function PUT(request: Request) {
       },
       { status: 409, headers: { "cache-control": "no-store" } },
     );
+  }
+  if (workerPartialWrite) {
+    if (!current) {
+      return Response.json(
+        { error: "Склад ещё не создан. Сначала его должен настроить владелец", terminal: true },
+        { status: 409 },
+      );
+    }
+    let previous: WarehouseState | null = null;
+    try {
+      const rawPrevious = JSON.parse(current.payload ?? "");
+      previous = normalizedWarehouseState(rawPrevious)
+        ?? sanitizedLegacyWarehouseState(rawPrevious);
+    } catch {
+      // handled below
+    }
+    if (!previous) {
+      return Response.json(
+        { error: "Серверный снимок повреждён. Обратитесь к владельцу", terminal: true },
+        { status: 500 },
+      );
+    }
+    const merged = mergeWorkerPostState(previous, state, auth.user);
+    if (merged.issue || !merged.state) {
+      await audit(
+        auth.user,
+        "worker_post_state_rejected",
+        merged.issue?.error ?? "Некорректное состояние поста",
+      ).catch((error) => console.error("worker post state rejection audit failed", error));
+      return Response.json(
+        {
+          error: merged.issue?.error ?? "Изменение поста отклонено",
+          terminal: true,
+          recover: "server",
+        },
+        { status: merged.issue?.status ?? 403 },
+      );
+    }
+    state = merged.state;
   }
   // Every device receives only its account's draft. Merge that one slot into
   // the server map so a stale or deliberately handcrafted snapshot cannot

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   findWarehouseItemId,
+  mergeWorkerPostState,
   projectWarehouseStateForUser,
   removeWarehouseItemFromState,
   warehouseDeletionPolicy,
@@ -58,6 +59,133 @@ test("shared state normalization removes legacy scalar rows without mutating the
   assert.equal("accounts" in normalized, false);
   assert.equal("currentRole" in normalized, false);
   assert.equal(source.items.length, 5, "normalization must not mutate the caller's arrays");
+});
+
+test("schema v4 migrates the built-in Расход category and its existing cards to Расходники", () => {
+  const normalized = normalizedWarehouseState(state({
+    categoriesList: ["ФПВ", "Расход", "Расходники"],
+    items: [
+      { id: "old-consumable", topCat: "Расход" },
+      { id: "component", topCat: "Комплектующие", subCat: "Расходники" },
+    ],
+  }));
+  assert.ok(normalized);
+  assert.equal(normalized.schemaVersion, CURRENT_WAREHOUSE_SCHEMA_VERSION);
+  assert.deepEqual(normalized.categoriesList, ["ФПВ", "Расходники"]);
+  assert.equal(normalized.items[0].topCat, "Расходники");
+  assert.equal(normalized.items[1].topCat, "Комплектующие");
+});
+
+test("worker merge accepts a new assigned-post defect without exposing or changing warehouse stock", () => {
+  const previous = state({
+    items: [{
+      id: "repair-item",
+      name: "Изделие",
+      sku: "R-1",
+      unit: "шт",
+      stock: 10,
+      ext: 0,
+      lots: [{ lot: "warehouse", qty: 10 }],
+      posts: { "ТЭЧ": 2, "НРТК": 4 },
+      history: [{ id: "old-tech", post: "ТЭЧ", text: "Старое движение" }],
+    }],
+    posts: [
+      { name: "ТЭЧ", stock: [{ id: "repair-item", q: 2 }], repairs: [] },
+      { name: "НРТК", stock: [{ id: "repair-item", q: 4 }], repairs: [] },
+    ],
+  });
+  const viewer = { id: "worker-1", role: "worker", assignment: "ТЭЧ" };
+  const incoming = structuredClone(projectWarehouseStateForUser(previous, viewer));
+  const defect = {
+    id: "defect-worker-1",
+    no: "ДФ-000001",
+    kind: "defekt",
+    status: "Закрыт",
+    post: "ТЭЧ",
+    item: "Изделие",
+    itemId: "repair-item",
+    orderNo: "З-1",
+    callsign: "Линза",
+    fault: "Не включается",
+    verdict: "Ремонтопригодно",
+    defects: ["Обрыв"],
+    workDoc: null,
+  };
+  incoming.docs.unshift(defect);
+  incoming.items[0].posts["ТЭЧ"] = 3;
+  incoming.items[0].history.push({ id: "new-tech", text: "Принято в ремонт", q: "+1 шт" });
+  incoming.posts[0].stock[0].q = 3;
+  incoming.posts[0].repairs.push({
+    serial: "—",
+    item: "Изделие",
+    status: "В ремонте",
+    doc: defect.no,
+  });
+
+  const merged = mergeWorkerPostState(previous, incoming, viewer);
+  assert.equal(merged.issue, null);
+  assert.ok(merged.state);
+  assert.equal(merged.state.items[0].stock, 10);
+  assert.deepEqual(merged.state.items[0].lots, [{ lot: "warehouse", qty: 10 }]);
+  assert.deepEqual(merged.state.items[0].posts, { "ТЭЧ": 3, "НРТК": 4 });
+  assert.equal(merged.state.items[0].history.at(-1).post, "ТЭЧ");
+  assert.equal(merged.state.posts[1].stock[0].q, 4);
+
+  const forged = structuredClone(incoming);
+  forged.items[0].stock = 1;
+  assert.match(
+    mergeWorkerPostState(previous, forged, viewer).issue?.error ?? "",
+    /только документы своего поста|складскую карточку/,
+  );
+});
+
+test("worker merge accepts a linked work-act draft for an existing closed defect", () => {
+  const defect = {
+    id: "defect-existing",
+    no: "ДФ-000010",
+    kind: "defekt",
+    status: "Закрыт",
+    post: "ТЭЧ",
+    item: "Изделие",
+    orderNo: "З-10",
+    callsign: "Линза",
+    fault: "Не включается",
+    verdict: "Ремонтопригодно",
+    defects: ["Обрыв"],
+    workDoc: null,
+  };
+  const previous = state({
+    posts: [{ name: "ТЭЧ", stock: [], repairs: [] }],
+    docs: [defect],
+  });
+  const viewer = { id: "worker-1", role: "worker", assignment: "ТЭЧ" };
+  const incoming = structuredClone(projectWarehouseStateForUser(previous, viewer));
+  incoming.docs[0].workDoc = "АВР-000010";
+  incoming.docs.unshift({
+    id: "work-worker-1",
+    no: "АВР-000010",
+    kind: "work",
+    status: "Черновик",
+    post: "ТЭЧ",
+    item: "Изделие",
+    defektDoc: "ДФ-000010",
+    works: [],
+    materials: [],
+    participants: [],
+    actionTypes: [],
+  });
+  const merged = mergeWorkerPostState(previous, incoming, viewer);
+  assert.equal(merged.issue, null);
+  assert.equal(merged.state?.docs[0].no, "АВР-000010");
+  assert.equal(merged.state?.docs[1].workDoc, "АВР-000010");
+
+  const forgedApproval = structuredClone(incoming);
+  forgedApproval.docs[0].status = "Ожидает приёмки на склад";
+  forgedApproval.docs[0].approvedBy = "Поддельный администратор";
+  assert.match(
+    mergeWorkerPostState(previous, forgedApproval, viewer).issue?.error ?? "",
+    /должен быть черновиком|Согласование акта выполняет только администратор|служебные поля/,
+  );
 });
 
 test("legacy archive sanitation accepts missing schema and prunes drafts per account", () => {

@@ -2569,9 +2569,9 @@ function drawQR(container, i){
 }
 
 /* ================= КЛАССИФИКАЦИИ СКЛАДА ================= */
-let categoriesList = ['ФПВ','НРТК','НСУ','Комплектующие','Расход'];
+let categoriesList = ['ФПВ','НРТК','НСУ','Комплектующие','Расходники'];
 let componentSubcats = ['Комплектующие для НСУ','Платы программирования','Расходники','Кабели','Антенны','Приёмники управления','Передатчики управления'];
-const CAT_ICON = {'ФПВ':'🚁','НРТК':'🤖','НСУ':'🖥','Комплектующие':'🧩','Расход':'🧪',
+const CAT_ICON = {'ФПВ':'🚁','НРТК':'🤖','НСУ':'🖥','Комплектующие':'🧩','Расходники':'🧪',
   'Комплектующие для НСУ':'📡','Платы программирования':'💾','Расходники':'🧴','Кабели':'〰️','Антенны':'📶','Приёмники управления':'📥','Передатчики управления':'📤'};
 const ABC_INFO = {A:'высокий оборот, критично для остатков', B:'средний оборот', C:'редко расходуется, можно закупать реже'};
 
@@ -2607,8 +2607,8 @@ const ACT_HANDOVER_SIGNER = { title:'Командир ремонтного вз�
 /* ================= ДАННЫЕ (в памяти, демо) ================= */
 let itemSeq = 1000;
 const items = [
-  // ===== Расход (top-level, расходуемые в ремонте материалы) =====
-  {id:'flux', icon:'🧪', name:'Флюс паяльный ТТ', sku:'РМ-0012', topCat:'Расход', unit:'г', stock:850, min:200, abc:'A',
+  // ===== Расходники (top-level, расходуемые в ремонте материалы) =====
+  {id:'flux', icon:'🧪', name:'Флюс паяльный ТТ', sku:'РМ-0012', topCat:'Расходники', unit:'г', stock:850, min:200, abc:'A',
     desc:'Флюс для пайки радиоэлектронных узлов, банка 1 кг.',
     posts:{'ТЭЧ':40,'НРТК':25}, ext:0,
     lots:[{lot:'Л-0231', qty:600, exp:'01.2027'},{lot:'Л-0245', qty:250, exp:'09.2026'}],
@@ -2618,7 +2618,7 @@ const items = [
       {d:'16.07.2026', type:'out', text:'Выдано на пост НРТК', q:'−30 г'},
       {d:'18.07.2026', type:'off', text:'Списано по АВР-144', q:'−15 г'},
     ]},
-  {id:'solder', icon:'🔗', name:'Припой ПОС-61 ⌀1мм', sku:'РМ-0013', topCat:'Расход', unit:'г', stock:1200, min:500, abc:'A',
+  {id:'solder', icon:'🔗', name:'Припой ПОС-61 ⌀1мм', sku:'РМ-0013', topCat:'Расходники', unit:'г', stock:1200, min:500, abc:'A',
     desc:'Припой оловянно-свинцовый для монтажа, катушка 1 кг.',
     posts:{'ТЭЧ':80,'НРТК':60}, ext:0,
     lots:[{lot:'Л-0118', qty:1200, exp:'03.2028'}],
@@ -2627,7 +2627,7 @@ const items = [
       {d:'14.07.2026', type:'out', text:'Выдано на пост ТЭЧ', q:'−100 г'},
       {d:'18.07.2026', type:'off', text:'Списано по АВР-144', q:'−20 г'},
     ]},
-  {id:'petg', icon:'🧶', name:'Пластик PETG 1.75мм (чёрный)', sku:'ПЧ-0301', topCat:'Расход', unit:'г', stock:2400, min:1000, abc:'A',
+  {id:'petg', icon:'🧶', name:'Пластик PETG 1.75мм (чёрный)', sku:'ПЧ-0301', topCat:'Расходники', unit:'г', stock:2400, min:1000, abc:'A',
     desc:'Расходный материал для FDM-печати корпусов и оснастки.',
     posts:{'3D печать':300}, ext:0,
     lots:[{lot:'Л-0301', qty:1500, exp:'12.2026'},{lot:'Л-0308', qty:900, exp:'02.2027'}],
@@ -2636,7 +2636,7 @@ const items = [
       {d:'14.07.2026', type:'out', text:'Выдано на пост 3D печать', q:'−300 г'},
       {d:'18.07.2026', type:'off', text:'Списано по АВР-143', q:'−300 г'},
     ]},
-  {id:'wire', icon:'〰️', name:'Провод AWG24 (медь, силикон)', sku:'КБ-0207', topCat:'Расход', unit:'м', stock:320, min:100, abc:'B',
+  {id:'wire', icon:'〰️', name:'Провод AWG24 (медь, силикон)', sku:'КБ-0207', topCat:'Расходники', unit:'м', stock:320, min:100, abc:'B',
     desc:'Монтажный силиконовый провод для внутренней разводки.',
     posts:{'ТЭЧ':12}, ext:20,
     history:[
@@ -3058,6 +3058,12 @@ function emitServerPush(type,details){
 function serverActorRole(){
   try{return typeof window.treshkaServerRole==='function'?window.treshkaServerRole():'';}catch{return '';}
 }
+function isManagedServerSession(){
+  return typeof window!=='undefined'
+    && !!window.treshkaServerSync
+    && typeof window.treshkaServerSync.status==='function'
+    && typeof window.treshkaServerRole==='function';
+}
 function visibleNotifications(){
   return notifications.filter(n=>currentAccountId?n.recipientAccountId===currentAccountId:
     (!n.recipientAccountId&&((n.recipientRole===currentRole)||(!n.recipientRole&&(!n.post||n.post===currentUserPost)))&&(!n.post||n.post===currentUserPost)));
@@ -3086,14 +3092,14 @@ function newSalt(){
    Если мост недоступен (предпросмотр в обычном браузере вне приложения) —
    используется localStorage, но ТОЛЬКО как временная заглушка прототипа,
    а не как финальное хранилище складского учёта. */
-const APP_SCHEMA_VERSION = 4;
+const APP_SCHEMA_VERSION = 5;
 const STORAGE_FALLBACK_KEY = 'treshka_sklad_state_v1';
 
 /* Версия приложения (отображается в верхней плашке-шапке на каждом экране и
    дублируется на экране "Ещё"). Держим синхронно с android/app/build.gradle →
    defaultConfig.versionName; отдельно от APP_SCHEMA_VERSION, который
    версионирует структуру данных, а не саму сборку приложения. */
-const APP_VERSION = '1.7';
+const APP_VERSION = '1.7.1';
 
 function nativeStorageBridge(){
   return (typeof window!=='undefined' && window.AndroidStorage && typeof window.AndroidStorage.saveState==='function')
@@ -3153,6 +3159,14 @@ STATE_MIGRATIONS[3] = function(s){
   (s.docs||[]).forEach(d=>{if(d.kind==='work'&&!Array.isArray(d.issuedSnapshot))d.issuedSnapshot=[];});
   (s.stockTransfers||[]).forEach(t=>{if(typeof t.createdAt!=='number')t.createdAt=0;});
   s.schemaVersion=4;
+  return s;
+};
+STATE_MIGRATIONS[4] = function(s){
+  if(Array.isArray(s.categoriesList)){
+    s.categoriesList=[...new Set(s.categoriesList.map(category=>category==='Расход'?'Расходники':category))];
+  }
+  (s.items||[]).forEach(i=>{if(i&&i.topCat==='Расход')i.topCat='Расходники';});
+  s.schemaVersion=5;
   return s;
 };
 
@@ -4089,6 +4103,7 @@ docs(){
   const mismatches = roleDocs.filter(d=>hasUnresolvedMismatch(d));
   $('content').innerHTML = `
     <button class="btn primary" style="margin:0 0 10px" onclick="render({fn:views.newDefekt})">＋ Новый акт дефектовки</button>
+    <button class="btn ghost" style="margin:0 0 10px" onclick="renderWorkActPicker()">＋ Новый акт выполненных работ</button>
     ${scoped?'':`<div class="btn-row" style="margin-bottom:12px">
       <button class="btn ghost" style="margin-top:0" onclick="exportDocsExcel()">⤓ Экспорт актов в Excel</button>
       <button class="btn ghost" style="margin-top:0" onclick="exportInventoryExcel()">⤓ Экспорт инвентаризации</button>
@@ -4244,7 +4259,7 @@ more(){
   const syncStatus=refreshNativeSyncStatus();
   $('content').innerHTML = `
     <div class="card" onclick="render({fn:renderServerSettings})">
-      <div class="row"><div class="icbox">☁️</div><div class="grow"><div class="t">Сервер и синхронизация</div><div class="s">${syncStatus.configured?(syncStatus.lastError?'Ошибка · локальные данные защищены':`Подключено · очередь ${syncStatus.pending||0}`):'Работа офлайн · сервер не настроен'}</div></div><div style="color:${syncStatus.lastError?'var(--red)':'var(--muted)'}">›</div></div>
+      <div class="row"><div class="icbox">☁️</div><div class="grow"><div class="t">Сервер и синхронизация</div><div class="s">${isManagedServerSession()?'Подключено автоматически · повторный вход не требуется':syncStatus.configured?(syncStatus.lastError?'Ошибка · локальные данные защищены':`Подключено · очередь ${syncStatus.pending||0}`):'Работа офлайн · сервер не настроен'}</div></div><div style="color:${syncStatus.lastError?'var(--red)':'var(--muted)'}">›</div></div>
     </div>
     ${['owner','admin'].includes(serverActorRole())?`<div class="card" onclick="render({fn:renderStateHistory})">
       <div class="row"><div class="icbox">↶</div><div class="grow"><div class="t">История ревизий</div><div class="s">Просмотр архивных снимков${serverActorRole()==='owner'?' и восстановление владельцем':''}</div></div><div style="color:var(--muted)">›</div></div>
@@ -4491,6 +4506,22 @@ async function restoreStateRevision(revision){
   }
 }
 function renderServerSettings(){
+  if(isManagedServerSession()){
+    const managedStatus=window.treshkaServerSync.status();
+    setHdr('Сервер и синхронизация','Подключение управляется приложением',true,false);
+    $('content').innerHTML=`
+      <div class="progress-note ${managedStatus.lastError?'bad':'ok'}">${managedStatus.lastError
+        ? `⚠ ${esc(managedStatus.lastError)}. Изменения остаются на устройстве и будут повторены автоматически.`
+        : `✓ Сервер подключён. Ревизия ${Number(managedStatus.revision||0)}${managedStatus.partial?' · доступ только к назначенному посту':''}.`}</div>
+      <div class="card static">
+        <div class="t">Повторная авторизация не требуется</div>
+        <div class="s" style="margin-top:6px;line-height:1.5">Вы уже вошли в приложение под своим логином и паролем. Адрес сервера и отдельные реквизиты здесь вводить не нужно.</div>
+      </div>
+      <button class="btn green" onclick="window.treshkaServerSync.flush();toast('Синхронизация запущена')">⟳ Синхронизировать сейчас</button>
+      <div class="sec">Защита данных</div>
+      <div class="card static"><div class="s" style="color:var(--ink);line-height:1.55">Изменения сохраняются локально и отправляются на сервер автоматически. Для работника сервер принимает только документы и операции назначенного поста.</div></div>`;
+    return;
+  }
   const s=refreshNativeSyncStatus();
   const nativeAdmin=nativeRoleCanAdminister(s);
   let conflicts=[];
@@ -5918,6 +5949,7 @@ function findMaterialShortfalls(d){
 }
 function closeWork(no){
   const d=docs.find(x=>x.no===no);
+  if(!d||!canSeeDoc(d)){toast('🔒 Доступен только акт вашего поста');return false;}
   if(d.status==='Закрыт'){ toast('Акт уже закрыт'); return; }
   if(d.status==='Ожидает согласования'){toast('Акт уже отправлен администратору');return;}
   const source=docs.find(x=>x.no===d.defektDoc);
@@ -5944,12 +5976,14 @@ function closeWork(no){
   notifyAdmins('АВР на согласование',`${d.no} · ${d.item} · пост ${d.post}`,'work',d.no);
   toast('✓ Акт отправлен администратору на согласование');
   renderWorkDoc(d);
+  return true;
 }
 function approveWork(no){
   if(currentRole!=='admin'){toast('Согласовать АВР может только администратор');return false;}
   const d=docs.find(x=>x.no===no);if(!d||d.status!=='Ожидает согласования'){toast('Акт не ожидает согласования');return false;}
   const shortfalls=findMaterialShortfalls(d);if(shortfalls.length){const s=shortfalls[0];toast(`Недостаточно на посту «${d.post}»: ${s.it.name} — нужно ${s.need}, есть ${s.avail}`);return false;}
-  d.approvedBy=accounts.find(a=>a.id===currentAccountId)?.login||'Администратор';d.approvedAt=Date.now();
+  const serverApprover=typeof window.treshkaServerUser==='function'?window.treshkaServerUser():null;
+  d.approvedBy=serverApprover?.login||accounts.find(a=>a.id===currentAccountId)?.login||'Администратор';d.approvedAt=Date.now();
   d.approvalNote='согласовано администратором'+(($('approvalReason')?.value||'').trim()?' · '+$('approvalReason').value.trim():'');
   d.status='Ожидает приёмки на склад';
   logAction('АВР согласован',`${d.no}: ожидает приёмки кладовщиком`,d.post,d.itemId);
@@ -6030,7 +6064,8 @@ function performWorkClose(d, note){
   if(!d||d.status!=='Ожидает приёмки на склад'){toast('Акт не ожидает приёмки на склад');return false;}
   const closed=runStockTransaction('Закрытие акта выполненных работ',()=>{
   d.warehouseAcceptedAt=Date.now();
-  d.warehouseAcceptedBy='Кладовщик';
+  const serverStorekeeper=typeof window.treshkaServerUser==='function'?window.treshkaServerUser():null;
+  d.warehouseAcceptedBy=serverStorekeeper?.login||accounts.find(a=>a.id===currentAccountId)?.login||'Кладовщик';
   d.status='Закрыт';
   d.materials.forEach(m=>{
     const it=item(m.id);
@@ -6162,6 +6197,7 @@ function submitDefekt(){
 
 function createWorkFromDefekt(defektNo){
   const d = docs.find(x=>x.no===defektNo);
+  if(!d||!canSeeDoc(d)){toast('🔒 Создать акт можно только по своему посту');return false;}
   if(!d||d.kind!=='defekt'||d.status!=='Закрыт'){toast('Сначала завершите акт дефектовки');return;}
   if(String(d.verdict||'').includes('Не подлежит')){toast('Для неремонтопригодного изделия акт ремонта создать нельзя — оформите списание');return;}
   if(d.workDoc){ toast('Акт выполненных работ уже создан: '+d.workDoc); setTimeout(()=>openDoc(docs.indexOf(docs.find(x=>x.no===d.workDoc))), 300); return; }
@@ -6176,6 +6212,7 @@ function createWorkFromDefekt(defektNo){
   emitServerPush('work_act_created',{post:d.post,entityNo:newNo,summary:d.item||'Изделие'});
   toast('✓ Акт '+newNo+' создан, привязан к '+defektNo);
   setTimeout(()=>openDoc(docs.indexOf(docs.find(x=>x.no===newNo))), 400);
+  return true;
 }
 
 function setRole(role){
@@ -6185,6 +6222,26 @@ function setRole(role){
   updateNavForRole();
   toast('Роль: '+ROLES[role].label);
   if(prevRole !== role) logAction('Смена роли', ROLES[prevRole].label+' → '+ROLES[role].label);
+}
+
+function renderWorkActPicker(){
+  const eligible=docs.filter(d=>
+    d&&d.kind==='defekt'
+    &&d.status==='Закрыт'
+    &&!d.workDoc
+    &&!String(d.verdict||'').includes('Не подлежит')
+    &&canSeeDoc(d));
+  setHdr('Новый акт выполненных работ','Выберите закрытую дефектовку',true,false);
+  $('content').innerHTML=eligible.length?eligible.map(d=>`
+    <div class="card" onclick="createWorkFromDefekt('${esc(d.no)}')">
+      <div class="row">
+        <div class="icbox">🔧</div>
+        <div class="grow"><div class="t">${esc(d.no)} · ${esc(d.item)}</div><div class="s">${esc(d.post)}${d.serial&&d.serial!=='—'?' · №'+esc(d.serial):''}</div></div>
+        <div style="color:var(--muted)">›</div>
+      </div>
+    </div>`).join('')
+    :`<div class="progress-note">Сначала закройте ремонтопригодный акт дефектовки. После этого он появится здесь.</div>
+      <button class="btn primary" onclick="render({fn:views.newDefekt})">＋ Создать акт дефектовки</button>`;
 }
 
 function mapServerRoleToClientRole(role){
@@ -7054,6 +7111,6 @@ if(_startupLoadResult === 'corrupted'){
   flushSave();
 }
 </script>
-<script src="/prototype-server.js?build=1.7-firebase"></script>
+<script src="/prototype-server.js?build=1.7.1-firebase"></script>
 </body>
 </html>

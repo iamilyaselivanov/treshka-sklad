@@ -1,7 +1,7 @@
 import type { WarehouseState } from "@/lib/warehouse-state";
 
 const MAX_COLLECTION_ITEMS = 50_000;
-export const CURRENT_WAREHOUSE_SCHEMA_VERSION = 4;
+export const CURRENT_WAREHOUSE_SCHEMA_VERSION = 5;
 const REQUIRED_COLLECTIONS = ["items", "posts", "docs"] as const;
 const OPTIONAL_COLLECTIONS = [
   "extIssues",
@@ -106,6 +106,24 @@ function structurallySanitizedWarehouseState(
     state.inventoryActs = state.inventoryActs.filter(
       (entry) => Boolean(stateRecord(entry)),
     );
+  }
+  // v4 → v5: rename the built-in top-level category and migrate its cards
+  // atomically. Older snapshots keep their version so the browser can still
+  // apply the preceding document migrations before this step.
+  if (Number(state.schemaVersion) === 4) {
+    if (Array.isArray(state.categoriesList)) {
+      state.categoriesList = [
+        ...new Set(state.categoriesList.map((category) =>
+          category === "Расход" ? "Расходники" : category)),
+      ];
+    }
+    state.items = (state.items as unknown[]).map((itemValue) => {
+      const item = stateRecord(itemValue);
+      return item?.topCat === "Расход"
+        ? { ...item, topCat: "Расходники" }
+        : itemValue;
+    });
+    state.schemaVersion = CURRENT_WAREHOUSE_SCHEMA_VERSION;
   }
   // Authentication and device-local fields never belong to shared state.
   delete state.accounts;
