@@ -727,16 +727,19 @@
     } catch (error) {
       // fetchSnapshot clears the flag for every successful HTTP response.
       // Keep polling if the supposedly repaired payload is still unusable.
-      if (!recovered) sync.recoveryRequired = true;
+      sync.recoveryRequired = true;
       sync.lastError = error.message || "Не удалось проверить восстановление склада";
       console.warn("warehouse recovery poll failed", error);
     } finally {
       sync.busy = false;
     }
     if (!recovered) return;
-    await afterSnapshotAdopted(true);
-    startRegularSynchronization();
     go("sklad");
+    try {
+      await afterSnapshotAdopted(true);
+    } finally {
+      startRegularSynchronization();
+    }
     if (!sync.conflict) toast("✓ Склад восстановлен, синхронизация возобновлена");
   }
 
@@ -898,8 +901,11 @@
       if (recoveryWasRequired) sync.recoveryRequired = true;
       throw error;
     }
-    await afterSnapshotAdopted(true);
-    startRegularSynchronization();
+    try {
+      await afterSnapshotAdopted(true);
+    } finally {
+      startRegularSynchronization();
+    }
     return restored;
   }
 

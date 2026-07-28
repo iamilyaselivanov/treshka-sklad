@@ -2520,5 +2520,19 @@ test('automatic snapshot recovery replays and uploads a pending inventory act wi
       && body.state?.items?.find((item) => item.id === 'server-item')?.stock === 4),
     'the upload must contain both the recovered act and its stock correction',
   );
+  assert.equal(
+    await storekeeper.page.evaluate(() => window.recoverPendingInventoryActs()),
+    true,
+    'repeating recovery for an already replayed act must be idempotently successful',
+  );
+  assert.deepEqual(
+    await storekeeper.page.evaluate((actId) => ({
+      actCount: inventoryActs.filter((act) => act.id === actId).length,
+      stock: items.find((item) => item.id === 'server-item')?.stock,
+      pendingRecovery: pendingInventoryRecovery,
+    }), pendingAct.id),
+    { actCount: 1, stock: 4, pendingRecovery: null },
+    'a repeated pass must neither apply stock twice nor raise a false recovery warning',
+  );
   await storekeeper.ctx.close();
 });
