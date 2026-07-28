@@ -699,6 +699,20 @@
     sync.timer = window.setInterval(synchronize, 2500);
   }
 
+  async function afterSnapshotAdopted(hadServerState) {
+    const recoveredInventory = hadServerState
+      && typeof window.recoverPendingInventoryActs === "function"
+      ? await window.recoverPendingInventoryActs()
+      : false;
+    if ((!hadServerState || recoveredInventory) && canUploadState()) {
+      await uploadIfChanged();
+    } else if (canUploadState()) {
+      void migrateEmbeddedPhotos();
+    }
+    void registerNativePush();
+    void flushPushQueue();
+  }
+
   async function recoveryPoll() {
     if (!sync.ready || !sync.recoveryRequired || sync.busy) return;
     sync.busy = true;
@@ -710,11 +724,6 @@
       if (!snapshot.state) throw new Error("Сервер не вернул восстановленное состояние");
       applyRemoteSnapshot(snapshot, false);
       recovered = true;
-      startRegularSynchronization();
-      go("sklad");
-      void registerNativePush();
-      void flushPushQueue();
-      toast("✓ Склад восстановлен, синхронизация возобновлена");
     } catch (error) {
       // fetchSnapshot clears the flag for every successful HTTP response.
       // Keep polling if the supposedly repaired payload is still unusable.
@@ -724,6 +733,11 @@
     } finally {
       sync.busy = false;
     }
+    if (!recovered) return;
+    await afterSnapshotAdopted(true);
+    startRegularSynchronization();
+    go("sklad");
+    if (!sync.conflict) toast("✓ Склад восстановлен, синхронизация возобновлена");
   }
 
   async function resolveConflict(strategy) {
@@ -802,14 +816,7 @@
       sync.lastUploaded = data.state || !canUploadState() ? JSON.stringify(normalizedState()) : "";
       sync.ready = true;
       go("sklad");
-      const recoveredInventory = data.state
-        && typeof window.recoverPendingInventoryActs === "function"
-        ? await window.recoverPendingInventoryActs()
-        : false;
-      if ((!data.state || recoveredInventory) && canUploadState()) await uploadIfChanged();
-      else if (canUploadState()) void migrateEmbeddedPhotos();
-      void registerNativePush();
-      void flushPushQueue();
+      await afterSnapshotAdopted(Boolean(data.state));
       startRegularSynchronization();
     } catch (error) {
       console.error("server initialization failed", error);
@@ -891,6 +898,7 @@
       if (recoveryWasRequired) sync.recoveryRequired = true;
       throw error;
     }
+    await afterSnapshotAdopted(true);
     startRegularSynchronization();
     return restored;
   }

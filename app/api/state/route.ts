@@ -46,6 +46,10 @@ const MAX_NOTIFICATION_ITEMS = 2_000;
 const MAX_INVENTORY_ACT_ITEMS = 5_000;
 const STATE_CONDITION_AUDIT_WINDOW_MS = 15 * 60 * 1_000;
 const STATE_CONDITION_AUDIT_CACHE_MAX = 256;
+// This cache is intentionally isolate-local: it removes a D1 read from the
+// 2.5-second polling path, but separate/restarted Cloudflare isolates may each
+// emit one audit row for the same condition. Under unusually high revision
+// churn, the bounded cache may also evict a key before its 15-minute window.
 const stateConditionAuditCache = new Map<string, number>();
 
 const SPECIFIC_COLLECTION_LIMITS = {

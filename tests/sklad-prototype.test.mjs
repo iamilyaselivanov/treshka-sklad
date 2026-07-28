@@ -83,6 +83,7 @@ async function newHttpServerPage({
   corruptedState = false,
   recoverStateAfterGets = null,
   recoveryPollMs = null,
+  pendingInventoryAct = null,
 } = {}) {
   const ctx = await browser.newContext();
   const state = serverStateFixture();
@@ -95,6 +96,7 @@ async function newHttpServerPage({
   let mediaPosts = 0;
   let historyGets = 0;
   let historyRestores = 0;
+  let inventoryPendingGets = 0;
   const historyRestoreBodies = [];
   const putBodies = [];
   await ctx.route('http://treshka.test/**', async (route) => {
@@ -219,6 +221,15 @@ async function newHttpServerPage({
       });
       return;
     }
+    if (url.pathname === '/api/inventory/acts' && request.method() === 'GET') {
+      inventoryPendingGets += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ pending: pendingInventoryAct ? [pendingInventoryAct] : [] }),
+      });
+      return;
+    }
     if (url.pathname === '/api/state' && request.method() === 'PUT') {
       statePuts += 1;
       putBodies.push(JSON.parse(request.postData() || '{}'));
@@ -252,7 +263,14 @@ async function newHttpServerPage({
   return {
     ctx,
     page,
-    counts: () => ({ stateGets, statePuts, mediaPosts, historyGets, historyRestores }),
+    counts: () => ({
+      stateGets,
+      statePuts,
+      mediaPosts,
+      historyGets,
+      historyRestores,
+      inventoryPendingGets,
+    }),
     historyRestoreBodies,
     putBodies,
   };
@@ -2455,5 +2473,52 @@ test('a non-owner automatically resumes synchronization after the owner repairs 
     'ordinary synchronization must be available again after automatic recovery',
   );
   assert.equal(storekeeper.counts().statePuts, 0, 'recovery must not upload stale local data');
+  await storekeeper.ctx.close();
+});
+
+test('automatic snapshot recovery replays and uploads a pending inventory act without restart', async () => {
+  const pendingAct = {
+    id: 'inventory-pending-after-recovery',
+    no: 'ИНВ-000777',
+    scope: 'warehouse',
+    startedAt: '2026-07-27T08:00:00.000Z',
+    finishedAt: '2026-07-27T08:10:00.000Z',
+    date: '27.07.2026',
+    actor: {
+      id: 'test-promotable-user',
+      login: 'test-promotable-user',
+      name: 'Тест storekeeper',
+      role: 'storekeeper',
+    },
+    totals: { positions: 1, matched: 0, mismatched: 1, surplus: 0, shortage: 1 },
+    lines: [{
+      id: 'server-item',
+      name: 'Серверный товар',
+      sku: 'SERVER-001',
+      unit: 'шт',
+      book: 5,
+      counted: 4,
+      delta: -1,
+    }],
+  };
+  const storekeeper = await newHttpServerPage({
+    role: 'storekeeper',
+    corruptedState: true,
+    recoverStateAfterGets: 1,
+    recoveryPollMs: 50,
+    pendingInventoryAct: pendingAct,
+  });
+  await storekeeper.page.waitForFunction((actId) =>
+    inventoryActs.some((act) => act.id === actId)
+      && window.treshkaServerSync.status().busy === false,
+  pendingAct.id);
+  assert.ok(storekeeper.counts().inventoryPendingGets >= 1);
+  assert.ok(storekeeper.counts().statePuts >= 1, 'the replayed act must be uploaded immediately');
+  assert.ok(
+    storekeeper.putBodies.some((body) =>
+      body.state?.inventoryActs?.some((act) => act.id === pendingAct.id)
+      && body.state?.items?.find((item) => item.id === 'server-item')?.stock === 4),
+    'the upload must contain both the recovered act and its stock correction',
+  );
   await storekeeper.ctx.close();
 });

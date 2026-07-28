@@ -269,6 +269,7 @@ export async function POST(request: Request) {
     `Архивная ревизия ${targetRevision} восстановлена как ревизия ${revision}`
       + (prepared.legacySchemaAdjusted ? " · версия старого снимка приведена к поддерживаемой" : "")
       + (currentStateDamaged ? " · текущее состояние было нечитаемо" : "")
+      + (currentJsonDamaged ? " · текущие черновики прочитать невозможно" : "")
       + (prepared.discardedCurrentDrafts > 0
         ? ` · отброшено повреждённых черновиков: ${prepared.discardedCurrentDrafts}`
         : "")
@@ -279,6 +280,9 @@ export async function POST(request: Request) {
   const warnings = [
     currentStateDamaged
       ? "Текущее состояние склада было повреждено; откат выполнен по архивной ревизии"
+      : "",
+    currentJsonDamaged
+      ? "Текущие черновики инвентаризации прочитать не удалось; начатые пересчёты необходимо выполнить заново"
       : "",
     prepared.discardedCurrentDrafts > 0
       ? `Отброшено повреждённых черновиков инвентаризации: ${prepared.discardedCurrentDrafts}`

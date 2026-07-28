@@ -1094,6 +1094,10 @@ try {
   assert.equal(recoveredDamagedState.data.currentStateDamaged, true);
   assert.equal(recoveredDamagedState.data.legacySchemaAdjusted, true);
   assert.match(recoveredDamagedState.data.warning, /Текущее состояние склада было повреждено/);
+  assert.match(
+    recoveredDamagedState.data.warning,
+    /Текущие черновики инвентаризации прочитать не удалось/,
+  );
   assert.match(recoveredDamagedState.data.warning, /текущей поддерживаемой версии схемы/);
   const healthyAfterRecovery = await request("/api/state", { headers: ownerHeaders });
   assert.equal(healthyAfterRecovery.data.state.schemaVersion, 4);
