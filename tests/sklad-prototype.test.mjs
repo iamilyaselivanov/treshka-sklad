@@ -1288,6 +1288,38 @@ test('worker document changes are uploaded as an explicitly partial assigned-pos
   await ctx.close();
 });
 
+test('worker defect form uploads the real document sequence and keeps the act after sync', async () => {
+  const { ctx, page, counts, putBodies } = await newHttpServerPage({ role: 'worker' });
+  const result = await page.evaluate(async () => {
+    views.newDefekt();
+    $('f_order').value = 'З-ЛИНЗА-1';
+    $('f_item_name').value = 'Тестовое изделие Линзы';
+    $('f_from').value = 'Подразделение';
+    $('f_callsign').value = 'Линза';
+    $('f_fault').value = 'Не включается';
+    $('f_defects').value = 'Обрыв цепи';
+    $('f_verdict').value = 'Ремонтопригодно';
+    submitDefekt();
+    const created = docs.find((document) => document.orderNo === 'З-ЛИНЗА-1');
+    await window.treshkaServerSync.flush();
+    return {
+      createdNo: created?.no ?? '',
+      stillPresent: docs.some((document) => document.orderNo === 'З-ЛИНЗА-1'),
+      documentSeq: { ...documentSeq },
+      notificationSeq,
+    };
+  });
+  assert.equal(counts().statePuts, 1);
+  assert.equal(result.stillPresent, true);
+  assert.match(result.createdNo, /^ДФ-100\//);
+  assert.deepEqual(result.documentSeq, { defekt: 100, work: 199 });
+  assert.equal(result.notificationSeq, 2);
+  assert.equal(putBodies[0].state.documentSeq.defekt, 100);
+  assert.equal(putBodies[0].state.notificationSeq, 2);
+  assert.ok(putBodies[0].state.docs.some((document) => document.orderNo === 'З-ЛИНЗА-1'));
+  await ctx.close();
+});
+
 test('review 800c0c9 — a 413 response enters backoff instead of uploading every timer tick', async () => {
   const { ctx, page, counts } = await newHttpServerPage({ role: 'owner', putStatus: 413 });
   const result = await page.evaluate(async () => {

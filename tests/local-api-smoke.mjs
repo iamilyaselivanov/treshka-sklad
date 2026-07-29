@@ -726,6 +726,10 @@ try {
     && Object.keys(item.posts ?? {}).every((post) => post === "ТЭЧ")));
   const workerDefectNo = `ДФ-WORKER-${suffix}`;
   const workerPartialState = structuredClone(workerSnapshot.data.state);
+  workerPartialState.documentSeq = {
+    defekt: Number(workerPartialState.documentSeq?.defekt ?? 99) + 1,
+    work: Number(workerPartialState.documentSeq?.work ?? 199),
+  };
   workerPartialState.docs.unshift({
     id: `worker-defect-${suffix}`,
     no: workerDefectNo,
@@ -763,6 +767,7 @@ try {
   const workerWorkNo = `АВР-WORKER-${suffix}`;
   const workerAfterDefect = await request("/api/state", { headers: { cookie: roleCookies.worker } });
   const workerWorkDraft = structuredClone(workerAfterDefect.data.state);
+  workerWorkDraft.documentSeq.work += 1;
   const linkedWorkerDefect = workerWorkDraft.docs.find((document) => document.no === workerDefectNo);
   linkedWorkerDefect.workDoc = workerWorkNo;
   workerWorkDraft.docs.unshift({

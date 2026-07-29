@@ -257,6 +257,7 @@ function workerPostIssue(error: string, status: 403 | 409 = 403): WorkerPostStat
 }
 
 const WORKER_STATE_COLLECTIONS = new Set(["items", "posts", "docs", "auditLog", "notifications"]);
+const WORKER_DERIVED_STATE_FIELDS = new Set(["documentSeq", "notificationSeq"]);
 const WORKER_ITEM_MUTABLE_FIELDS = new Set(["posts", "history"]);
 const WORKER_POST_MUTABLE_FIELDS = new Set(["stock", "repairs"]);
 const WORKER_WORK_MUTABLE_FIELDS = new Set([
@@ -290,6 +291,42 @@ function keyedRows(value: unknown) {
     const key = stableRecordKey(rowValue);
     if (!row || !key || result.has(key)) return null;
     result.set(key, row);
+  }
+  return result;
+}
+
+function documentSequenceBaseline(state: WarehouseState, kind: "defekt" | "work") {
+  const floor = kind === "work" ? 199 : 99;
+  const stored = Number(record(state.documentSeq)?.[kind]);
+  const highestDocumentNumber = rows(state.docs).reduce((highest, value) => {
+    const document = record(value);
+    if (String(document?.kind ?? "") !== kind) return highest;
+    const match = String(document?.no ?? "").trim().match(/^(?:ДФ|АВР)-0*(\d+)(?:\/.*)?$/i);
+    return match ? Math.max(highest, Number(match[1])) : highest;
+  }, 0);
+  return Math.max(
+    floor,
+    Number.isSafeInteger(stored) && stored >= 0 ? stored : 0,
+    highestDocumentNumber,
+  );
+}
+
+function workerDocumentSequence(
+  previous: WarehouseState,
+  incoming: WarehouseState,
+  addedDocs: Record<string, unknown>[],
+) {
+  const incomingSequence = record(incoming.documentSeq);
+  if (
+    !incomingSequence
+    || Object.keys(incomingSequence).some((key) => key !== "defekt" && key !== "work")
+  ) return null;
+  const result: Record<"defekt" | "work", number> = { defekt: 0, work: 0 };
+  for (const kind of ["defekt", "work"] as const) {
+    const added = addedDocs.filter((document) => String(document.kind ?? "") === kind).length;
+    const expected = documentSequenceBaseline(previous, kind) + added;
+    if (Number(incomingSequence[kind]) !== expected) return null;
+    result[kind] = expected;
   }
   return result;
 }
@@ -361,7 +398,7 @@ export function mergeWorkerPostState(
   const projected = projectWarehouseStateForUser(previous, viewer);
   const topLevelKeys = new Set([...Object.keys(projected), ...Object.keys(incoming)]);
   for (const key of topLevelKeys) {
-    if (WORKER_STATE_COLLECTIONS.has(key)) continue;
+    if (WORKER_STATE_COLLECTIONS.has(key) || WORKER_DERIVED_STATE_FIELDS.has(key)) continue;
     if (canonicalHistoryJson(projected[key]) !== canonicalHistoryJson(incoming[key])) {
       return workerPostIssue("Работник может изменять только документы своего поста");
     }
@@ -404,6 +441,10 @@ export function mergeWorkerPostState(
   const addedDefects = addedDocs.filter((document) => String(document.kind ?? "") === "defekt");
   if (addedWorks.length > 1 || addedDefects.length > 1 || addedDocs.length !== addedWorks.length + addedDefects.length) {
     return workerPostIssue("Работник может создавать только акт дефектовки и акт выполненных работ", 409);
+  }
+  const nextDocumentSequence = workerDocumentSequence(previous, incoming, addedDocs);
+  if (!nextDocumentSequence) {
+    return workerPostIssue("Счётчик документов не соответствует созданным актам", 409);
   }
 
   for (const defect of addedDefects) {
@@ -606,6 +647,7 @@ export function mergeWorkerPostState(
       items: mergedItems,
       posts: mergedPosts,
       docs: [...rows(incoming.docs), ...otherDocs],
+      documentSeq: nextDocumentSequence,
     },
     issue: null,
   };

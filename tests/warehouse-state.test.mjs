@@ -28,6 +28,8 @@ function state(overrides = {}) {
     inventoryActs: [],
     auditLog: [],
     notifications: [],
+    notificationSeq: 0,
+    documentSeq: { defekt: 99, work: 199 },
     ...overrides,
   };
 }
@@ -112,6 +114,8 @@ test("worker merge accepts a new assigned-post defect without exposing or changi
     workDoc: null,
   };
   incoming.docs.unshift(defect);
+  incoming.documentSeq.defekt += 1;
+  incoming.notificationSeq += 2;
   incoming.items[0].posts["ТЭЧ"] = 3;
   incoming.items[0].history.push({ id: "new-tech", text: "Принято в ремонт", q: "+1 шт" });
   incoming.posts[0].stock[0].q = 3;
@@ -130,12 +134,20 @@ test("worker merge accepts a new assigned-post defect without exposing or changi
   assert.deepEqual(merged.state.items[0].posts, { "ТЭЧ": 3, "НРТК": 4 });
   assert.equal(merged.state.items[0].history.at(-1).post, "ТЭЧ");
   assert.equal(merged.state.posts[1].stock[0].q, 4);
+  assert.deepEqual(merged.state.documentSeq, { defekt: 100, work: 199 });
+  assert.equal(merged.state.notificationSeq, 0);
 
   const forged = structuredClone(incoming);
   forged.items[0].stock = 1;
   assert.match(
     mergeWorkerPostState(previous, forged, viewer).issue?.error ?? "",
     /только документы своего поста|складскую карточку/,
+  );
+  const forgedSequence = structuredClone(incoming);
+  forgedSequence.documentSeq.defekt += 50;
+  assert.match(
+    mergeWorkerPostState(previous, forgedSequence, viewer).issue?.error ?? "",
+    /Счётчик документов/,
   );
 });
 
@@ -174,6 +186,8 @@ test("worker merge accepts a linked work-act draft for an existing closed defect
     participants: [],
     actionTypes: [],
   });
+  incoming.documentSeq.work += 1;
+  incoming.notificationSeq += 1;
   const merged = mergeWorkerPostState(previous, incoming, viewer);
   assert.equal(merged.issue, null);
   assert.equal(merged.state?.docs[0].no, "АВР-000010");
