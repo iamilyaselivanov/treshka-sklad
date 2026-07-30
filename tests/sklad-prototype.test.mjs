@@ -642,6 +642,70 @@ test('#photo — item photo can be attached/replaced/removed via the native Andr
   await ctx.close();
 });
 
+test('#photo — a delayed media upload updates the live item and is persisted after state replacement', async () => {
+  const { ctx, page, counts, putBodies } = await newHttpServerPage({
+    role: 'owner',
+    mediaDelayMs: 150,
+    regularSyncMs: 60_000,
+  });
+  const immediate = await page.evaluate(() => {
+    const dataUrl = 'data:image/jpeg;base64,AAAA';
+    window.onPhotoPicked('server-item', dataUrl, null);
+    const index = items.findIndex((entry) => entry.id === 'server-item');
+    items.splice(index, 1, { ...items[index] });
+    const stored = JSON.parse(localStorage.getItem(STORAGE_FALLBACK_KEY));
+    return {
+      livePhoto: item('server-item').photo,
+      storedPhoto: stored.items.find((entry) => entry.id === 'server-item').photo,
+    };
+  });
+  assert.equal(immediate.livePhoto, 'data:image/jpeg;base64,AAAA');
+  assert.equal(immediate.storedPhoto, 'data:image/jpeg;base64,AAAA', 'the original must be durable before media upload finishes');
+
+  await page.waitForFunction(() => {
+    const current = item('server-item');
+    return current?.photo?.startsWith('/api/media/images?key=')
+      && current?.photoMedia?.key?.startsWith('images/');
+  });
+  for (let attempt = 0; attempt < 40 && putBodies.length === 0; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  const result = await page.evaluate(() => {
+    const current = item('server-item');
+    const stored = JSON.parse(localStorage.getItem(STORAGE_FALLBACK_KEY));
+    const storedItem = stored.items.find((entry) => entry.id === 'server-item');
+    return {
+      livePhoto: current.photo,
+      liveMediaKey: current.photoMedia?.key,
+      storedPhoto: storedItem.photo,
+      storedMediaKey: storedItem.photoMedia?.key,
+    };
+  });
+  assert.equal(counts().mediaPosts, 1);
+  assert.match(result.livePhoto, /^\/api\/media\/images\?key=/);
+  assert.match(result.liveMediaKey, /^images\//);
+  assert.equal(result.storedPhoto, result.livePhoto, 'the uploaded URL must replace the embedded photo in durable storage');
+  assert.equal(result.storedMediaKey, result.liveMediaKey);
+  assert.ok(
+    putBodies.some((body) => body.state.items[0].photo === result.livePhoto),
+    'the media URL must be flushed to the server instead of waiting for a later edit',
+  );
+  await ctx.close();
+});
+
+test('#photo — client and media API agree on the 500 KB decoded image limit', async () => {
+  const { ctx, page } = await newPage();
+  const result = await page.evaluate(() => ({
+    exactly500Kb: safePhotoDataUrl(`data:image/jpeg;base64,${'A'.repeat(666667)}=`),
+    over500Kb: safePhotoDataUrl(`data:image/jpeg;base64,${'A'.repeat(666668)}`),
+    malformedPadding: safePhotoDataUrl('data:image/jpeg;base64,AA=A'),
+  }));
+  assert.equal(result.exactly500Kb, true);
+  assert.equal(result.over500Kb, false);
+  assert.equal(result.malformedPadding, false);
+  await ctx.close();
+});
+
 test('#8 — native back handler drives the JS navigation stack (sheet > sklad drill-down > tab > root)', async () => {
   const { ctx, page } = await newPage();
   const r = await page.evaluate(() => {

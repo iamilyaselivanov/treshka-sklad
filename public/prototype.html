@@ -3609,10 +3609,19 @@ function refocusSearchInput(id){
 function esc(s){
   return String(s??'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
+const MAX_PHOTO_BYTES=500000;
+const MAX_PHOTO_DATA_URL_CHARS=Math.ceil(MAX_PHOTO_BYTES*4/3)+64;
+function photoDataUrlBytes(value){
+  if(typeof value!=='string'||value.length>MAX_PHOTO_DATA_URL_CHARS)return -1;
+  const match=/^data:image\/(?:jpeg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
+  if(!match||match[1].length%4!==0)return -1;
+  const encoded=match[1];
+  const padding=encoded.endsWith('==')?2:(encoded.endsWith('=')?1:0);
+  return (encoded.length/4)*3-padding;
+}
 function safePhotoDataUrl(value){
-  return typeof value==='string'
-    && value.length<=500000
-    && /^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(value);
+  const bytes=photoDataUrlBytes(value);
+  return bytes>=0&&bytes<=MAX_PHOTO_BYTES;
 }
 function safePhotoSource(value){
   return safePhotoDataUrl(value)
@@ -3883,17 +3892,41 @@ function nativePhotoBridge(){
 const DEFECT_PHOTO_PICK_TARGET = '__defekt_application_photo__';
 let draftDefektPhoto = null;
 let draftDefektPhotoMedia = null;
-function uploadPhotoToServer(dataUrl, onStored){
+const pendingItemPhotoUploads = new Map();
+function persistPhotoState(syncServer=false){
+  flushSave();
+  if(syncServer&&window.treshkaServerSync&&typeof window.treshkaServerSync.flush==='function'){
+    Promise.resolve(window.treshkaServerSync.flush())
+      .catch(e=>console.warn('Не удалось сразу синхронизировать фото; повторим автоматически:',e));
+  }
+}
+function uploadPhotoToServer(dataUrl, onStored, onError){
+  const fail=e=>{
+    console.warn('Фото осталось внутри локального снимка:',e);
+    if(typeof onError==='function')onError(e);
+  };
   if(typeof window.treshkaStorePhoto==='function'){
     window.treshkaStorePhoto(dataUrl)
-      .then(result=>{ if(result&&result.url&&typeof onStored==='function') onStored(result); })
-      .catch(e=>console.warn('Фото осталось внутри снимка:',e));
+      .then(result=>{
+        if(result&&result.url){
+          if(typeof onStored==='function')onStored(result);
+        }else{
+          fail(new Error('Сервер не вернул ссылку на сохранённое фото'));
+        }
+      })
+      .catch(fail);
     return null;
   }
   const sync=nativeSyncBridge(),status=refreshNativeSyncStatus();
   if(!status.configured||!sync||typeof sync.uploadImage!=='function')return null;
-  try{const result=JSON.parse(sync.uploadImage(dataUrl));if(result.error){console.warn(result.error);return null;}return result;}
-  catch(e){console.warn('Фото осталось локально и будет сохранено в снимке:',e);return null;}
+  try{
+    const result=JSON.parse(sync.uploadImage(dataUrl));
+    if(result.error){fail(result.error);return null;}
+    if(!result||!result.url){fail(new Error('Сервер не вернул ссылку на сохранённое фото'));return null;}
+    if(typeof onStored==='function')onStored(result);
+    return result;
+  }
+  catch(e){fail(e);return null;}
 }
 
 function requestPhotoFromDevice(target){
@@ -3975,26 +4008,54 @@ window.onPhotoPicked = function(itemId, dataUrl, error){
   if(!dataUrl) return;
   const previousMedia=i.photoMedia;
   const originalPhoto=dataUrl;
+  pendingItemPhotoUploads.set(itemId,originalPhoto);
   i.photo = originalPhoto;
-  i.photoMedia = uploadPhotoToServer(originalPhoto, result=>{
-    if(i.photo===originalPhoto){
-      i.photo=result.url;i.photoMedia=result;
-      if(previousMedia&&previousMedia.key&&typeof window.treshkaDeletePhoto==='function')window.treshkaDeletePhoto(previousMedia.key);
-      if(currentTab==='sklad')openItem(itemId);
-    }
-  });
+  i.photoMedia = null;
   logAction('Фото товара', esc(i.name)+' — фото добавлено/заменено');
-  toast('✓ Фото сохранено');
+  persistPhotoState();
+  uploadPhotoToServer(originalPhoto, result=>{
+    if(pendingItemPhotoUploads.get(itemId)!==originalPhoto){
+      if(result.key&&typeof window.treshkaDeletePhoto==='function')window.treshkaDeletePhoto(result.key);
+      return;
+    }
+    pendingItemPhotoUploads.delete(itemId);
+    const liveItem=item(itemId);
+    if(!liveItem){
+      if(result.key&&typeof window.treshkaDeletePhoto==='function')window.treshkaDeletePhoto(result.key);
+      return;
+    }
+    liveItem.photo=result.url;
+    liveItem.photoMedia=result;
+    if(previousMedia&&previousMedia.key&&typeof window.treshkaDeletePhoto==='function'){
+      window.treshkaDeletePhoto(previousMedia.key);
+    }
+    persistPhotoState(true);
+    if(currentTab==='sklad')openItem(itemId);
+    toast('✓ Фото сохранено на сервере');
+  }, ()=>{
+    if(pendingItemPhotoUploads.get(itemId)!==originalPhoto)return;
+    pendingItemPhotoUploads.delete(itemId);
+    const liveItem=item(itemId);
+    if(liveItem){
+      liveItem.photo=originalPhoto;
+      liveItem.photoMedia=null;
+    }
+    persistPhotoState();
+    toast('⚠ Фото сохранено на устройстве; отправим на сервер при следующей синхронизации');
+  });
+  toast('✓ Фото добавлено, сохраняем на сервере…');
   openItem(itemId);
 };
 function removeItemPhoto(id){
   const i = item(id);
   if(!i || !i.photo) return;
+  pendingItemPhotoUploads.delete(id);
   const previousMedia=i.photoMedia;
   i.photo = null;
   i.photoMedia = null;
   if(previousMedia&&previousMedia.key&&typeof window.treshkaDeletePhoto==='function')window.treshkaDeletePhoto(previousMedia.key);
   logAction('Фото товара', esc(i.name)+' — фото удалено');
+  persistPhotoState(true);
   toast('Фото удалено');
   openItem(id);
 }
